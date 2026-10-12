@@ -28,7 +28,7 @@ func runCalibrate(args []string, stdout, stderr io.Writer) error {
 	fs.DurationVar(&opt.Interval, "interval", opt.Interval, "pause between runs")
 	fs.IntVar(&opt.MaxDiscards, "max-discards", opt.MaxDiscards, "runs that may be discarded because the host became busy before calibration fails")
 	out := fs.String("out", "", "write the baseline file here instead of stdout")
-	lat := fs.Bool("latency", false, "also set a latency baseline per distance (strict: a set latency has no 500 ns floor; see README)")
+	lat := fs.Bool("latency", false, "also set a latency baseline per distance (strict: a set latency has no 500 ns floor; see docs/design.md)")
 	if err := cfg.Parse(fs, args); err != nil {
 		return err
 	}
