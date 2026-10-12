@@ -1,0 +1,97 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+#
+# .deb / .rpm for hostping, built by `make package` (part of `make dist`) from
+# the files `make bin-linux-amd64` leaves in bin/linux-amd64/ and the unit that
+# `make package` derives there from contrib/systemd/hostping.service. Paths under
+# `src` are relative to the repository root. NFPM_VERSION and NFPM_ARCH come
+# from the Makefile; SOURCE_DATE_EPOCH sets the file mtimes.
+
+name: hostping
+arch: "${NFPM_ARCH}"
+platform: linux
+version: "${NFPM_VERSION}"
+section: net
+priority: optional
+maintainer: "hostping maintainers"
+description: |
+  Intra-host RDMA network diagnosis agent.
+  Measures intra-host latency and bandwidth with RNIC loopback probes and
+  RNIC-to-RNIC connectivity with mutual probes, localizes bottlenecks on the
+  PCIe, memory and inter-socket paths, and exports the results as
+  OpenTelemetry metrics (Prometheus scrape and optional OTLP push).
+homepage: https://github.com/yuuki/hostping
+license: Apache-2.0
+
+# The probe library links libibverbs.so.1 and needs IBVERBS_1.11 (rdma-core
+# 32); every artifact links against glibc 2.28 (GLIBC_VERSION in the
+# Makefile). See docs/releasing.md.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.28)
+      - libibverbs1 (>= 32)
+  rpm:
+    depends:
+      - glibc >= 2.28
+      - libibverbs >= 32
+
+contents:
+  # The binaries find libhostping_probe.so through an $ORIGIN rpath, so the
+  # three files share one directory. $ORIGIN is the resolved path of the
+  # executable, so the /usr/bin symlinks below still find the library.
+  - src: bin/linux-amd64/hostping
+    dst: /usr/lib/hostping/hostping
+    file_info:
+      mode: 0755
+  - src: bin/linux-amd64/hostpingctl
+    dst: /usr/lib/hostping/hostpingctl
+    file_info:
+      mode: 0755
+  - src: bin/linux-amd64/libhostping_probe.so
+    dst: /usr/lib/hostping/libhostping_probe.so
+    file_info:
+      mode: 0644
+  - src: /usr/lib/hostping/hostping
+    dst: /usr/bin/hostping
+    type: symlink
+  - src: /usr/lib/hostping/hostpingctl
+    dst: /usr/bin/hostpingctl
+    type: symlink
+
+  - src: bin/linux-amd64/hostping.service
+    dst: /usr/lib/systemd/system/hostping.service
+    file_info:
+      mode: 0644
+  # The default HOSTPING_OPTS runs as is, so this is the live file, kept
+  # across upgrades once edited.
+  - src: contrib/systemd/hostping.default
+    dst: /etc/default/hostping
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: LICENSE
+    dst: /usr/share/doc/hostping/LICENSE
+    file_info:
+      mode: 0644
+  - src: NOTICE
+    dst: /usr/share/doc/hostping/NOTICE
+    file_info:
+      mode: 0644
+  - src: PATENTS.md
+    dst: /usr/share/doc/hostping/PATENTS.md
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/hostping/README.md
+    file_info:
+      mode: 0644
+  - src: docs/operations.md
+    dst: /usr/share/doc/hostping/operations.md
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/nfpm/scripts/postinstall.sh
+  preremove: packaging/nfpm/scripts/preremove.sh
+  postremove: packaging/nfpm/scripts/postremove.sh

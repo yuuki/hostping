@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Keep the toolchain versions in sync with mise.toml and the Dockerfile.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.2'
+          cache: true
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # The Zig probe library and the cgo package internal/zigprobe link
+      # against libibverbs on Linux.
+      - name: Install libibverbs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libibverbs-dev
+
+      # Needed before vet/staticcheck: cgo has to link internal/zigprobe.
+      - name: Build Zig probe library
+        run: make zig
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # staticcheck v0.8.1 pins an x/tools that cannot read Go 1.27.2 export
+      # data (dominikh/go-tools#1832), so build it against a newer x/tools.
+      # Go back to `go run ...@<version>` once a fixed release is out.
+      - name: staticcheck
+        run: |
+          sc=$(mktemp -d)
+          (cd "$sc" && go mod init staticcheck-build &&
+            go get honnef.co/go/tools/cmd/staticcheck@v0.8.1 golang.org/x/tools@v0.51.0 &&
+            go build -o "$sc/staticcheck" honnef.co/go/tools/cmd/staticcheck)
+          "$sc/staticcheck" ./...
+
+      - name: zig fmt
+        run: zig fmt --check src
+        working-directory: zig
+
+      - name: make test
+        run: make test
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.2'
+          cache: true
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install libibverbs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libibverbs-dev
+
+      - name: Build Zig probe library
+        run: make zig
+
+      # Pinned so a govulncheck release cannot change the gate underneath us.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

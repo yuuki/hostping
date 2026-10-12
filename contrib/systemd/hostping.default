@@ -1,0 +1,55 @@
+# /etc/default/hostping — read by hostping.service.
+#
+# HOSTPING_OPTS is passed to the daemon on its command line, split on
+# whitespace (quotes are not parsed, so no value may contain a space).
+# Every flag is listed by `hostping -h`; the README documents each one.
+# Restart the service after editing: systemctl restart hostping
+
+# Default: Prometheus /metrics and /healthz on :9464 (every interface), idle
+# full-mesh run every 5m, PFC/drop busy runs at most every 30s, no periodic
+# busy run, mutual probe within each rail.
+HOSTPING_OPTS=""
+
+# A typical production line. Bind /metrics to the management address: without
+# --metrics-web-config the endpoint is plain HTTP without authentication. An
+# address that cannot be bound fails the start (the unit retries every 30s).
+#HOSTPING_OPTS="--metrics 10.0.0.10:9464 --baseline-file /etc/hostping/baselines.json"
+
+# Other common options (append to HOSTPING_OPTS):
+#   --idle-interval 15m        idle full-mesh run less often than every 5m
+#   --busy-cooldown 5m         fewer PFC/drop-triggered busy runs on a fabric
+#                              that pauses routinely (each costs the workload
+#                              a 1-2 s dip; see docs/operations.md)
+#   --busy-interval 0          periodic busy run, off by default; if enabled,
+#                              use minutes (e.g. 30m), never seconds
+#   --mutual-scope host        also probe across rails (only where rails route
+#                              to each other)
+#   --exclude-rnic mlx5_4,mlx5_5
+#                              leave RDMA devices that are not data-path NICs
+#                              (e.g. a fabric-management HCA) out of discovery:
+#                              never probed, paired or exported
+#   --metrics=                 no /metrics listener (OTLP only)
+#   --metrics-web-config /etc/hostping/web.yml
+#                              TLS and/or basic auth on /metrics (Prometheus
+#                              exporter-toolkit web config; see
+#                              docs/operations.md)
+#   --report-file /var/log/hostping/reports.jsonl
+#                              also append each report as one JSON line to a
+#                              file (reopened per report: logrotate-safe)
+#   --report-format=none       no report on stdout, so none in the journal
+#                              (default json: one line per report)
+#   --state-dir /var/lib/hostping
+#                              keep flapping streaks and the idle-run cadence
+#                              across a daemon restart (not across a reboot;
+#                              the unit's StateDirectory= creates the path)
+
+# OTLP gRPC push. Unset: no OTLP. host:port is TLS with the system roots,
+# except on a loopback host (localhost, 127.0.0.1, ::1), which is plaintext;
+# http:// or https:// in front decides explicitly.
+#OTEL_EXPORTER_OTLP_ENDPOINT=10.0.0.20:4317
+# A plaintext collector on another host (before this option existed every
+# endpoint was plaintext; set this when upgrading if your collector has no TLS):
+#OTEL_EXPORTER_OTLP_INSECURE=true
+# TLS against a private CA, and headers such as a collector token:
+#OTEL_EXPORTER_OTLP_CERTIFICATE=/etc/hostping/otlp-ca.crt
+#OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20<token>

@@ -1,0 +1,138 @@
+name: Release
+
+# Builds the linux-amd64 tarball, .deb and .rpm for a vX.Y.Z tag and attaches
+# them, with SHA256SUMS, to a GitHub Release whose notes are the tag's section
+# of CHANGELOG.md. The build is the same `make docker-dist` that
+# docs/releasing.md describes for a manual release: the dev container on an
+# arm64 runner, cross-compiling to x86_64 against the pinned glibc baseline.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build linux-amd64 tarball and packages
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag $tag is not vX.Y.Z" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Fail before the long build if the release has no notes.
+      - name: Check CHANGELOG.md
+        run: grep -qF "## [${{ steps.version.outputs.version }}]" CHANGELOG.md
+
+      - name: make docker-test
+        run: make docker-test
+
+      - name: make docker-dist
+        run: make docker-dist VERSION="${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  verify:
+    name: Run the tarball and packages on amd64
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Install libibverbs runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libibverbs1
+
+      - name: Checksum, extract, run
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS
+          tar xzf hostping-*-linux-amd64.tar.gz
+          d=$(find . -maxdepth 1 -type d -name 'hostping-*' | head -n 1)
+          "$d/hostping" --version
+          "$d/hostpingctl" version
+          "$d/hostpingctl" diagnose --sim > /dev/null
+
+      - name: Install the .deb
+        working-directory: dist
+        run: |
+          sudo apt-get install -y --no-install-recommends ./hostping_*_amd64.deb
+          hostping --version
+          hostpingctl diagnose --sim > /dev/null
+          systemd-analyze verify /usr/lib/systemd/system/hostping.service
+          sudo apt-get remove -y hostping
+          test ! -e /usr/lib/hostping/hostping
+
+      # The oldest supported glibc (2.28); dnf pulls libibverbs from the
+      # distribution.
+      - name: Install the .rpm on Rocky Linux 8
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:8 sh -euxc '
+            dnf install -y /dist/hostping-*.x86_64.rpm
+            hostping --version
+            hostpingctl diagnose --sim > /dev/null
+            dnf remove -y hostping
+            test ! -e /usr/lib/hostping/hostping'
+
+  publish:
+    name: Publish GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            index($0, "## [" version "]") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --verify-tag \
+            dist/*.tar.gz dist/*.deb dist/*.rpm dist/SHA256SUMS

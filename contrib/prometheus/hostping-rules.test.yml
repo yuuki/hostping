@@ -1,0 +1,280 @@
+# promtool test rules contrib/prometheus/hostping-rules.test.yml
+rule_files:
+  - hostping-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Diagnosis series that first appear 5 minutes in (a counter series exists
+  # only from the first run that emits its code and confidence).
+  - interval: 1m
+    input_series:
+      # Two runs: page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="gpu_pcie_failure",confidence="high"}'
+        values: '_x5 1x4 2x30'
+      # Package mesh (sub-NUMA clustering), two runs: pages like upi_failure.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="snc_mesh_failure",confidence="high"}'
+        values: '_x5 1x4 2x30'
+      # One run: no page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_pcie_failure",confidence="high"}'
+        values: '_x5 1x35'
+      # One run naming two links: still one run, no page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="memory_channel_failure",confidence="high"}'
+        values: '_x5 2x35'
+      # Medium, two runs: ticket.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_pcie_failure",confidence="medium"}'
+        values: '_x5 1x4 2x30'
+      # High but not a hardware-fault code, two runs: ticket.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="acs_enabled",confidence="high"}'
+        values: '_x5 1x4 2x30'
+      # Advisory, two runs: info only.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="path_latency_abnormal",confidence="medium"}'
+        values: '_x5 1x4 2x30'
+      # Advisory at low (a slot narrower than the RNIC by design), two runs:
+      # info only, never a page or a ticket.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_pcie_undersized",confidence="low"}'
+        values: '_x5 1x4 2x30'
+      # Topology-expected on a rail-optimized host, every run: nothing.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_cross_rail_unreachable",confidence="low"}'
+        values: '_x5 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: HostpingHardwareFault
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: HostpingHardwareFault
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hostping
+              instance: host-a:9464
+              code: gpu_pcie_failure
+              confidence: high
+            exp_annotations:
+              summary: "hostping: gpu_pcie_failure on host-a:9464"
+              description: "hostping reported gpu_pcie_failure at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#gpu_pcie_failure"
+          - exp_labels:
+              severity: critical
+              job: hostping
+              instance: host-a:9464
+              code: snc_mesh_failure
+              confidence: high
+            exp_annotations:
+              summary: "hostping: snc_mesh_failure on host-a:9464"
+              description: "hostping reported snc_mesh_failure at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#snc_mesh_failure"
+      - eval_time: 12m
+        alertname: HostpingDiagnosis
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-a:9464
+              code: acs_enabled
+              confidence: high
+            exp_annotations:
+              summary: "hostping: acs_enabled (high) on host-a:9464"
+              description: "hostping reported acs_enabled at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#acs_enabled"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-a:9464
+              code: rnic_pcie_failure
+              confidence: medium
+            exp_annotations:
+              summary: "hostping: rnic_pcie_failure (medium) on host-a:9464"
+              description: "hostping reported rnic_pcie_failure at confidence medium in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_pcie_failure"
+      - eval_time: 12m
+        alertname: HostpingAdvisoryDiagnosis
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-a:9464
+              code: path_latency_abnormal
+              confidence: medium
+            exp_annotations:
+              summary: "hostping: advisory path_latency_abnormal on host-a:9464"
+              description: "hostping reported path_latency_abnormal at confidence medium in 2 engine runs within 30 minutes. It changes no path or link status."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#path_latency_abnormal"
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-a:9464
+              code: rnic_pcie_undersized
+              confidence: low
+            exp_annotations:
+              summary: "hostping: advisory rnic_pcie_undersized on host-a:9464"
+              description: "hostping reported rnic_pcie_undersized at confidence low in 2 engine runs within 30 minutes. It changes no path or link status."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_pcie_undersized"
+      # Persistence expires: the last gpu_pcie_failure change was at 10m, so
+      # by 41m the 30-minute window holds no run.
+      - eval_time: 41m
+        alertname: HostpingHardwareFault
+        exp_alerts: []
+
+  # Series that already existed before the window (a long-running daemon).
+  - interval: 1m
+    input_series:
+      # One new run on an old series: no page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-b:9464",otel_scope_name="github.com/yuuki/hostping",code="upi_failure",confidence="high"}'
+        values: '3x40 4x40'
+      # Two new runs: page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-b:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_connectivity_failure",confidence="high"}'
+        values: '1x40 2x5 3x35'
+    promql_expr_test:
+      - eval_time: 60m
+        expr: hostping:diagnosis_runs:30m
+        exp_samples:
+          - labels: 'hostping:diagnosis_runs:30m{job="hostping",instance="host-b:9464",code="upi_failure",confidence="high"}'
+            value: 1
+          - labels: 'hostping:diagnosis_runs:30m{job="hostping",instance="host-b:9464",code="rnic_connectivity_failure",confidence="high"}'
+            value: 2
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: HostpingHardwareFault
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: hostping
+              instance: host-b:9464
+              code: rnic_connectivity_failure
+              confidence: high
+            exp_annotations:
+              summary: "hostping: rnic_connectivity_failure on host-b:9464"
+              description: "hostping reported rnic_connectivity_failure at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_connectivity_failure"
+
+  # Staleness. Test time starts at the Unix epoch, so a timestamp of 0 is
+  # "at the start of the test".
+  - interval: 1m
+    input_series:
+      # Idle host whose last success was at 0: fires.
+      - series: 'hostping_engine_last_success_timestamp_seconds{job="hostping",instance="idle:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0x40'
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="idle:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="idle:9464"}'
+        values: '0x40'
+      # Busy host with the same stale success: does not fire.
+      - series: 'hostping_engine_last_success_timestamp_seconds{job="hostping",instance="busy:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0x40'
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="busy:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="busy:9464"}'
+        values: '0x40'
+      # Idle host that succeeds every minute: does not fire.
+      - series: 'hostping_engine_last_success_timestamp_seconds{job="hostping",instance="healthy:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0+60x40'
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="healthy:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="healthy:9464"}'
+        values: '0x40'
+      # Idle host, up since 0, never succeeded: fires.
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="never:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="never:9464"}'
+        values: '0x40'
+      # Idle host started at 20m, no success yet: still within its grace.
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="fresh:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '_x20 1x20'
+      - series: 'process_start_time_seconds{job="hostping",instance="fresh:9464"}'
+        values: '_x20 1200x20'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HostpingNoSuccessfulRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: idle:9464
+              otel_scope_name: github.com/yuuki/hostping
+            exp_annotations:
+              summary: "hostping on idle:9464 makes no diagnosis on an idle host"
+              description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: never:9464
+              otel_scope_name: github.com/yuuki/hostping
+            exp_annotations:
+              summary: "hostping on never:9464 makes no diagnosis on an idle host"
+              description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+
+  # Agent health.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="hostping",instance="down:9464"}'
+        values: '1x5 0x20'
+      - series: 'up{job="hostping",instance="up:9464"}'
+        values: '1x25'
+      - series: 'hostping_engine_run_failed_total{job="hostping",instance="fail:9464",otel_scope_name="github.com/yuuki/hostping",stage="report"}'
+        values: '0x10 1x20'
+      - series: 'hostping_engine_run_failed_total{job="hostping",instance="fail:9464",otel_scope_name="github.com/yuuki/hostping",stage="engine"}'
+        values: '0x30'
+      - series: 'hostping_monitor_poll_errors_total{job="hostping",instance="fail:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HostpingTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: down:9464
+            exp_annotations:
+              summary: "hostping on down:9464 cannot be scraped"
+              description: "The /metrics endpoint has not answered for 5 minutes: the daemon is down, restarting, or the address or firewall changed. No hostping diagnosis is made for this host."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingtargetdown"
+      - eval_time: 15m
+        alertname: HostpingRunsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: fail:9464
+              stage: report
+            exp_annotations:
+              summary: "hostping runs fail on fail:9464 (stage report)"
+              description: "Engine runs returned an error (stage=engine) or their confirmed report could not be written (stage=report) within the last 15 minutes."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingrunsfailing"
+      - eval_time: 15m
+        alertname: HostpingMonitorPollErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: fail:9464
+            exp_annotations:
+              summary: "hostping monitor polls fail on fail:9464"
+              description: "Monitor polls have returned errors for 10 minutes: RNIC counters or GPU state cannot be read, so no run is triggered."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingmonitorpollerrors"
+
+  # Skipped endpoints.
+  - interval: 1m
+    input_series:
+      - series: 'hostping_endpoint_skipped{job="hostping",instance="host-c:9464",otel_scope_name="github.com/yuuki/hostping",kind="gpu"}'
+        values: '1x90'
+      - series: 'hostping_endpoint_skipped{job="hostping",instance="host-c:9464",otel_scope_name="github.com/yuuki/hostping",kind="memory"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HostpingEndpointsSkipped
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HostpingEndpointsSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-c:9464
+              kind: gpu
+            exp_annotations:
+              summary: "hostping skips 1 gpu endpoint(s) on host-c:9464"
+              description: "Loopback probes to 1 gpu endpoint(s) have been skipped for an hour, so paths to them are not diagnosed. The journal and the report's skipped_endpoints give the reason."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingendpointsskipped"

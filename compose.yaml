@@ -1,0 +1,14 @@
+services:
+  dev:
+    build: .
+    image: hostping-dev
+    platform: linux/arm64
+    working_dir: /src
+    volumes:
+      - .:/src
+    environment:
+      GOCACHE: /tmp/go-cache
+      GOMODCACHE: /tmp/gomod-cache
+      ZIG_LOCAL_CACHE_DIR: /tmp/zig-local
+      ZIG_GLOBAL_CACHE_DIR: /tmp/zig-global
+    command: make test

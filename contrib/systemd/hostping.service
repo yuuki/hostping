@@ -1,0 +1,93 @@
+# hostping intra-host RDMA diagnosis agent.
+#
+# Install layout (see docs/operations.md):
+#   /opt/hostping/<version>/{hostping,hostpingctl,libhostping_probe.so}
+#   /opt/hostping/current -> <version>
+#   /etc/default/hostping  (HOSTPING_OPTS, OTEL_EXPORTER_OTLP_ENDPOINT)
+# The binaries find libhostping_probe.so through an $ORIGIN rpath, so the
+# three files must stay in one directory. The .deb/.rpm install them in
+# /usr/lib/hostping/ and ship this unit with ExecStart rewritten to that
+# directory (make package).
+#
+# Not yet run under systemd on RDMA hardware. The hardening below is limited
+# to directives that leave device nodes, sysfs, PCI config space, nvidia-smi
+# and ethtool untouched; see the commented block for the ones left out.
+
+[Unit]
+Description=hostping intra-host RDMA diagnosis agent
+Documentation=https://github.com/yuuki/hostping/blob/main/docs/operations.md
+# Discovery walks /sys/class/infiniband once, at start: start after the RDMA
+# and GPU drivers are up and the --metrics address exists. Ordering against a
+# unit that is not installed is a no-op.
+Wants=network-online.target
+After=network-online.target rdma-hw.target nvidia-persistenced.service
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/default/hostping
+# $HOSTPING_OPTS is split on whitespace; quotes inside it are not parsed.
+ExecStart=/opt/hostping/current/hostping $HOSTPING_OPTS
+
+# Host memory regions registered with ibv_reg_mr count against
+# RLIMIT_MEMLOCK unless the process has CAP_IPC_LOCK (root does). hostping
+# never raises the limit itself.
+LimitMEMLOCK=infinity
+
+# Startup failures (no RNIC discovered yet, a rejected flag) exit non-zero.
+Restart=on-failure
+RestartSec=30s
+
+# SIGTERM is honored between probes, not during one. A loopback probe stops
+# within --timeout (5s) of a stalled transfer; a mutual burst against a pair
+# that does not answer can wait up to --iters x --mutual-timeout (32s at the
+# defaults). The final OTLP push is bounded by the exporter's own timeout.
+KillSignal=SIGTERM
+TimeoutStopSec=90s
+
+# /var/log/hostping for --report-file (one JSON line per report). Unused,
+# and harmless, without it.
+LogsDirectory=hostping
+LogsDirectoryMode=0750
+
+# /var/lib/hostping for --state-dir (flapping streaks and the idle-run cadence
+# across a restart; see docs/operations.md). Unused, and harmless, without it.
+StateDirectory=hostping
+StateDirectoryMode=0700
+
+# Runs as root by default: extended PCI config space (ACS/ATS) is readable
+# only by root. To run unprivileged, see docs/operations.md and uncomment:
+#User=hostping
+#Group=hostping
+# Only if your distribution restricts /dev/infiniband/uverbs* or /dev/nvidia*
+# to a group (check with ls -l):
+#SupplementaryGroups=rdma video
+# Only with --uncore-util, on a host with kernel.perf_event_paranoid > 0:
+#AmbientCapabilities=CAP_PERFMON
+#CapabilityBoundingSet=CAP_PERFMON
+
+# Hardening that touches neither devices, sysfs nor the network.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Considered and left out (unverified, or known to break a data source):
+#PrivateDevices=yes            # hides /dev/infiniband and /dev/nvidia*: no verbs, no GDR
+#DevicePolicy=closed           # same, unless every uverbs/nvidia node is in DeviceAllow=
+#ProtectKernelTunables=yes     # remounts /sys read-only; hostping only reads it, but not tested with GPU tools
+#ProtectKernelModules=yes      # drops CAP_SYS_MODULE: CUDA cannot load nvidia_uvm on demand
+#PrivateTmp=yes                # hides /tmp/nvidia-mps: a GPU under MPS is reached without it
+#PrivateNetwork=yes            # no RNIC netdevs, no ethtool, no /metrics
+#RestrictAddressFamilies=      # needs AF_NETLINK, AF_INET, AF_INET6, AF_UNIX at least (verbs, ethtool, nvidia-smi)
+#SystemCallFilter=@system-service  # verbs and the GPU drivers use ioctl/mmap beyond any tested set
+#MemoryDenyWriteExecute=yes    # the CUDA/HIP runtimes may map executable memory
+#ProtectSystem=strict          # read-only /var and /run except LogsDirectory= (--report-file) and StateDirectory= (--state-dir); not tested
+#ProtectProc=invisible         # nvidia-smi and the GPU runtimes read /proc; not tested
+#ProtectKernelLogs=yes         # not needed by hostping; not tested with the GPU runtimes
+
+[Install]
+WantedBy=multi-user.target

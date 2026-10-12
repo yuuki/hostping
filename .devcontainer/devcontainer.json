@@ -1,0 +1,22 @@
+{
+  "name": "hostping",
+  "build": {
+    "context": "..",
+    "dockerfile": "../Dockerfile"
+  },
+  "runArgs": ["--platform=linux/arm64"],
+  "workspaceFolder": "/src",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/src,type=bind",
+  "containerEnv": {
+    "GOCACHE": "/tmp/go-cache",
+    "GOMODCACHE": "/tmp/gomod-cache",
+    "ZIG_LOCAL_CACHE_DIR": "/tmp/zig-local",
+    "ZIG_GLOBAL_CACHE_DIR": "/tmp/zig-global"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go", "ziglang.vscode-zig"]
+    }
+  },
+  "postCreateCommand": "zig version && go version"
+}

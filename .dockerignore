@@ -1,0 +1,11 @@
+.git
+.agents
+.bin
+/bin
+zig/zig-out
+zig/.zig-cache
+zig/zig-cache
+*.o
+*.a
+*.so
+*.dylib

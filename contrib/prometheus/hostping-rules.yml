@@ -1,0 +1,164 @@
+# Prometheus alerting rules for hostping.
+#
+# Metric names are as the daemon's /metrics renders them (OpenTelemetry
+# Prometheus exporter: dots become underscores, counters gain _total, and
+# second-valued gauges gain _seconds). Every hostping series also carries the
+# constant otel_scope_name / otel_scope_version / otel_scope_schema_url labels;
+# the rules aggregate them away.
+#
+# The rules assume the scrape job is named "hostping" and that `instance`
+# identifies the host. Adjust the `job` matchers if yours differ.
+#
+# Paging policy (see docs/runbook.md for each code):
+#   - critical (page): a hardware-fault code at confidence "high", seen in at
+#     least two separate engine runs within 30 minutes. One run never pages:
+#     busy-mode verdicts keep a small per-run false-positive rate, and hostping
+#     itself does not require persistence across runs. `snc_mesh_failure` (the
+#     on-package fabric between NUMA nodes under sub-NUMA clustering) pages
+#     like `upi_failure`.
+#   - warning (ticket): every other code at "high" or "medium" (configuration,
+#     load and fabric findings), with the same two-run persistence.
+#   - info: the advisory codes (`path_latency_abnormal`,
+#     `gpu_mr_registration_slow`, `rnic_pcie_undersized`) and `unknown`, which
+#     never change a path or link status, with the same persistence.
+#   - no alert: `rnic_cross_rail_unreachable` at "low", which is what isolated
+#     rails look like by design under --mutual-scope=host.
+groups:
+  - name: hostping-diagnosis
+    rules:
+      # Number of engine runs, per host, code and confidence, that reported the
+      # code within the last 30 minutes.
+      #
+      # changes() counts runs rather than causes: one run that names the same
+      # code for two subjects (two GPUs, two RNICs) adds 2 to the counter but is
+      # still one run. A counter series exists only from the first run that
+      # emits its (code, confidence), and increase()/changes() cannot see that
+      # first increment, so a series that did not exist 30 minutes ago counts
+      # its first appearance as one more run. Two runs that land between the
+      # same two scrapes count as one, which errs toward not paging.
+      - record: hostping:diagnosis_runs:30m
+        expr: |
+          sum by (job, instance, code, confidence) (
+              changes(hostping_diagnosis_count_total[30m])
+            +
+              (
+                  (hostping_diagnosis_count_total * 0 + 1
+                    unless hostping_diagnosis_count_total offset 30m)
+                or
+                  changes(hostping_diagnosis_count_total[30m]) * 0
+              )
+          )
+
+      - alert: HostpingHardwareFault
+        expr: |
+          hostping:diagnosis_runs:30m{confidence="high", code=~"rnic_pcie_failure|gpu_pcie_failure|memory_channel_failure|memory_channel_flapping|upi_failure|snc_mesh_failure|cpu_root_port_failure|rnic_connectivity_failure|rnic_intermittent_timeout"} >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "hostping: {{ $labels.code }} on {{ $labels.instance }}"
+          description: "hostping reported {{ $labels.code }} at confidence high in {{ $value }} engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#{{ $labels.code }}"
+
+      - alert: HostpingDiagnosis
+        expr: |
+          (
+            hostping:diagnosis_runs:30m{confidence="high", code!~"rnic_pcie_failure|gpu_pcie_failure|memory_channel_failure|memory_channel_flapping|upi_failure|snc_mesh_failure|cpu_root_port_failure|rnic_connectivity_failure|rnic_intermittent_timeout|path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+          )
+          or
+          (
+            hostping:diagnosis_runs:30m{confidence="medium", code!~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+          )
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping: {{ $labels.code }} ({{ $labels.confidence }}) on {{ $labels.instance }}"
+          description: "hostping reported {{ $labels.code }} at confidence {{ $labels.confidence }} in {{ $value }} engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#{{ $labels.code }}"
+
+      - alert: HostpingAdvisoryDiagnosis
+        expr: |
+          hostping:diagnosis_runs:30m{code=~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+        labels:
+          severity: info
+        annotations:
+          summary: "hostping: advisory {{ $labels.code }} on {{ $labels.instance }}"
+          description: "hostping reported {{ $labels.code }} at confidence {{ $labels.confidence }} in {{ $value }} engine runs within 30 minutes. It changes no path or link status."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#{{ $labels.code }}"
+
+  - name: hostping-liveness
+    rules:
+      - alert: HostpingTargetDown
+        expr: up{job="hostping"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping on {{ $labels.instance }} cannot be scraped"
+          description: "The /metrics endpoint has not answered for 5 minutes: the daemon is down, restarting, or the address or firewall changed. No hostping diagnosis is made for this host."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingtargetdown"
+
+      # Idle runs start every --idle-interval (default 5m) while the host is
+      # idle, so three intervals of an idle host with no confirmed run means
+      # the engine is not producing diagnoses. The second branch covers a daemon
+      # that has been up for 15 minutes and never succeeded (the timestamp is
+      # absent until the first success). Adjust 900 / 15m to 3 × your
+      # --idle-interval.
+      - alert: HostpingNoSuccessfulRun
+        expr: |
+          (
+              time() - hostping_engine_last_success_timestamp_seconds > 900
+            and on (job, instance)
+              min_over_time(hostping_monitor_host_idle[15m]) == 1
+          )
+          or
+          (
+              min_over_time(hostping_monitor_host_idle[15m]) == 1
+            and on (job, instance)
+              time() - process_start_time_seconds > 900
+            unless on (job, instance)
+              hostping_engine_last_success_timestamp_seconds
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping on {{ $labels.instance }} makes no diagnosis on an idle host"
+          description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+
+      - alert: HostpingRunsFailing
+        expr: |
+          sum by (job, instance, stage) (rate(hostping_engine_run_failed_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping runs fail on {{ $labels.instance }} (stage {{ $labels.stage }})"
+          description: "Engine runs returned an error (stage=engine) or their confirmed report could not be written (stage=report) within the last 15 minutes."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingrunsfailing"
+
+      - alert: HostpingMonitorPollErrors
+        expr: |
+          sum by (job, instance) (rate(hostping_monitor_poll_errors_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping monitor polls fail on {{ $labels.instance }}"
+          description: "Monitor polls have returned errors for 10 minutes: RNIC counters or GPU state cannot be read, so no run is triggered."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingmonitorpollerrors"
+
+  - name: hostping-endpoints
+    rules:
+      # The skip reason is not a label (it is free-form probe text), so this
+      # also fires for GPUs deliberately run in Exclusive_Process or Prohibited
+      # compute mode. Silence or drop it on such hosts.
+      - alert: HostpingEndpointsSkipped
+        expr: |
+          max by (job, instance, kind) (hostping_endpoint_skipped) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping skips {{ $value }} {{ $labels.kind }} endpoint(s) on {{ $labels.instance }}"
+          description: "Loopback probes to {{ $value }} {{ $labels.kind }} endpoint(s) have been skipped for an hour, so paths to them are not diagnosed. The journal and the report's skipped_endpoints give the reason."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingendpointsskipped"
