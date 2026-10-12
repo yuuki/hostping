@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-13
+
 ### Changed
 
 - The README is reduced to an overview, install and usage. The reference
