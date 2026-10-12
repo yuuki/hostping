@@ -602,6 +602,113 @@ code, which matters only to `sum()`. 0.1.1 had no latency series for a few
 and reason gauges, every pair is representable. After the upgrade, the old
 series stop being scraped and go stale after Prometheus's 5-minute lookback.
 
+## Topology graph
+
+Two more info gauges describe the host's intra-host topology as a graph, for
+Grafana's built-in Node Graph panel. They are always 1, fixed at start-up from
+the discovered graph (or the `--sim` / `--topology-file` one), and exported
+from the first scrape. RNICs dropped by `--exclude-rnic` are not in it.
+
+| Series | Labels |
+| --- | --- |
+| `hostping_topology_node_info` | `node`, `kind`, `title`, `socket`; `numa` where the node has one NUMA node; `pcie_bdf` on PCI nodes (root port, switch, RNIC, GPU) |
+| `hostping_topology_edge_info` | `edge`, `link`, `source`, `target`, `kind`, `capacity_bps`, `negotiated_bps`, `capacity_assumed` |
+
+Nodes, by `kind`:
+
+| `kind` | `node` | `title` |
+| --- | --- | --- |
+| `socket` | `socketN` | `socket N` |
+| `numa` | `numaN`, only on a package split by sub-NUMA clustering | `NUMA N` |
+| `memory` | `memN`, as `hostping_endpoint_info` | `memN (NUMA N)` |
+| `root_port` | `rp.<BDF>`, the root-port link's ID | `root port <BDF>` |
+| `switch` | `sw.<BDF>` of the switch's upstream port, the switch link's ID | `switch <BDF>` |
+| `rnic` | `rnicN`, as `hostping_rnic_info` | IB device (`mlx5_N`) |
+| `gpu` | `gpuN`, as `hostping_endpoint_info` | `gpuN <BDF>` |
+
+The simulator's root ports and switches have no PCI address (`rp.0`, `sw.0`).
+Their `pcie_bdf` is `unknown`, and their title names the ID.
+
+Each link of the graph is one edge, with `edge` and `link` both set to the
+link ID that `hostping_link_status_code`, `hostping_link_abnormal_count` and
+`hostping_bus_utilization` carry as `link`. An edge points from the CPU side
+(`source`) to the device side (`target`), and between two packages or two NUMA
+nodes from the lower number to the higher. `kind` is the link kind:
+
+| `kind` | `source` → `target` |
+| --- | --- |
+| `root_port` | package (or NUMA node) → root port |
+| `pcie_switch` | root port or upper switch → switch |
+| `pcie_rnic`, `pcie_gpu` | switch, or root port when no switch is between them → RNIC or GPU |
+| `memory` | package (or NUMA node) → memory node |
+| `upi` | package → package |
+| `snc_mesh` | NUMA node → NUMA node of the same package |
+| `package` | package → NUMA node; a structural edge with `link="none"` and capacity 0 |
+
+Switches follow the sysfs parent chain. A cascaded switch (two-level PEX890xx)
+hangs off the upper switch, and devices on different downstream ports of one
+switch share it as their source. Without a `pcie_type` attribute every bridge
+port is its own switch node, chained the same way. A `--topology-file` written
+before 0.1.4 has no `upstream` on its links. Its devices then hang off their
+`switch` field, or their root port.
+
+Consecutive links of a path share a node, so `link_ids` of a report's path
+walk the edges from the RNIC to the endpoint. Under sub-NUMA clustering a path
+that leaves the package also crosses a `package` edge it does not list. A
+DMA between two devices under one switch turns at that switch and does not
+cross the edges above it.
+
+### Grafana Node Graph
+
+The panel takes two data frames: nodes and edges. Use two queries against the
+Prometheus data source, both **Format: Table** and **Type: Instant**:
+
+- A (nodes): `hostping_topology_node_info{instance="$instance"}`
+- B (edges): `hostping_topology_edge_info{instance="$instance"}`
+
+The panel picks up a frame by its field names. Add an **Organize fields by
+name** transformation per query (**Filter data by query refId** A, then B) that
+hides `Time`, `Value`, `__name__`, `job`, `instance` and the `otel_scope_*`
+labels and renames:
+
+| Query | Field | Rename to |
+| --- | --- | --- |
+| A | `node` | `id` |
+| A | `title` | `title` |
+| A | `kind` | `subtitle` |
+| A | `pcie_bdf` | `detail__pcie_bdf` |
+| A | `numa` | `detail__numa` |
+| B | `edge` | `id` |
+| B | `source` | `source` |
+| B | `target` | `target` |
+| B | `kind` | `detail__kind` |
+| B | `capacity_bps` | `secondarystat` |
+
+To color the edges by link state and show it as their main stat, join the
+edges to `hostping_link_status_code`. Make B the join instead of the raw info
+series:
+
+```promql
+hostping_topology_edge_info{instance="$instance"}
+  * on (instance, link) group_left
+    hostping_link_status_code{instance="$instance"}
+```
+
+Its value is the link's status code. Structural edges and links no run has
+reported yet drop out of the product. Rename `Value #B` to `mainstat` and apply
+the value mappings of [Grafana](#grafana) (1 green, 2 yellow, 3 red, 4 orange)
+to it. To color by utilization, join `hostping_bus_utilization` the same way;
+only hops with a live source have one. The node frame can color by kind with a
+`color` field from `label_replace` or a value mapping on `subtitle`. A table of
+the raw info series is often enough to check a host:
+
+```promql
+# Every switch with what hangs off it.
+count by (instance, source) (hostping_topology_edge_info{kind=~"pcie_.*"})
+  * on (instance, source) group_left (title)
+    label_replace(hostping_topology_node_info{kind="switch"}, "source", "$1", "node", "(.*)")
+```
+
 ## Alerting rules
 
 [`contrib/prometheus/hostping-rules.yml`](../contrib/prometheus/hostping-rules.yml)
@@ -635,6 +742,8 @@ host. Notation:
 | E | Loopback endpoints: GPUs (E_gpu) plus NUMA memory nodes (E_mem) |
 | P | Measured RNIC→endpoint paths, at most R × E: P_gpu to GPUs, P_mem to memory |
 | L | Topology links: one `pcie.<rnic>` per RNIC, one `pcie.<gpu>` per GPU, plus root ports, switches, `mem.N`, inter-socket links and, under sub-NUMA clustering, `mesh.A-B` links between NUMA nodes of one package (`hostpingctl topology` lists them) |
+| K | Topology graph nodes besides RNICs and endpoints: CPU packages, root ports, switches and, under sub-NUMA clustering, NUMA nodes |
+| S | NUMA nodes of packages split by sub-NUMA clustering (0 without it): one structural `package` edge each |
 | M | Mutual pairs: unordered RNIC pairs on a shared rail under `--mutual-scope=rail` (0 on a rail-optimized host), R × (R − 1) / 2 under `--mutual-scope=host` |
 
 | Series | Count | Labels that multiply |
@@ -653,13 +762,15 @@ host. Notation:
 | `hostping_engine_run_count_total` | T ≤ 6 for the daemon | `trigger` × `mode`: idle × {`idle`, `mutual_timeout`}, busy × {`pfc`, `packet_drops`, `periodic`, `mutual_timeout`} |
 | `hostping_rnic_info` | R | `rnic` (the other labels are fixed per RNIC) |
 | `hostping_endpoint_info` | E | `endpoint` (the other labels are fixed per endpoint) |
+| `hostping_topology_node_info` | R + E + K | `node` (the other labels are fixed per node) |
+| `hostping_topology_edge_info` | L + S | `edge` (the other labels are fixed per edge) |
 | `hostping_status_code_info` | 28 | `metric` × `code`: fixed by the code tables, whatever the host |
 | Liveness: `hostping_host_idle`, `hostping_monitor_host_idle`, three `*_timestamp_seconds`, `hostping_engine_run_failed_total` (2 `stage`), `hostping_engine_run_discarded_total` (2 `reason`), `hostping_monitor_poll_errors_total`, `hostping_build_info` | 11 | |
 
 Per host:
 
 ```
-series ≈ 10 P_gpu + 9 P_mem + 2 L + U + 3 M + 4 R + E + N + 41 + D + T
+series ≈ 10 P_gpu + 9 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T
 ```
 
 U ≤ L is the number of links with a utilization source. The Prometheus client
@@ -670,8 +781,8 @@ series and the 28 `hostping_status_code_info` series.
 The path terms dominate. Each RNIC→endpoint pair costs about 10 series, so a
 host grows with R × E. `--metrics-verb-durations=false` drops
 `hostping_verb_duration_microseconds`, the 3 P_gpu + 2 P_mem of those terms,
-leaving 7 series per path (the Fig.2 sim host below scrapes 412 instead of
-524). The probes still time the verbs, and the report's `verb_ns` and the
+leaving 7 series per path (the Fig.2 sim host below scrapes 459 instead of
+571). The probes still time the verbs, and the report's `verb_ns` and the
 `gpu_slow_mr_reg` diagnosis keep using them. Prometheus adds its own `job` and `instance` labels, and
 the exporter adds the constant `otel_scope_*` labels. None of those multiply.
 The endpoint skip reason (free-form probe text), a path's baseline sub-class
@@ -684,19 +795,22 @@ Worked example: the Fig.2 host of `--sim`.
   P_mem = 8.
 - L = 23: 4 RNIC PCIe, 8 GPU PCIe, 4 switch, 4 root port, 2 memory,
   1 inter-socket.
+- K = 10: 2 packages, 4 root ports, 4 switches. S = 0.
 - M = 6 under rail scope.
 - U = 0, because there is no live bus utilization.
 - N = 0, because no CPU load is read.
 
 ```
-10 × 32 + 9 × 8 + 2 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 0 + 41 + D + T
-= 320 + 72 + 46 + 18 + 16 + 10 + 0 + 41 + D + T = 523 + D + T
+10 × 32 + 9 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
+= 320 + 72 + 69 + 18 + 20 + 20 + 10 + 41 + D + T = 570 + D + T
 ```
 
-A healthy idle sim run scrapes 524 `hostping_*` series (D = 0, T = 1).
+A healthy idle sim run scrapes 571 `hostping_*` series (D = 0, T = 1), 47 of
+them the topology graph (24 nodes, 23 edges); 0.1.3 scraped 524.
 0.1.1, with one-hot status gauges at 22 series per path and 4 per link,
 scraped 1285. The rail-optimized `--topology fig2-rails` host has M = 0 and
-scrapes 506.
+scrapes 553. `--topology fig2-snc` (K = 14 with 4 NUMA nodes, S = 4, L = 27)
+has 30 nodes and 31 edges.
 
 Each further diagnosis code and confidence, and each further trigger/mode
 combination, adds one series for the life of the process. The same host
@@ -706,7 +820,8 @@ M = 28 there.
 When series appear and disappear:
 
 - **Present from the first scrape:** `hostping_build_info`,
-  `hostping_rnic_info`, `hostping_endpoint_info` and
+  `hostping_rnic_info`, `hostping_endpoint_info`,
+  `hostping_topology_node_info`, `hostping_topology_edge_info` and
   `hostping_status_code_info` (fixed at start-up), and
   the liveness counters (written as 0).
 - **Absent until first written:**

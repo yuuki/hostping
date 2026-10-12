@@ -8,6 +8,25 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-13
+
+### Added
+
+- `hostping.topology.node.info` and `hostping.topology.edge.info`
+  (`hostping_topology_node_info`, `hostping_topology_edge_info`): the host's
+  intra-host topology as a graph, for Grafana's Node Graph panel. A node is a
+  CPU package, a NUMA node under sub-NUMA clustering, a memory node, a root
+  port, a PCIe switch, an RNIC or a GPU; an edge is one link, directed from
+  the CPU side to the device side, whose `link` attribute joins
+  `hostping_link_status_code` and `hostping_bus_utilization`. Cascaded
+  switches hang off the switch above them, following the sysfs parent chain.
+  Both are fixed at start-up and exported from the first scrape, with `--sim`
+  and `--topology-file` too. A Fig.2 sim host gains 47 series (24 nodes, 23
+  edges), from 524 to 571. See
+  [Topology graph](docs/operations.md#topology-graph).
+- Topology links carry `upstream`, the switch or root port a PCIe device or
+  switch hop hangs off (`hostpingctl topology`, the topology file).
+
 ## [0.1.3] - 2026-10-13
 
 ### Changed

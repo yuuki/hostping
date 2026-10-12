@@ -100,6 +100,8 @@ type options struct {
 	live      *Liveness
 	rnics     []model.RNIC
 	endpoints []model.Endpoint
+	nodes     []model.TopologyNode
+	edges     []model.TopologyEdge
 }
 
 // WithLiveness makes /healthz report l: 503 while the daemon's poll loop is
@@ -123,6 +125,17 @@ func WithTopology(rnics []model.RNIC, endpoints []model.Endpoint) Option {
 	return func(o *options) {
 		o.rnics = append([]model.RNIC(nil), rnics...)
 		o.endpoints = append([]model.Endpoint(nil), endpoints...)
+	}
+}
+
+// WithTopologyDiagram exports hostping.topology.node.info and
+// hostping.topology.edge.info for the host topology diagram (see
+// topology.Graph.Diagram). Like WithTopology the slices are copied and the
+// series fixed at start-up.
+func WithTopologyDiagram(nodes []model.TopologyNode, edges []model.TopologyEdge) Option {
+	return func(o *options) {
+		o.nodes = append([]model.TopologyNode(nil), nodes...)
+		o.edges = append([]model.TopologyEdge(nil), edges...)
 	}
 }
 
@@ -182,6 +195,9 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 		return fail(err)
 	}
 	if err := t.registerTopologyInfo(o.rnics, o.endpoints); err != nil {
+		return fail(err)
+	}
+	if err := t.registerDiagramInfo(o.nodes, o.edges); err != nil {
 		return fail(err)
 	}
 	if cfg.PrometheusAddr != "" {
@@ -578,6 +594,81 @@ func (t *Telemetry) registerTopologyInfo(rnics []model.RNIC, endpoints []model.E
 		metric.WithDescription("Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement)"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 			for _, a := range epAttrs {
+				o.Observe(1, a)
+			}
+			return nil
+		}))
+	return err
+}
+
+// diagramNodeAttrs is the attribute set of one hostping.topology.node.info
+// series. node is the ID the edges' source and target name. numa is left out
+// where the node has no single NUMA node (a package under sub-NUMA
+// clustering), and pcie_bdf where it is no PCI function (package, NUMA node,
+// memory); a PCI node whose address is not known says "unknown".
+func diagramNodeAttrs(n model.TopologyNode) attribute.Set {
+	kv := []attribute.KeyValue{
+		attribute.String("node", n.ID),
+		attribute.String("kind", n.Kind),
+		attribute.String("title", orUnknown(n.Title)),
+		attribute.String("socket", strconv.Itoa(n.Socket)),
+	}
+	if n.NUMA >= 0 {
+		kv = append(kv, attribute.String("numa", strconv.Itoa(n.NUMA)))
+	}
+	switch n.Kind {
+	case model.TopoNodeSocket, model.TopoNodeNUMA, model.TopoNodeMemory:
+	default:
+		kv = append(kv, attribute.String("pcie_bdf", orUnknown(n.PCIeBDF)))
+	}
+	return attribute.NewSet(kv...)
+}
+
+// diagramEdgeAttrs is the attribute set of one hostping.topology.edge.info
+// series. link is the link attribute of hostping.link.status_code and
+// hostping.bus.utilization, so a query joins the edge to its state, or "none"
+// for a structural edge.
+func diagramEdgeAttrs(e model.TopologyEdge) attribute.Set {
+	return attribute.NewSet(
+		attribute.String("edge", e.ID),
+		attribute.String("link", e.Link),
+		attribute.String("source", e.Source),
+		attribute.String("target", e.Target),
+		attribute.String("kind", e.Kind),
+		attribute.String("capacity_bps", strconv.FormatUint(e.CapacityBPS, 10)),
+		attribute.String("negotiated_bps", strconv.FormatUint(e.NegotiatedBPS, 10)),
+		attribute.String("capacity_assumed", strconv.FormatBool(e.CapacityAssumed)),
+	)
+}
+
+// registerDiagramInfo exports hostping.topology.node.info and
+// hostping.topology.edge.info: a constant 1 per node and per edge of the host
+// topology diagram, for a dashboard's node graph. They are observed on every
+// collection, like the other info series.
+func (t *Telemetry) registerDiagramInfo(nodes []model.TopologyNode, edges []model.TopologyEdge) error {
+	nodeAttrs := make([]metric.ObserveOption, len(nodes))
+	for i, n := range nodes {
+		nodeAttrs[i] = metric.WithAttributeSet(diagramNodeAttrs(n))
+	}
+	edgeAttrs := make([]metric.ObserveOption, len(edges))
+	for i, e := range edges {
+		edgeAttrs[i] = metric.WithAttributeSet(diagramEdgeAttrs(e))
+	}
+	_, err := t.meter.Int64ObservableGauge("hostping.topology.node.info",
+		metric.WithDescription("Always 1; one series per node of the host topology diagram (CPU package, NUMA node, memory, root port, PCIe switch, RNIC, GPU)"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for _, a := range nodeAttrs {
+				o.Observe(1, a)
+			}
+			return nil
+		}))
+	if err != nil {
+		return err
+	}
+	_, err = t.meter.Int64ObservableGauge("hostping.topology.edge.info",
+		metric.WithDescription("Always 1; one series per edge of the host topology diagram, source upstream of target; link names the link of hostping.link.status_code"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for _, a := range edgeAttrs {
 				o.Observe(1, a)
 			}
 			return nil

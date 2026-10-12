@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
@@ -218,4 +219,98 @@ func TestTopologyInfoPrometheusNames(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestTopologyDiagramInfo checks hostping_topology_node_info and
+// hostping_topology_edge_info on Fig.2: one series per node and per edge, the
+// labels a Grafana node graph reads, and edges whose link joins
+// hostping_link_status_code.
+func TestTopologyDiagramInfo(t *testing.T) {
+	reg := promclient.NewRegistry()
+	exp, err := prometheus.New(prometheus.WithRegisterer(reg))
+	if err != nil {
+		t.Fatalf("prometheus exporter: %v", err)
+	}
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exp))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	tel := &Telemetry{provider: provider, meter: provider.Meter("github.com/yuuki/hostping")}
+	if err := tel.initInstruments(); err != nil {
+		t.Fatalf("initInstruments: %v", err)
+	}
+	g := topology.Fig2()
+	var o options
+	WithTopologyDiagram(g.Diagram())(&o)
+	if err := tel.registerDiagramInfo(o.nodes, o.edges); err != nil {
+		t.Fatalf("registerDiagramInfo: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	series := map[string]map[string]map[string]string{}
+	for _, mf := range mfs {
+		key := map[string]string{"hostping_topology_node_info": "node", "hostping_topology_edge_info": "edge"}[mf.GetName()]
+		if key == "" {
+			continue
+		}
+		series[mf.GetName()] = map[string]map[string]string{}
+		for _, m := range mf.GetMetric() {
+			if v := m.GetGauge().GetValue(); v != 1 {
+				t.Fatalf("%s = %v, want 1", mf.GetName(), v)
+			}
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				if !strings.HasPrefix(l.GetName(), "otel_scope_") {
+					labels[l.GetName()] = l.GetValue()
+				}
+			}
+			series[mf.GetName()][labels[key]] = labels
+		}
+	}
+	nodes, edges := series["hostping_topology_node_info"], series["hostping_topology_edge_info"]
+	if len(nodes) != 24 || len(edges) != len(g.Links) {
+		t.Fatalf("%d nodes, %d edges; want 24 and %d", len(nodes), len(edges), len(g.Links))
+	}
+	wantNode := map[string]map[string]string{
+		"socket0": {"node": "socket0", "kind": "socket", "title": "socket 0", "socket": "0", "numa": "0"},
+		"mem1":    {"node": "mem1", "kind": "memory", "title": "mem1 (NUMA 1)", "socket": "1", "numa": "1"},
+		"rp.0":    {"node": "rp.0", "kind": "root_port", "title": "root port rp.0", "socket": "0", "numa": "0", "pcie_bdf": "unknown"},
+		"rnic2":   {"node": "rnic2", "kind": "rnic", "title": "mlx5_2", "socket": "1", "numa": "1", "pcie_bdf": "0000:57:00.0"},
+		"gpu5":    {"node": "gpu5", "kind": "gpu", "title": "gpu5 0000:59:00.0", "socket": "1", "numa": "1", "pcie_bdf": "0000:59:00.0"},
+	}
+	for id, want := range wantNode {
+		if got := nodes[id]; !mapsEqual(got, want) {
+			t.Errorf("node %s labels = %v, want %v", id, got, want)
+		}
+	}
+	want := map[string]string{
+		"edge": "pcie.gpu1", "link": "pcie.gpu1", "source": "sw.0", "target": "gpu1", "kind": "pcie_gpu",
+		"capacity_bps": "252000000000", "negotiated_bps": "0", "capacity_assumed": "false",
+	}
+	if got := edges["pcie.gpu1"]; !mapsEqual(got, want) {
+		t.Errorf("edge pcie.gpu1 labels = %v, want %v", got, want)
+	}
+	for id, l := range edges {
+		if _, ok := g.Link(l["link"]); !ok {
+			t.Errorf("edge %s: link %q is no link of the graph", id, l["link"])
+		}
+		if _, ok := nodes[l["source"]]; !ok {
+			t.Errorf("edge %s: source %q is no node", id, l["source"])
+		}
+		if _, ok := nodes[l["target"]]; !ok {
+			t.Errorf("edge %s: target %q is no node", id, l["target"])
+		}
+	}
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
