@@ -63,6 +63,18 @@ func Fig2() Graph {
 		link("upi.0", model.LinkKindUPI, "upi0", "", 0, upiCap),
 	}
 
+	// Every device hangs off its root port's switch, and the switch off the
+	// root port.
+	for i := range links {
+		l := &links[i]
+		switch l.Kind {
+		case "pcie_rnic", "pcie_gpu":
+			l.Upstream = "sw." + l.RootPort[len("rp."):]
+		case "pcie_switch":
+			l.Upstream = l.RootPort
+		}
+	}
+
 	g := Graph{Name: "fig2", RNICs: rnics, Endpoints: eps, Links: links}
 	g.Paths = enumerateFig2(g, "upi.0")
 	g.setRNICPCIeCaps()

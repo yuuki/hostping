@@ -465,6 +465,60 @@ type Link struct {
 	// computed against it: dividing a measured rate by a guess could call a
 	// busy link overloaded, or an overloaded one fine.
 	CapacityAssumed bool `json:"capacity_assumed,omitempty"`
+	// Upstream is the node at the CPU-side end of a PCIe device or switch hop:
+	// the switch (its sw.* link ID) or root port (rp.* link ID) the hop hangs
+	// off. Discovery fills it from the sysfs parent chain so a cascaded switch
+	// sits under the switch above it. Empty means unknown (a hand-written
+	// topology file); the topology diagram then falls back to the device's
+	// Switch, then its root port. It is never read by the analyzer.
+	Upstream string `json:"upstream,omitempty"`
+}
+
+// Kinds of a node of the host topology diagram (TopologyNode.Kind).
+const (
+	TopoNodeSocket   = "socket"
+	TopoNodeNUMA     = "numa"
+	TopoNodeMemory   = "memory"
+	TopoNodeRootPort = "root_port"
+	TopoNodeSwitch   = "switch"
+	TopoNodeRNIC     = "rnic"
+	TopoNodeGPU      = "gpu"
+)
+
+// TopoEdgeNoLink is the TopologyEdge.Link of a structural edge, one that is no
+// measured hop (a NUMA node's membership of its package).
+const TopoEdgeNoLink = "none"
+
+// TopoEdgeKindPackage is the TopologyEdge.Kind of the structural edge from a
+// CPU package to one of its NUMA nodes under sub-NUMA clustering.
+const TopoEdgeKindPackage = "package"
+
+// TopologyNode is a vertex of the host topology diagram: a CPU package, a NUMA
+// node of a package under sub-NUMA clustering, a memory node, a root port, a
+// PCIe switch, an RNIC or a GPU. NUMA and PCIeBDF are -1 and "" where they do
+// not apply.
+type TopologyNode struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Title   string `json:"title"`
+	Socket  int    `json:"socket"`
+	NUMA    int    `json:"numa"`
+	PCIeBDF string `json:"pcie_bdf,omitempty"`
+}
+
+// TopologyEdge is an edge of the host topology diagram, directed upstream
+// (CPU side) to downstream (device side), and lower to higher socket or NUMA
+// number between two CPU nodes. Link is the Link.ID it draws, or
+// TopoEdgeNoLink for a structural edge.
+type TopologyEdge struct {
+	ID              string `json:"id"`
+	Link            string `json:"link"`
+	Source          string `json:"source"`
+	Target          string `json:"target"`
+	Kind            string `json:"kind"`
+	CapacityBPS     uint64 `json:"capacity_bps"`
+	NegotiatedBPS   uint64 `json:"negotiated_bps"`
+	CapacityAssumed bool   `json:"capacity_assumed"`
 }
 
 // Endpoint is a GPU or memory node that can be registered via ibv_reg_mr.

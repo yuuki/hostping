@@ -90,6 +90,8 @@ agent from one with nothing to report. See
 | `hostping.build.info` | gauge | `version`, `commit`, `zig`, `go` | Always 1; names the running build. Exported from start-up, before any run |
 | `hostping.rnic.info` | gauge | `rnic`, `device`, `pcie_bdf`, `netdev`, `link_layer`, `fabric`, `socket`, `numa` | Always 1, one series per RNIC; maps the `rnic` ID the other series carry to the IB device name (`mlx5_N`), PCI address, netdev, port link layer (`Ethernet`/`InfiniBand`), mutual-probe pairing key (`fabric`, e.g. `v4:10.0.0.0`) and NUMA placement. An identifier discovery could not read is `unknown`. Exported from start-up; RNICs dropped by `--exclude-rnic` have none |
 | `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |
+| `hostping.topology.node.info` | gauge | `node`, `kind`, `title`, `socket`, `numa` (where single), `pcie_bdf` (PCI nodes) | Always 1, one series per node of the host topology graph: `socket`, `numa` (sub-NUMA clustering only), `memory`, `root_port`, `switch`, `rnic`, `gpu`. `node` is the ID the edges name. Exported from start-up (see [Topology graph](operations.md#topology-graph)) |
+| `hostping.topology.edge.info` | gauge | `edge`, `link`, `source`, `target`, `kind`, `capacity_bps`, `negotiated_bps`, `capacity_assumed` | Always 1, one series per edge, `source` upstream (CPU side) of `target`. `link` is the `link` of `hostping.link.status_code` and `hostping.bus.utilization`, or `none` on a structural package→NUMA edge. Exported from start-up |
 | `hostping.status_code.info` | gauge | `metric`, `code`, `status` or `reason` | Always 1, one series per code of the `*_code` gauges above (28 in all); names what `code` means on the gauge `metric` (the OpenTelemetry name, e.g. `hostping.path.status_code`). Status gauges' rows carry `status`, reason gauges' rows `reason`. Exported from start-up |
 
 Loopback latency, mutual RTT and verb durations are gauges. The probe produces
@@ -119,7 +121,7 @@ field instead.
 The `hostping.mutual.*` gauges are absent altogether on a host where no RNIC
 pair qualifies for the mutual probe. See [Diagnoses](design.md#diagnoses).
 
-Per host the series count is roughly 10 per RNIC→endpoint path plus 2 per
+Per host the series count is roughly 10 per RNIC→endpoint path plus 3 per
 link. See [Series cardinality](operations.md#series-cardinality). For what
 each `hostping.diagnosis.count` code means and which ones to page on, see the
 [runbook](runbook.md).

@@ -404,8 +404,30 @@ func pcieLink(sysroot, bdf string) (capBPS, negBPS uint64, assumed bool) {
 // switchLink is a switch hop at the nominal discoverPCIeCap. Its sysfs link is
 // not read (see pcieLink), so the capacity is assumed and no negotiated value
 // is recorded.
-func switchLink(id string, socket int, rootPort string) model.Link {
-	return model.Link{ID: id, Kind: "pcie_switch", Device: id, Socket: socket, RootPort: rootPort, CapacityBPS: discoverPCIeCap, CapacityAssumed: true}
+func switchLink(id string, socket int, rootPort, upstream string) model.Link {
+	return model.Link{ID: id, Kind: "pcie_switch", Device: id, Socket: socket, RootPort: rootPort, Upstream: upstream, CapacityBPS: discoverPCIeCap, CapacityAssumed: true}
+}
+
+// upstream is the node a device or switch hangs off: the switch above it in
+// the chain, or the root port when nothing is between them. A tree has one
+// parent per bridge, so every device sharing a switch records the same one.
+func (c pciChain) upstreamOf(i int) string {
+	if i > 0 {
+		return c.Switches[i-1]
+	}
+	return c.RootPort
+}
+
+// deviceUpstream is the node the chain's device hangs off.
+func (c pciChain) deviceUpstream() string {
+	return c.upstreamOf(len(c.Switches))
+}
+
+// addSwitchLinks adds the switch hops of ch, each pointing at its parent.
+func addSwitchLinks(add func(model.Link), ch pciChain, socket int) {
+	for i, sw := range ch.Switches {
+		add(switchLink(sw, socket, ch.RootPort, ch.upstreamOf(i)))
+	}
 }
 
 func synthesizeDiscoveredLinks(sysroot string, g Graph, rnicCh, gpuCh map[string]pciChain) []model.Link {
@@ -428,21 +450,17 @@ func synthesizeDiscoveredLinks(sysroot string, g Graph, rnicCh, gpuCh map[string
 	}
 	for _, n := range g.RNICs {
 		ch := rnicCh[n.ID]
-		pcie(model.Link{ID: "pcie." + n.ID, Kind: "pcie_rnic", Device: n.ID, Socket: n.Socket, RootPort: n.RootPort}, n.PCIeBDF)
+		pcie(model.Link{ID: "pcie." + n.ID, Kind: "pcie_rnic", Device: n.ID, Socket: n.Socket, RootPort: n.RootPort, Upstream: ch.deviceUpstream()}, n.PCIeBDF)
 		pcie(model.Link{ID: n.RootPort, Kind: "root_port", Socket: n.Socket, RootPort: n.RootPort}, ch.RootLinkBDF)
-		for _, sw := range ch.Switches {
-			add(switchLink(sw, n.Socket, n.RootPort))
-		}
+		addSwitchLinks(add, ch, n.Socket)
 	}
 	for _, e := range g.Endpoints {
 		switch e.Kind {
 		case model.EndpointGPU:
 			ch := gpuCh[e.ID]
-			pcie(model.Link{ID: "pcie." + e.ID, Kind: "pcie_gpu", Device: e.ID, Socket: e.Socket, RootPort: e.RootPort}, e.PCIeBDF)
+			pcie(model.Link{ID: "pcie." + e.ID, Kind: "pcie_gpu", Device: e.ID, Socket: e.Socket, RootPort: e.RootPort, Upstream: ch.deviceUpstream()}, e.PCIeBDF)
 			pcie(model.Link{ID: e.RootPort, Kind: "root_port", Socket: e.Socket, RootPort: e.RootPort}, ch.RootLinkBDF)
-			for _, sw := range ch.Switches {
-				add(switchLink(sw, e.Socket, e.RootPort))
-			}
+			addSwitchLinks(add, ch, e.Socket)
 		case model.EndpointMemory:
 			add(model.Link{ID: fmt.Sprintf("mem.%d", e.Index), Kind: "memory", Device: e.ID, Socket: e.Socket, CapacityBPS: discoverMemCap, CapacityAssumed: true})
 		}
