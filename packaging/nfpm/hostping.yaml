@@ -90,6 +90,18 @@ contents:
     dst: /usr/share/doc/hostping/operations.md
     file_info:
       mode: 0644
+  - src: docs/design.md
+    dst: /usr/share/doc/hostping/design.md
+    file_info:
+      mode: 0644
+  - src: docs/metrics.md
+    dst: /usr/share/doc/hostping/metrics.md
+    file_info:
+      mode: 0644
+  - src: docs/runbook.md
+    dst: /usr/share/doc/hostping/runbook.md
+    file_info:
+      mode: 0644
 
 scripts:
   postinstall: packaging/nfpm/scripts/postinstall.sh

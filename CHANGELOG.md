@@ -8,13 +8,60 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Changed
+
+- The README is reduced to an overview, install and usage. The reference
+  material it held moved to `docs/design.md` (measurement, classification,
+  diagnoses, mutual probe, bus utilization, simulated faults),
+  `docs/metrics.md` (metrics and reports) and `docs/building.md`. The
+  tarball and packages ship `design.md`, `metrics.md` and `runbook.md` next to
+  `operations.md`.
+
 ### Added
 
 - `--metrics-verb-durations` (default `true`): `false` stops exporting
-  `hostping.verb.duration` (`hostping_verb_duration_microseconds`), whose
-  2-3 series per RNIC→endpoint path dominate the series count on a host with
-  many RNICs. The probes still time the verbs; the report's `verb_ns` and the
-  `gpu_slow_mr_reg` diagnosis are unaffected.
+  `hostping.verb.duration` (`hostping_verb_duration_microseconds`), which is
+  3 of the 10 series of a GPU path and 2 of the 9 of a memory path, the
+  largest per-path share on a host with many RNICs. A Fig.2 sim host drops
+  from 524 to 412 `hostping_*` series. The probes still time the verbs; the
+  report's `verb_ns` and the `gpu_slow_mr_reg` diagnosis are unaffected.
+
+## [0.1.2] - 2026-10-13
+
+### Changed
+
+- **Breaking:** the one-hot state gauges are replaced by code gauges, one
+  series per path or link whose value is the code of its current state. A
+  path exported 22 state series and a link 4; now 4 and 1. A Fig.2 sim host
+  drops from 1285 to 524 `hostping_*` series, and a 10-RNIC host with 120
+  paths and 67 links by about 2,300.
+
+  | Removed (0.1.1) | Replacement (0.1.2) |
+  | --- | --- |
+  | `hostping.path.status{rnic,endpoint,status,reason}` (`hostping_path_status`) | `hostping.path.status_code{rnic,endpoint}` (1 normal, 2 uncertain, 3 abnormal) and `hostping.path.uncertain_reason_code{rnic,endpoint}` (0 none, 1 no_path, 2 rnic_busy, 3 non_affinitive, 4 below_ceiling, 5 no_ceiling, 6 host_shift, 7 cpu_busy) |
+  | `hostping.path.latency_status{rnic,endpoint,status,reason}` (`hostping_path_latency_status`) | `hostping.path.latency_status_code{rnic,endpoint}` (1 normal, 2 unknown, 3 abnormal) and `hostping.path.latency_reason_code{rnic,endpoint}` (0 none, 1 user_baseline, 2 siblings, 3 busy, 4 few_siblings, 5 no_path, 6 no_reading, 7 recheck_cleared, 8 locality_shift, 9 cpu_busy) |
+  | `hostping.link.status{link,status}` (`hostping_link_status`) | `hostping.link.status_code{link}` (1 normal, 2 uncertain, 3 abnormal, 4 gray) |
+
+  There is no option to keep the old series. To migrate, rewrite
+  `hostping_path_status{status="abnormal"} == 1` as
+  `hostping_path_status_code == 3`, and a `status`/`reason` selector as an
+  `==` on the matching code gauge (combine a status and a reason with `and`).
+  A `status` or `reason` label for legends and alerts comes from joining
+  `hostping_status_code_info` (below) with `count_values`.
+  docs/operations.md, "Status codes", has the code table, the full migration
+  table, PromQL and Grafana value mapping examples. The codes are fixed: a new
+  state gets a new code and none is renumbered. The report JSON and
+  `hostpingctl` output are unchanged.
+
+### Added
+
+- `hostping.status_code.info{metric,code,status|reason}`
+  (`hostping_status_code_info`): always 1, 28 series exported from start-up,
+  naming every code of the code gauges.
+- Recording rules `hostping:path_status:count`,
+  `hostping:path_uncertain_reason:count` and `hostping:link_status:count` in
+  `contrib/prometheus/hostping-rules.yml`: paths and links per state on each
+  host, labelled by name.
 
 ## [0.1.1] - 2026-10-12
 

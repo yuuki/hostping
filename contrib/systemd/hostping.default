@@ -2,7 +2,7 @@
 #
 # HOSTPING_OPTS is passed to the daemon on its command line, split on
 # whitespace (quotes are not parsed, so no value may contain a space).
-# Every flag is listed by `hostping -h`; the README documents each one.
+# Every flag is listed by `hostping -h`; docs/design.md documents each one.
 # Restart the service after editing: systemctl restart hostping
 
 # Default: Prometheus /metrics and /healthz on :9464 (every interface), idle
@@ -33,6 +33,10 @@ HOSTPING_OPTS=""
 #                              TLS and/or basic auth on /metrics (Prometheus
 #                              exporter-toolkit web config; see
 #                              docs/operations.md)
+#   --metrics-verb-durations=false
+#                              do not export hostping_verb_duration_microseconds
+#                              (3 series per GPU path, 2 per memory path; the
+#                              report keeps verb_ns)
 #   --report-file /var/log/hostping/reports.jsonl
 #                              also append each report as one JSON line to a
 #                              file (reopened per report: logrotate-safe)
@@ -44,11 +48,10 @@ HOSTPING_OPTS=""
 #                              the unit's StateDirectory= creates the path)
 
 # OTLP gRPC push. Unset: no OTLP. host:port is TLS with the system roots,
-# except on a loopback host (localhost, 127.0.0.1, ::1), which is plaintext;
+# except on a loopback host (localhost, 127.0.0.0/8, ::1), which is plaintext;
 # http:// or https:// in front decides explicitly.
 #OTEL_EXPORTER_OTLP_ENDPOINT=10.0.0.20:4317
-# A plaintext collector on another host (before this option existed every
-# endpoint was plaintext; set this when upgrading if your collector has no TLS):
+# A plaintext collector on another host:
 #OTEL_EXPORTER_OTLP_INSECURE=true
 # TLS against a private CA, and headers such as a collector token:
 #OTEL_EXPORTER_OTLP_CERTIFICATE=/etc/hostping/otlp-ca.crt

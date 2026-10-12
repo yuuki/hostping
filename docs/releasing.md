@@ -24,37 +24,44 @@ hostping-X.Y.Z/
   hostpingctl
   libhostping_probe.so
   LICENSE  NOTICE  PATENTS.md  README.md
-  docs/operations.md
+  docs/operations.md  docs/design.md  docs/metrics.md  docs/runbook.md
   contrib/systemd/hostping.service
   contrib/systemd/hostping.default
 ```
 
-Install it as [docs/operations.md](operations.md#install) describes: the three
-binaries stay in one directory, because `hostping` and `hostpingctl` find
+Install it as [docs/operations.md](operations.md#install) describes. The three
+binaries must stay in one directory, because `hostping` and `hostpingctl` find
 `libhostping_probe.so` through an `$ORIGIN` rpath.
 
-The `.deb` and `.rpm` hold the same three binaries in `/usr/lib/hostping/`
-(with `/usr/bin` symlinks; `$ORIGIN` resolves through them), the systemd unit
-with `ExecStart` rewritten to that directory, `/etc/default/hostping` as a
-config file, and the docs in `/usr/share/doc/hostping/`. They depend on
-`libibverbs1 (>= 32)` / `libibverbs >= 32` and glibc 2.28. The package scripts
-reload systemd; they never enable, start or restart the service, and stop and
-disable it only on removal, not on an upgrade. [nfpm](https://nfpm.goreleaser.com/)
-builds them from [packaging/nfpm/hostping.yaml](../packaging/nfpm/hostping.yaml)
-(`make package`, part of `make dist`); the dev container pins its version.
-deb and rpm need a version that starts with a digit, so `make dist` needs
-`VERSION=X.Y.Z`.
+The `.deb` and `.rpm` contain:
 
-The artifacts are built to be reproducible from the same commit and toolchain:
-the Go binaries use `-trimpath` and `-buildvcs=false`, and the tarball uses
+- the same three binaries in `/usr/lib/hostping/`, with `/usr/bin` symlinks
+  (`$ORIGIN` resolves through them)
+- the systemd unit, with `ExecStart` rewritten to that directory
+- `/etc/default/hostping` as a config file
+- the docs in `/usr/share/doc/hostping/`
+
+They depend on `libibverbs1 (>= 32)` / `libibverbs >= 32` and glibc 2.28. The
+package scripts reload systemd. They never enable, start or restart the
+service. They stop and disable it on removal only, and leave it alone on an
+upgrade.
+
+[nfpm](https://nfpm.goreleaser.com/) builds the packages from
+[packaging/nfpm/hostping.yaml](../packaging/nfpm/hostping.yaml) with
+`make package`, which is part of `make dist`. The dev container pins the nfpm
+version. deb and rpm need a version that starts with a digit, so `make dist`
+needs `VERSION=X.Y.Z`.
+
+The artifacts are reproducible from the same commit and toolchain. The Go
+binaries use `-trimpath` and `-buildvcs=false`. The tarball uses
 `tar --sort=name --mtime=@$SOURCE_DATE_EPOCH --owner=0 --group=0
---numeric-owner` (`SOURCE_DATE_EPOCH` defaults to the commit time) and
-`gzip -n`. nfpm takes file mtimes from `SOURCE_DATE_EPOCH` too, and the `.rpm`
-records the build host, which `make docker-dist` fixes with `--hostname`. Two
+--numeric-owner` and `gzip -n`, with `SOURCE_DATE_EPOCH` defaulting to the
+commit time. nfpm also takes file mtimes from `SOURCE_DATE_EPOCH`. The `.rpm`
+records the build host, which `make docker-dist` pins with `--hostname`. Two
 runs of `make docker-dist` on the same commit gave the same `SHA256SUMS`.
 
-`make dist` needs GNU tar, nfpm and the amd64 `libibverbs` headers and stubs,
-so run it in the dev container (`make docker-dist`), not on macOS.
+`make dist` needs GNU tar, nfpm and the amd64 `libibverbs` headers and stubs.
+Run it in the dev container (`make docker-dist`) rather than on macOS.
 
 ## Runtime requirements on the target host
 
@@ -65,12 +72,13 @@ so run it in the dev container (`make docker-dist`), not on macOS.
 | Optional: `libcuda.so.1` or `libcudart.so.*`, `libamdhip64.so` | Loaded with `dlopen` only when a GPU endpoint is probed. Without them the GPU endpoints are skipped with a reason; the binaries start and run without them. |
 
 `hostping` and `hostpingctl` themselves need only `libc.so.6`,
-`libresolv.so.2`, `libpthread.so.0`, and the bundled `libhostping_probe.so`; the
-probe library adds `libibverbs.so.1`, `libdl.so.2`, and the dynamic loader.
-The binaries' `RUNPATH` starts with `$ORIGIN`; it also carries the two
-development paths from the cgo directive in `internal/zigprobe`
-(`$ORIGIN/../zig/zig-out/lib` and the build container's
-`/src/.../zig/zig-out/lib`), which do not exist on an installed host and come
+`libresolv.so.2`, `libpthread.so.0`, and the bundled `libhostping_probe.so`.
+The probe library adds `libibverbs.so.1`, `libdl.so.2`, and the dynamic loader.
+
+The binaries' `RUNPATH` starts with `$ORIGIN`. It also carries the two
+development paths from the cgo directive in `internal/zigprobe`:
+`$ORIGIN/../zig/zig-out/lib` and the build container's
+`/src/.../zig/zig-out/lib`. Neither exists on an installed host, and both come
 after `$ORIGIN`.
 
 Checked by running `hostping --version`, `hostpingctl version`, and
@@ -88,17 +96,17 @@ These runs exercise linking and the `--sim` path only, not an RNIC.
 ## glibc baseline
 
 `zig cc` links against Zig's own glibc stubs for the version in the target
-triple, so the oldest glibc a build runs on is a choice, not whatever the build
-machine has. The Makefile pins it with `GLIBC_VERSION ?= 2.28` and uses
-`x86_64-linux-gnu.2.28` for both the Zig probe library
-(`zig build -Dtarget=...`) and the cgo link of the Go binaries
+triple. The oldest glibc a build runs on is therefore set by the build, and
+does not depend on the build machine. The Makefile pins it with
+`GLIBC_VERSION ?= 2.28` and uses `x86_64-linux-gnu.2.28` for both the Zig
+probe library (`zig build -Dtarget=...`) and the cgo link of the Go binaries
 (`CC="zig cc -target ..."`).
 
-Why 2.28: it is the glibc of the oldest enterprise distributions still in
-support (RHEL, Rocky, and Alma Linux 8). Zig 0.17 also links the probe against
-2.17, but the only common distribution that old (RHEL/CentOS 7) is out of
-support, and rdma-core 32 (above) already rules out distributions older than
-these. Raise `GLIBC_VERSION` only together with this page.
+2.28 is the glibc of the oldest enterprise distributions still in support
+(RHEL, Rocky, and Alma Linux 8). Zig 0.17 also links the probe against 2.17,
+but the only common distribution that old (RHEL/CentOS 7) is out of support.
+rdma-core 32 (above) already rules out distributions older than these. Raise
+`GLIBC_VERSION` only together with this page.
 
 `make dist` runs `make check-glibc`, which fails if any of the three binaries
 needs a `GLIBC_` symbol version newer than `GLIBC_VERSION`. With 2.28 the newest
@@ -128,15 +136,19 @@ To check by hand in the container: `objdump -T bin/linux-amd64/<file> | grep -o
    git push origin v1.2.3
    ```
 
-4. The [Release workflow](../.github/workflows/release.yml) runs on the tag: it
-   runs `make docker-test` and `make docker-dist VERSION=1.2.3` on an arm64
-   runner (the same cross-compile path as a local build on Apple Silicon); on
-   amd64 it runs `hostping --version` and `hostpingctl diagnose --sim` from
-   the extracted tarball, from the `.deb` installed on Ubuntu (plus
-   `systemd-analyze verify` of the unit) and from the `.rpm` installed in a
-   Rocky Linux 8 container, removing each package again; then it creates the
-   GitHub Release with the CHANGELOG section as notes and the four files
-   attached.
+4. The [Release workflow](../.github/workflows/release.yml) runs on the tag.
+   It runs `make docker-test` and `make docker-dist VERSION=1.2.3` on an arm64
+   runner, which is the same cross-compile path as a local build on Apple
+   Silicon. On amd64 it runs `hostping --version` and
+   `hostpingctl diagnose --sim` three times:
+
+   - from the extracted tarball
+   - from the `.deb` installed on Ubuntu, plus `systemd-analyze verify` of the
+     unit
+   - from the `.rpm` installed in a Rocky Linux 8 container
+
+   It removes each package again afterwards. Finally it creates the GitHub
+   Release with the CHANGELOG section as notes and the four files attached.
 
 ### Without GitHub Actions
 
@@ -163,6 +175,6 @@ container with `libibverbs1` installed (`hostping --version`,
 
 ## Not shipped yet
 
-- An apt or yum repository: the packages are attached to the GitHub Release
+- An apt or yum repository. The packages are attached to the GitHub Release
   only, and are not signed.
-- `linux-arm64` artifacts: there is no arm64 RDMA hardware to test them on.
+- `linux-arm64` artifacts. There is no arm64 RDMA hardware to test them on.
