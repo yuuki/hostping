@@ -566,6 +566,24 @@ func TestRecordReportVerbDuration(t *testing.T) {
 	}
 }
 
+// --metrics-verb-durations=false writes no hostping.verb.duration series, while
+// the rest of the path's series are still recorded.
+func TestRecordReportVerbDurationDisabled(t *testing.T) {
+	tel, reader := newTestTelemetry(t)
+	tel.verbsOff = true
+	tel.RecordReport(context.Background(), model.Report{Paths: []model.PathMeasurement{
+		{RNIC: "rnic0", Endpoint: "gpu0", EndpointKind: model.EndpointGPU,
+			Verbs: model.VerbNs{GPUAlloc: 400_000, MRReg: 150_000, QPSetup: 250_000}},
+	}})
+	ms := collect(t, reader)
+	if m, ok := ms["hostping.verb.duration"]; ok {
+		t.Fatalf("verb.duration exported: %+v", m.Data)
+	}
+	if _, ok := gaugeFloat(t, ms, "hostping.loopback.latency")["endpoint=gpu0,rnic=rnic0"]; !ok {
+		t.Fatal("loopback.latency not recorded")
+	}
+}
+
 // The scheduled probe's window is exported between engine runs, and a nil
 // Telemetry (a one-shot run without exporters) records nothing.
 func TestRecordMutualWindow(t *testing.T) {

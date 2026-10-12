@@ -744,7 +744,8 @@ one of at least two RNICs, `low` otherwise. Idle runs only, needs three other
 GPUs ([README](../README.md#diagnoses)).
 
 **Check first.** `hostping_verb_duration_microseconds{verb="mr_reg"}` for that
-GPU over time; the GPU's health in `nvidia-smi -q` and `dmesg` (Xid messages);
+GPU over time (absent with `--metrics-verb-durations=false`: read the paths'
+`verb_ns` in the report instead); the GPU's health in `nvidia-smi -q` and `dmesg` (Xid messages);
 the peer-memory / dma-buf path in use.
 
 **Remediation.** Lead for a GPU vendor investigation; no direct action.

@@ -140,7 +140,12 @@ type Config struct {
 	// MetricsWebConfig is a Prometheus exporter-toolkit web config file
 	// (TLS, basic auth) for the /metrics listener. Empty: plain HTTP.
 	MetricsWebConfig string
-	ServiceName      string
+	// MetricsVerbDurations exports hostping.verb.duration. Its 2-3 series per
+	// RNIC→endpoint path grow with RNICs × endpoints, so a host with many
+	// RNICs can turn it off; the probes still time the verbs, and the report
+	// and the gpu_slow_mr_reg diagnosis keep using them.
+	MetricsVerbDurations bool
+	ServiceName          string
 
 	// MetricsSet / OTLPSet record that the user asked for an exporter explicitly
 	// (--metrics / --otlp, or OTEL_EXPORTER_OTLP_ENDPOINT). One-shot runs only
@@ -193,21 +198,22 @@ func Defaults() Config {
 		IdleInterval:   5 * time.Minute,
 		MetricInterval: time.Second,
 		// nvidia-smi costs hundreds of ms; GPU util only gates the idle run.
-		GPUUtilInterval: 10 * time.Second,
-		BusyCooldown:    30 * time.Second,
-		BusySamples:     3,
-		FlapWindow:      3,
-		Timeout:         5 * time.Second,
-		TimeoutTh:       0.1,
-		MutualScope:     model.MutualScopeRail,
-		MutualTransport: model.MutualTransportRC,
-		MutualTimeout:   500 * time.Millisecond,
-		MutualWindow:    20 * time.Second,
-		PrometheusAddr:  ":9464",
-		ServiceName:     "hostping",
-		TopologyName:    "fig2",
-		OTLPEndpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-		OTLPSet:         os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",
+		GPUUtilInterval:      10 * time.Second,
+		BusyCooldown:         30 * time.Second,
+		BusySamples:          3,
+		FlapWindow:           3,
+		Timeout:              5 * time.Second,
+		TimeoutTh:            0.1,
+		MutualScope:          model.MutualScopeRail,
+		MutualTransport:      model.MutualTransportRC,
+		MutualTimeout:        500 * time.Millisecond,
+		MutualWindow:         20 * time.Second,
+		PrometheusAddr:       ":9464",
+		MetricsVerbDurations: true,
+		ServiceName:          "hostping",
+		TopologyName:         "fig2",
+		OTLPEndpoint:         os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTLPSet:              os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",
 	}
 }
 
@@ -255,6 +261,7 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.Var((*rnicList)(&c.ExcludeRNICs), "exclude-rnic", "RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up")
 	fs.StringVar(&c.PrometheusAddr, "metrics", c.PrometheusAddr, "Prometheus /metrics listen address (empty to disable; one-shot runs listen only when this flag is given)")
 	fs.StringVar(&c.MetricsWebConfig, "metrics-web-config", c.MetricsWebConfig, "Prometheus exporter-toolkit web config file enabling TLS and/or basic auth on the --metrics listener (empty: plain HTTP)")
+	fs.BoolVar(&c.MetricsVerbDurations, "metrics-verb-durations", c.MetricsVerbDurations, "export hostping.verb.duration (2-3 series per RNIC→endpoint path); false drops the series from /metrics and OTLP, while reports and the gpu_slow_mr_reg diagnosis keep the timings")
 	fs.StringVar(&c.OTLPEndpoint, "otlp", c.OTLPEndpoint, "OTLP gRPC endpoint (or OTEL_EXPORTER_OTLP_ENDPOINT): host:port, or http:// (plaintext) / https:// (TLS) URL")
 	fs.BoolVar(&c.OTLPInsecure, "otlp-insecure", c.OTLPInsecure, "plaintext OTLP for a host:port endpoint (unset: OTEL_EXPORTER_OTLP_INSECURE, else plaintext for loopback and TLS with the system roots otherwise)")
 	fs.DurationVar(&c.IdleInterval, "idle-interval", c.IdleInterval, "idle-host full-mesh interval")

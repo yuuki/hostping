@@ -450,7 +450,7 @@ against a scrape of the `--sim` Fig.2 host. Notation:
 | `hostping_loopback_latency_microseconds`, `hostping_loopback_bandwidth_bit_per_second`, `hostping_path_abnormal` | 3 P | `rnic` × `endpoint` |
 | `hostping_path_status` | 10 P | `status` × `reason`: 8 uncertain reasons plus normal and abnormal |
 | `hostping_path_latency_status` | 12 P | `status` × `reason`: 6 unknown reasons, normal and abnormal each by `user_baseline` and `siblings`, plus normal by `recheck_cleared` and by `locality_shift` |
-| `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup` |
+| `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup`; none with `--metrics-verb-durations=false` |
 | `hostping_link_abnormal_count` | L | `link` |
 | `hostping_link_status` | 4 L | `status`: uncertain, normal, abnormal, gray |
 | `hostping_bus_utilization` | ≤ L | `link`; only hops a live source read (RNIC and GPU PCIe, `mem.N` and `upi.A-B` with `--uncore-util`) |
@@ -473,7 +473,10 @@ series ≈ 28 P_gpu + 27 P_mem + 5 L + U + 3 M + 4 R + E + 13 + D + T
 where U ≤ L is the number of links with a utilization source, plus about 50
 Go runtime, process and `target_info` series the Prometheus client adds. The
 path terms dominate: about 28 series per RNIC→endpoint pair, so a host grows
-with R × E. Prometheus adds its own `job` and `instance` labels and the
+with R × E. `--metrics-verb-durations=false` drops
+`hostping_verb_duration_microseconds` and with it 3 P_gpu + 2 P_mem series
+(leaving 25 per path); the probes still time the verbs, and the report's
+`verb_ns` and the `gpu_slow_mr_reg` diagnosis keep using them. Prometheus adds its own `job` and `instance` labels and the
 exporter the constant `otel_scope_*` labels; none of those multiply. The
 endpoint skip reason (free-form probe text), a path's baseline sub-class and a
 cause's subjects (which GPU, which link) are not labels.

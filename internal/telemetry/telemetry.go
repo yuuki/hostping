@@ -50,6 +50,8 @@ type Telemetry struct {
 	mutualT  metric.Float64Gauge
 	skipped  metric.Int64Gauge
 	verbDur  metric.Float64Gauge
+	// verbsOff drops hostping.verb.duration (--metrics-verb-durations=false).
+	verbsOff bool
 	diag     metric.Int64Counter
 	runs     metric.Int64Counter
 	idle     metric.Int64Gauge
@@ -232,6 +234,7 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 	if err != nil {
 		return fail(err)
 	}
+	t.verbsOff = !cfg.MetricsVerbDurations
 	if err := t.registerBuildInfo(build); err != nil {
 		return fail(err)
 	}
@@ -731,9 +734,10 @@ func (t *Telemetry) recordMutual(ctx context.Context, ms []model.MutualMeasureme
 // recordVerbs writes hostping.verb.duration for one path. A probe that
 // reported no timings (VerbNs zero) writes nothing rather than a false 0 µs.
 // gpu_alloc exists only for GPU endpoints, so a memory path never gets that
-// series; the rest are written on every report, so none goes stale.
+// series; the rest are written on every report, so none goes stale. With
+// --metrics-verb-durations=false nothing is written at all.
 func (t *Telemetry) recordVerbs(ctx context.Context, p model.PathMeasurement) {
-	if p.Verbs == (model.VerbNs{}) {
+	if t.verbsOff || p.Verbs == (model.VerbNs{}) {
 		return
 	}
 	rec := func(verb string, ns uint64) {

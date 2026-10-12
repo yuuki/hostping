@@ -8,6 +8,14 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- `--metrics-verb-durations` (default `true`): `false` stops exporting
+  `hostping.verb.duration` (`hostping_verb_duration_microseconds`), whose
+  2-3 series per RNIC→endpoint path dominate the series count on a host with
+  many RNICs. The probes still time the verbs; the report's `verb_ns` and the
+  `gpu_slow_mr_reg` diagnosis are unaffected.
+
 ## [0.1.1] - 2026-10-12
 
 ### Added
