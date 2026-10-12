@@ -8,7 +8,7 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-10
+## [0.1.0] - 2026-10-12
 
 First release.
 
