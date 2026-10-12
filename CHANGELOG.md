@@ -17,6 +17,15 @@ becomes the notes of its GitHub Release (see
   tarball and packages ship `design.md`, `metrics.md` and `runbook.md` next to
   `operations.md`.
 
+### Added
+
+- `--metrics-verb-durations` (default `true`): `false` stops exporting
+  `hostping.verb.duration` (`hostping_verb_duration_microseconds`), which is
+  3 of the 10 series of a GPU path and 2 of the 9 of a memory path, the
+  largest per-path share on a host with many RNICs. A Fig.2 sim host drops
+  from 524 to 412 `hostping_*` series. The probes still time the verbs; the
+  report's `verb_ns` and the `gpu_slow_mr_reg` diagnosis are unaffected.
+
 ## [0.1.2] - 2026-10-13
 
 ### Changed

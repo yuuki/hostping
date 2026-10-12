@@ -33,6 +33,10 @@ HOSTPING_OPTS=""
 #                              TLS and/or basic auth on /metrics (Prometheus
 #                              exporter-toolkit web config; see
 #                              docs/operations.md)
+#   --metrics-verb-durations=false
+#                              do not export hostping_verb_duration_microseconds
+#                              (3 series per GPU path, 2 per memory path; the
+#                              report keeps verb_ns)
 #   --report-file /var/log/hostping/reports.jsonl
 #                              also append each report as one JSON line to a
 #                              file (reopened per report: logrotate-safe)

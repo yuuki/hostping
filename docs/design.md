@@ -601,7 +601,8 @@ The cause is judged on idle runs only. Under load a registration competes with
 the workload for the GPU and its driver, so single registrations on a
 saturated but healthy host take several times the idle median. Busy mode's
 reduced probe set leaves each GPU a single reading with no median to absorb
-that. `verb_ns` and `hostping.verb.duration` are still reported in every mode.
+that. `verb_ns` and `hostping.verb.duration` (unless `--metrics-verb-durations=false`)
+are still reported in every mode.
 The diagnosis is advisory. It never changes a path or link status, so
 Algorithm 1 is unaffected.
 

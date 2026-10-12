@@ -144,6 +144,24 @@ func TestMutualInfiniBandFlag(t *testing.T) {
 	}
 }
 
+// hostping.verb.duration is exported by default; --metrics-verb-durations=false
+// turns it off.
+func TestMetricsVerbDurationsFlag(t *testing.T) {
+	if !Defaults().MetricsVerbDurations {
+		t.Fatal("MetricsVerbDurations must default to true")
+	}
+	cfg := Defaults()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{})
+	cfg.RegisterFlags(fs)
+	if err := fs.Parse([]string{"--metrics-verb-durations=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsVerbDurations {
+		t.Fatal("--metrics-verb-durations=false did not clear MetricsVerbDurations")
+	}
+}
+
 // --exclude-rnic is repeatable and also takes a comma-separated list; an
 // empty name is an error rather than an entry that matches nothing.
 func TestExcludeRNICFlag(t *testing.T) {

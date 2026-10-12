@@ -641,7 +641,7 @@ host. Notation:
 | --- | --- | --- |
 | `hostping_loopback_latency_microseconds`, `hostping_loopback_bandwidth_bit_per_second`, `hostping_path_abnormal` | 3 P | `rnic` × `endpoint` |
 | `hostping_path_status_code`, `hostping_path_uncertain_reason_code`, `hostping_path_latency_status_code`, `hostping_path_latency_reason_code` | 4 P | `rnic` × `endpoint`; the state is the value, not a label |
-| `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup` |
+| `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup`; none with `--metrics-verb-durations=false` |
 | `hostping_link_abnormal_count` | L | `link` |
 | `hostping_link_status_code` | L | `link`; the state is the value |
 | `hostping_bus_utilization` | ≤ L | `link`; only hops a live source read (RNIC and GPU PCIe, `mem.N` and `upi.A-B` with `--uncore-util`) |
@@ -668,7 +668,11 @@ constant 41 is the 11 liveness series, the 2 `hostping_endpoint_skipped`
 series and the 28 `hostping_status_code_info` series.
 
 The path terms dominate. Each RNIC→endpoint pair costs about 10 series, so a
-host grows with R × E. Prometheus adds its own `job` and `instance` labels, and
+host grows with R × E. `--metrics-verb-durations=false` drops
+`hostping_verb_duration_microseconds`, the 3 P_gpu + 2 P_mem of those terms,
+leaving 7 series per path (the Fig.2 sim host below scrapes 412 instead of
+524). The probes still time the verbs, and the report's `verb_ns` and the
+`gpu_slow_mr_reg` diagnosis keep using them. Prometheus adds its own `job` and `instance` labels, and
 the exporter adds the constant `otel_scope_*` labels. None of those multiply.
 The endpoint skip reason (free-form probe text), a path's baseline sub-class
 and a cause's subjects (which GPU, which link) are not labels.

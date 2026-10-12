@@ -75,7 +75,7 @@ agent from one with nothing to report. See
 | `hostping.cpu.busy` | gauge (0–1) | `numa`, `socket` | CPU busy fraction of the NUMA node over the poll interval, from `/proc/stat`; no sample when unread (see [CPU load](design.md#cpu-load-on-an-idle-host)) |
 | `hostping.rnic.pause_duration_ratio` | gauge (ratio) | `rnic` | Tx pause seconds per second; `--pfc-high` (default 0.03 = 30 ms/s) compares against it |
 | `hostping.rnic.drop.delta` | gauge | `rnic` | Packet drop counter delta over the last poll |
-| `hostping.verb.duration` | gauge (µs) | `rnic`, `endpoint`, `endpoint_kind`, `verb` | Execution time of the loopback probe's setup verbs (`gpu_alloc` on GPU endpoints only, `mr_reg`, `qp_setup`; `mem_warmup` on memory endpoints with `--mem-warmup`) in the last run |
+| `hostping.verb.duration` | gauge (µs) | `rnic`, `endpoint`, `endpoint_kind`, `verb` | Execution time of the loopback probe's setup verbs (`gpu_alloc` on GPU endpoints only, `mr_reg`, `qp_setup`; `mem_warmup` on memory endpoints with `--mem-warmup`) in the last run. Not exported with `--metrics-verb-durations=false` |
 | `hostping.endpoint.skipped` | gauge | `kind` | Endpoints (`gpu`/`memory`) whose loopback probes were skipped because registration failed, the GPU's compute mode is not `Default`, or an earlier loopback on the same InfiniBand RNIC failed at the port in that run; 0 when none |
 | `hostping.host.idle` | gauge (0/1) | — | 1 when the last run classified the host as idle |
 | `hostping.engine.run.count` | counter | `trigger`, `mode` | Engine runs whose report was confirmed (held idle-mode runs count once confirmed) |
@@ -134,6 +134,13 @@ The metrics endpoint is plain, unauthenticated HTTP unless
 `--metrics-web-config` names a Prometheus exporter-toolkit web config (TLS,
 basic auth). In production, bind it to a management address. An address that
 cannot be bound fails the start.
+
+`--metrics-verb-durations=false` stops exporting `hostping.verb.duration` to
+both `/metrics` and OTLP. It is 3 of the 10 series of a GPU path and 2 of the 9
+of a memory path, so it is the largest per-path share on a host with many
+RNICs (see [Series cardinality](operations.md#series-cardinality)). The probes
+still time the verbs: the report's `verb_ns` and the `gpu_slow_mr_reg`
+diagnosis are unaffected.
 
 OTLP is enabled by `--otlp` or `OTEL_EXPORTER_OTLP_ENDPOINT`. The transport
 security depends on the endpoint:

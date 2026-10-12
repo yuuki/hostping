@@ -919,6 +919,8 @@ consecutive idle runs.
 **Check first.**
 
 - `hostping_verb_duration_microseconds{verb="mr_reg"}` for that GPU over time.
+  With `--metrics-verb-durations=false` the series is absent; read the
+  paths' `verb_ns` in the report instead.
 - The GPU's health in `nvidia-smi -q` and `dmesg` (Xid messages).
 - The peer-memory / dma-buf path in use.
 
