@@ -11,6 +11,11 @@ pub fn build(b: *std.Build) void {
     const cross_x86_64_linux = target.result.os.tag == .linux and
         target.result.cpu.arch == .x86_64 and !target.query.isNative();
 
+    // Debug builds for x86_64 default to Zig's self-hosted backend, whose
+    // assembler lacks the non-temporal store in src/memwarm.zig (movnti), so
+    // always use LLVM there, as release builds already do.
+    const use_llvm: ?bool = if (target.result.cpu.arch == .x86_64) true else null;
+
     // Zig 0.17 removed @cImport, so C headers are translated here and
     // imported by module name. The built-in TranslateC step is deprecated in
     // favour of the external translate-c package, but it needs no package
@@ -49,6 +54,7 @@ pub fn build(b: *std.Build) void {
         .name = "hostping_probe",
         .linkage = .dynamic,
         .root_module = probe,
+        .use_llvm = use_llvm,
     });
     lib.bundle_compiler_rt = true;
     b.installArtifact(lib);
@@ -60,7 +66,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.addImport("hostping_h", hostping_h);
-    const tests = b.addTest(.{ .root_module = test_mod });
+    const tests = b.addTest(.{ .root_module = test_mod, .use_llvm = use_llvm });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run Zig unit tests");
     test_step.dependOn(&run_tests.step);
