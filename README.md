@@ -89,7 +89,7 @@ The `x86_64` build links against glibc 2.28 (`GLIBC_VERSION` in the Makefile), s
 Each `vX.Y.Z` tag has a GitHub Release, with notes from [CHANGELOG.md](CHANGELOG.md), carrying linux-amd64 `.deb` and `.rpm` packages, `hostping-X.Y.Z-linux-amd64.tar.gz` (both binaries, the probe library, the docs, and the systemd unit) and `SHA256SUMS`. To install a package:
 
 ```bash
-gh release download v0.1.0 --repo yuuki/hostping \
+gh release download v0.1.1 --repo yuuki/hostping \
     --pattern 'hostping*' --pattern SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 sudo apt install ./hostping_*_amd64.deb      # or: sudo dnf install ./hostping-*.x86_64.rpm
@@ -292,6 +292,8 @@ agent from one with nothing to report; see
 | `hostping.monitor.host_idle` | gauge (0/1) | — | 1 when the last clean poll found the host idle, 0 when busy or unclassified. Unlike `hostping.host.idle`, follows every poll rather than the last report |
 | `hostping.diagnosis.count` | counter | `code`, `confidence` | Root-cause events |
 | `hostping.build.info` | gauge | `version`, `commit`, `zig`, `go` | Always 1; names the running build. Exported from start-up, before any run |
+| `hostping.rnic.info` | gauge | `rnic`, `device`, `pcie_bdf`, `netdev`, `link_layer`, `fabric`, `socket`, `numa` | Always 1, one series per RNIC; maps the `rnic` ID the other series carry to the IB device name (`mlx5_N`), PCI address, netdev, port link layer (`Ethernet`/`InfiniBand`), mutual-probe pairing key (`fabric`, e.g. `v4:10.0.0.0`) and NUMA placement. An identifier discovery could not read is `unknown`. Exported from start-up; RNICs dropped by `--exclude-rnic` have none |
+| `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |
 
 Loopback latency, mutual RTT and verb durations are gauges, not histograms: the
 probe produces one p50 per path (or RNIC pair) per run, and calls each setup
@@ -588,7 +590,11 @@ hostping: topology: warning: mlx5_4 (0000:3c:00.0) looks like a management HCA (
 RNIC IDs (`rnic0`, `rnic1`, …) are positions in the sorted device list, so
 excluding a device, like adding or removing one, renumbers every RNIC after it.
 Dashboards and alerts that must follow one physical RNIC should key on its
-`device` or `pcie_bdf` (both in `hostpingctl topology`), not on the ID. The
+`device` or `pcie_bdf` (both in `hostpingctl topology` and on
+`hostping_rnic_info`), not on the ID: join them onto any `rnic` series, e.g.
+`hostping_path_abnormal * on (instance, rnic) group_left (device, pcie_bdf)
+hostping_rnic_info` (see
+[docs/operations.md](docs/operations.md#joining-physical-identifiers)). The
 daemon's saved state (`--state-dir`) belongs to one topology and starts over
 when the set of RNICs changes.
 

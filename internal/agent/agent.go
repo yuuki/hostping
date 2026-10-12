@@ -167,7 +167,7 @@ func Run(cfg config.Config) error {
 	if !cfg.Once {
 		live = telemetry.NewLiveness(cfg.MetricInterval, nil)
 	}
-	tel, err := startTelemetry(cfg, telemetry.WithLiveness(live))
+	tel, err := startTelemetry(cfg, telemetry.WithLiveness(live), telemetry.WithTopology(g.RNICs, g.Endpoints))
 	if err != nil {
 		return err
 	}

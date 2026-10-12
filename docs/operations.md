@@ -105,7 +105,8 @@ such a device in `/etc/default/hostping` before `systemctl enable`, and see
 [Excluding RNICs](../README.md#excluding-rnics---exclude-rnic). RNIC IDs
 (`rnicN`) are positions in the sorted device list and shift when a device is
 excluded, added or removed: key dashboards and alerts on `device` or
-`pcie_bdf` rather than on the ID.
+`pcie_bdf` rather than on the ID, by joining `hostping_rnic_info` (see
+[Joining physical identifiers](#joining-physical-identifiers)).
 
 ## Privileges and devices
 
@@ -367,6 +368,52 @@ increase means a workload keeps coming back during idle runs; that is
 expected on a host that pauses between iterations, but if it never stops,
 no idle diagnosis is being made.
 
+## Joining physical identifiers
+
+Every measurement series names an RNIC by its ID (`rnic="rnic3"`) and an
+endpoint by `gpuN` or `memN`. Those IDs are positions in discovery's sorted
+lists, so they move when a device is excluded, added or removed. Two info
+gauges, always 1 and exported from the first scrape, carry the physical
+identifiers:
+
+| Series | Labels |
+| --- | --- |
+| `hostping_rnic_info` | `rnic`, `device` (IB device, `mlx5_N`), `pcie_bdf`, `netdev`, `link_layer` (`Ethernet`/`InfiniBand`), `fabric` (the mutual-probe pairing key, e.g. `v4:10.0.0.0`), `socket`, `numa` |
+| `hostping_endpoint_info` | `endpoint`, `kind` (`gpu`/`memory`), `index`, `socket`, `numa`; GPUs also `pcie_bdf` and `root_port` |
+
+A label discovery could not fill reads `unknown` (`fabric` for an RNIC with no
+RoCEv2 GID, `link_layer` on a `--topology-file` that omits it). A memory
+endpoint has no `pcie_bdf` or `root_port`. An RNIC dropped by `--exclude-rnic`
+has no `hostping_rnic_info` series. The values are fixed at start-up: a
+renumbering after a device change shows up after the daemon restarts, together
+with every other series.
+
+Join them onto any series with `group_left`:
+
+```promql
+# Abnormal paths by IB device and PCI address of the RNIC.
+hostping_path_abnormal
+  * on (instance, rnic) group_left (device, pcie_bdf)
+    hostping_rnic_info
+
+# PFC pause ratio per IB device.
+hostping_rnic_pause_duration_ratio
+  * on (instance, rnic) group_left (device)
+    hostping_rnic_info
+
+# Loopback bandwidth to GPUs, by the GPU's PCI address.
+hostping_loopback_bandwidth_bit_per_second
+  * on (instance, endpoint) group_left (pcie_bdf)
+    hostping_endpoint_info{kind="gpu"}
+```
+
+The info gauges carry the same constant `otel_scope_*` labels as every other
+hostping series, so `on (instance, rnic)` matches one series on each side. The
+mutual series name RNICs as `src` and `dst`; join each side with
+`label_replace` (for example `label_replace(hostping_rnic_info, "src", "$1",
+"rnic", "(.*)")`). The diagnosis counter has no RNIC label, so the bundled
+alerting rules do not join: the report names the devices of each cause.
+
 ## Alerting rules
 
 [`contrib/prometheus/hostping-rules.yml`](../contrib/prometheus/hostping-rules.yml)
@@ -413,17 +460,19 @@ against a scrape of the `--sim` Fig.2 host. Notation:
 | `hostping_endpoint_skipped` | 2 | `kind` |
 | `hostping_diagnosis_count_total` | D ≤ 29 | `code` × `confidence`: only the pairs the analyzer emits (23 codes, most at one confidence) |
 | `hostping_engine_run_count_total` | T ≤ 6 for the daemon | `trigger` × `mode`: idle × {`idle`, `mutual_timeout`}, busy × {`pfc`, `packet_drops`, `periodic`, `mutual_timeout`} |
+| `hostping_rnic_info` | R | `rnic` (the other labels are fixed per RNIC) |
+| `hostping_endpoint_info` | E | `endpoint` (the other labels are fixed per endpoint) |
 | Liveness: `hostping_host_idle`, `hostping_monitor_host_idle`, three `*_timestamp_seconds`, `hostping_engine_run_failed_total` (2 `stage`), `hostping_engine_run_discarded_total` (2 `reason`), `hostping_monitor_poll_errors_total`, `hostping_build_info` | 11 | |
 
 Per host:
 
 ```
-series ≈ 26 P_gpu + 25 P_mem + 5 L + U + 3 M + 3 R + 13 + D + T
+series ≈ 28 P_gpu + 27 P_mem + 5 L + U + 3 M + 4 R + E + 13 + D + T
 ```
 
 where U ≤ L is the number of links with a utilization source, plus about 50
 Go runtime, process and `target_info` series the Prometheus client adds. The
-path terms dominate: about 26 series per RNIC→endpoint pair, so a host grows
+path terms dominate: about 28 series per RNIC→endpoint pair, so a host grows
 with R × E. Prometheus adds its own `job` and `instance` labels and the
 exporter the constant `otel_scope_*` labels; none of those multiply. The
 endpoint skip reason (free-form probe text), a path's baseline sub-class and a
@@ -435,11 +484,11 @@ PCIe, 8 GPU PCIe, 4 switch, 4 root port, 2 memory, 1 inter-socket; M = 6
 under rail scope, no live bus utilization so U = 0):
 
 ```
-26 × 32 + 25 × 8 + 5 × 23 + 0 + 3 × 6 + 3 × 4 + 13 + D + T
-= 832 + 200 + 115 + 18 + 12 + 13 + D + T = 1190 + D + T
+28 × 32 + 27 × 8 + 5 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 13 + D + T
+= 896 + 216 + 115 + 18 + 16 + 10 + 13 + D + T = 1284 + D + T
 ```
 
-A healthy idle sim run scrapes 1191 `hostping_*` series (D = 0, T = 1).
+A healthy idle sim run scrapes 1285 `hostping_*` series (D = 0, T = 1).
 Each further diagnosis code and confidence, and each further trigger/mode
 combination, adds one series for the life of the process. The same host
 under `--mutual-scope=host` has the same M = 6; an 8-RNIC host would have
@@ -447,6 +496,9 @@ M = 28 there.
 
 When series appear and disappear:
 
+- **Present from the first scrape:** `hostping_build_info`,
+  `hostping_rnic_info` and `hostping_endpoint_info` (fixed at start-up), and
+  the liveness counters (written as 0).
 - **Absent until first written:** path, link and verb series until the first
   run reports them; `hostping_diagnosis_count_total` per `(code, confidence)`
   until the first run that emits it; `hostping_engine_run_count_total` per

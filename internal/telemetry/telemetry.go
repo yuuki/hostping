@@ -93,7 +93,9 @@ var (
 type Option func(*options)
 
 type options struct {
-	live *Liveness
+	live      *Liveness
+	rnics     []model.RNIC
+	endpoints []model.Endpoint
 }
 
 // WithLiveness makes /healthz report l: 503 while the daemon's poll loop is
@@ -169,6 +171,16 @@ var latencySeries = []struct {
 // reason is logged and carried in the report instead.
 var endpointKinds = []model.EndpointKind{model.EndpointGPU, model.EndpointMemory}
 
+// WithTopology exports hostping.rnic.info and hostping.endpoint.info for the
+// discovered RNICs and endpoints. The slices are copied: the info series are
+// fixed at start-up and every collection writes the same values.
+func WithTopology(rnics []model.RNIC, endpoints []model.Endpoint) Option {
+	return func(o *options) {
+		o.rnics = append([]model.RNIC(nil), rnics...)
+		o.endpoints = append([]model.Endpoint(nil), endpoints...)
+	}
+}
+
 // Start builds the meter provider and its exporters. build is exported as
 // hostping.build.info.
 func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ...Option) (*Telemetry, error) {
@@ -221,6 +233,9 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 		return fail(err)
 	}
 	if err := t.registerBuildInfo(build); err != nil {
+		return fail(err)
+	}
+	if err := t.registerTopologyInfo(o.rnics, o.endpoints); err != nil {
 		return fail(err)
 	}
 	if cfg.PrometheusAddr != "" {
@@ -520,6 +535,91 @@ func (t *Telemetry) registerBuildInfo(build buildinfo.Info) error {
 		metric.WithDescription("Always 1; the attributes identify the running build"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 			o.Observe(1, attrs)
+			return nil
+		}))
+	return err
+}
+
+// unknownAttr is the value of an identity attribute discovery could not
+// fill, as topology discovery spells an unknown fabric.
+const unknownAttr = "unknown"
+
+func orUnknown(v string) string {
+	if v == "" {
+		return unknownAttr
+	}
+	return v
+}
+
+// rnicInfoAttrs is the attribute set of one hostping.rnic.info series. rnic is
+// the RNIC ID every other RNIC series carries, so a query joins on it to read
+// the device name and PCI address.
+func rnicInfoAttrs(n model.RNIC) attribute.Set {
+	return attribute.NewSet(
+		attribute.String("rnic", n.ID),
+		attribute.String("device", orUnknown(n.Device)),
+		attribute.String("pcie_bdf", orUnknown(n.PCIeBDF)),
+		attribute.String("netdev", orUnknown(n.Netdev)),
+		attribute.String("link_layer", orUnknown(n.LinkLayer)),
+		attribute.String("fabric", orUnknown(n.Fabric)),
+		attribute.String("socket", strconv.Itoa(n.Socket)),
+		attribute.String("numa", strconv.Itoa(n.NUMA)),
+	)
+}
+
+// endpointInfoAttrs is the attribute set of one hostping.endpoint.info series.
+// A memory endpoint has no PCI function, so it carries no pcie_bdf; root_port
+// is left out where the endpoint has none (memory). A GPU whose address was not
+// read says "unknown".
+func endpointInfoAttrs(e model.Endpoint) attribute.Set {
+	kv := []attribute.KeyValue{
+		attribute.String("endpoint", e.ID),
+		attribute.String("kind", string(e.Kind)),
+		attribute.String("index", strconv.Itoa(e.Index)),
+		attribute.String("socket", strconv.Itoa(e.Socket)),
+		attribute.String("numa", strconv.Itoa(e.NUMA)),
+	}
+	if e.Kind != model.EndpointMemory {
+		kv = append(kv, attribute.String("pcie_bdf", orUnknown(e.PCIeBDF)))
+	}
+	if e.RootPort != "" {
+		kv = append(kv, attribute.String("root_port", e.RootPort))
+	}
+	return attribute.NewSet(kv...)
+}
+
+// registerTopologyInfo exports hostping.rnic.info and hostping.endpoint.info:
+// a constant 1 per RNIC and per endpoint whose attributes carry the physical
+// identifiers (IB device, PCI BDF, NUMA placement) the measurement series
+// leave out. Like hostping.build.info they are observed on every collection,
+// so they are on /metrics from the first scrape. RNICs dropped by
+// --exclude-rnic are not in rnics and get no series.
+func (t *Telemetry) registerTopologyInfo(rnics []model.RNIC, endpoints []model.Endpoint) error {
+	rnicAttrs := make([]metric.ObserveOption, len(rnics))
+	for i, n := range rnics {
+		rnicAttrs[i] = metric.WithAttributeSet(rnicInfoAttrs(n))
+	}
+	epAttrs := make([]metric.ObserveOption, len(endpoints))
+	for i, e := range endpoints {
+		epAttrs[i] = metric.WithAttributeSet(endpointInfoAttrs(e))
+	}
+	_, err := t.meter.Int64ObservableGauge("hostping.rnic.info",
+		metric.WithDescription("Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement)"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for _, a := range rnicAttrs {
+				o.Observe(1, a)
+			}
+			return nil
+		}))
+	if err != nil {
+		return err
+	}
+	_, err = t.meter.Int64ObservableGauge("hostping.endpoint.info",
+		metric.WithDescription("Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement)"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for _, a := range epAttrs {
+				o.Observe(1, a)
+			}
 			return nil
 		}))
 	return err
