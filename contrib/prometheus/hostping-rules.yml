@@ -162,3 +162,33 @@ groups:
           summary: "hostping skips {{ $value }} {{ $labels.kind }} endpoint(s) on {{ $labels.instance }}"
           description: "Loopback probes to {{ $value }} {{ $labels.kind }} endpoint(s) have been skipped for an hour, so paths to them are not diagnosed. The journal and the report's skipped_endpoints give the reason."
           runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingendpointsskipped"
+
+  # Path and link states by name, for dashboards. The status gauges hold one
+  # code per path or link (hostping_path_status_code and friends);
+  # hostping_status_code_info names every code. count_values turns the code
+  # into a `code` label, which joins on that table. The `metric` matcher is the
+  # OpenTelemetry instrument name, with dots. These are not paging signals: the
+  # gauges hold the last report's verdict (see docs/runbook.md, Paging policy).
+  - name: hostping-status
+    rules:
+      # Paths per status (normal, uncertain, abnormal) on each host.
+      - record: hostping:path_status:count
+        expr: |
+          count_values by (job, instance) ("code", hostping_path_status_code)
+            * on (job, instance, code) group_left (status)
+              hostping_status_code_info{metric="hostping.path.status_code"}
+
+      # Uncertain paths per reason on each host. Decided paths carry reason
+      # code 0 (none) and are left out.
+      - record: hostping:path_uncertain_reason:count
+        expr: |
+          count_values by (job, instance) ("code", hostping_path_uncertain_reason_code != 0)
+            * on (job, instance, code) group_left (reason)
+              hostping_status_code_info{metric="hostping.path.uncertain_reason_code"}
+
+      # Links per Algorithm 1 status (normal, uncertain, abnormal, gray).
+      - record: hostping:link_status:count
+        expr: |
+          count_values by (job, instance) ("code", hostping_link_status_code)
+            * on (job, instance, code) group_left (status)
+              hostping_status_code_info{metric="hostping.link.status_code"}
