@@ -135,8 +135,11 @@ func TestRecordReportInstruments(t *testing.T) {
 	if got := gaugeInt(t, ms, "hostping.path.abnormal")[pathKey]; got != 1 {
 		t.Errorf("path.abnormal = %d, want 1", got)
 	}
-	if got := gaugeInt(t, ms, "hostping.path.status")["endpoint=mem0,reason=none,rnic=rnic0,status=abnormal"]; got != 1 {
-		t.Errorf("path.status[abnormal] = %d, want 1", got)
+	if got := gaugeInt(t, ms, "hostping.path.status_code")[pathKey]; got != 3 {
+		t.Errorf("path.status_code = %d, want 3 (abnormal)", got)
+	}
+	if got := gaugeInt(t, ms, "hostping.link.status_code")["link=rp.0"]; got != 3 {
+		t.Errorf("link.status_code = %d, want 3 (abnormal)", got)
 	}
 	if got := gaugeInt(t, ms, "hostping.link.abnormal_count")["link=rp.0"]; got != 3 {
 		t.Errorf("link.abnormal_count = %d, want 3", got)
@@ -166,8 +169,8 @@ func TestRecordReportInstruments(t *testing.T) {
 }
 
 // A path/link gauge must not keep a stale series when a status changes: the
-// status lives in hostping.link.status, which is rewritten for every status on
-// every report.
+// status lives in the value of hostping.link.status_code, one series per link
+// rewritten on every report.
 func TestRecordReportNoStaleStatusSeries(t *testing.T) {
 	tel, reader := newTestTelemetry(t)
 	ctx := context.Background()
@@ -191,21 +194,9 @@ func TestRecordReportNoStaleStatusSeries(t *testing.T) {
 		t.Errorf("bus.utilization = %v, want one series at 0.1", bus)
 	}
 
-	status := gaugeInt(t, ms, "hostping.link.status")
-	want := map[string]int64{
-		"link=rp.0,status=uncertain": 0,
-		"link=rp.0,status=normal":    1,
-		"link=rp.0,status=abnormal":  0,
-		"link=rp.0,status=gray":      0,
-	}
-	if len(status) != len(want) {
-		t.Fatalf("link.status has %d series (%v), want %d", len(status), status, len(want))
-	}
-	for k, v := range want {
-		if status[k] != v {
-			t.Errorf("link.status[%s] = %d, want %d", k, status[k], v)
-		}
-	}
+	assertGaugeSeries(t, "link.status_code", gaugeInt(t, ms, "hostping.link.status_code"), map[string]int64{
+		"link=rp.0": 1, // normal
+	})
 }
 
 func ptr(v float64) *float64 { return &v }
@@ -378,163 +369,116 @@ func assertGaugeSeries(t *testing.T, name string, got, want map[string]int64) {
 }
 
 // hostping.path.abnormal is binary, so a path hostping never judged reports the
-// same 0 as a healthy one and uncertain is invisible in metrics. path.status
-// carries the status and, for an uncertain path, why — and like link.status it
-// rewrites every series it owns on every report, so a path that changes status
-// or reason leaves none of them stranded at 1.
+// same 0 as a healthy one and uncertain is invisible in metrics.
+// path.status_code carries the status and path.uncertain_reason_code, for an
+// uncertain path, why. Both are one series per path rewritten on every report,
+// so a path that changes status or reason keeps no trace of the old one.
 func TestRecordReportPathStatus(t *testing.T) {
 	tel, reader := newTestTelemetry(t)
 	ctx := context.Background()
+	const key = "endpoint=gpu4,rnic=rnic0"
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC:            "rnic0",
 		Endpoint:        "gpu4",
 		Status:          model.PathUncertain,
 		UncertainReason: model.UncertainNonAffinitive,
 	}}})
-
-	want := map[string]int64{
-		"endpoint=gpu4,reason=none,rnic=rnic0,status=uncertain":           0,
-		"endpoint=gpu4,reason=no_path,rnic=rnic0,status=uncertain":        0,
-		"endpoint=gpu4,reason=rnic_busy,rnic=rnic0,status=uncertain":      0,
-		"endpoint=gpu4,reason=non_affinitive,rnic=rnic0,status=uncertain": 1,
-		"endpoint=gpu4,reason=below_ceiling,rnic=rnic0,status=uncertain":  0,
-		"endpoint=gpu4,reason=no_ceiling,rnic=rnic0,status=uncertain":     0,
-		"endpoint=gpu4,reason=host_shift,rnic=rnic0,status=uncertain":     0,
-		"endpoint=gpu4,reason=cpu_busy,rnic=rnic0,status=uncertain":       0,
-		"endpoint=gpu4,reason=none,rnic=rnic0,status=normal":              0,
-		"endpoint=gpu4,reason=none,rnic=rnic0,status=abnormal":            0,
-	}
 	ms := collect(t, reader)
-	assertGaugeSeries(t, "path.status", gaugeInt(t, ms, "hostping.path.status"), want)
-	if got := gaugeInt(t, ms, "hostping.path.abnormal")["endpoint=gpu4,rnic=rnic0"]; got != 0 {
+	assertGaugeSeries(t, "path.status_code", gaugeInt(t, ms, "hostping.path.status_code"), map[string]int64{key: 2})
+	assertGaugeSeries(t, "path.uncertain_reason_code", gaugeInt(t, ms, "hostping.path.uncertain_reason_code"), map[string]int64{key: 3})
+	if got := gaugeInt(t, ms, "hostping.path.abnormal")[key]; got != 0 {
 		t.Errorf("path.abnormal = %d, want 0 on an uncertain path", got)
 	}
 
-	// The same path, now measurably degraded: its reason series has to fall
-	// back to 0 rather than keep reporting a by-design uncertain path.
+	// The same path, now measurably degraded: its reason has to fall back to
+	// none rather than keep reporting a by-design uncertain path.
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC: "rnic0", Endpoint: "gpu4", Status: model.PathAbnormal,
 	}}})
-	want["endpoint=gpu4,reason=non_affinitive,rnic=rnic0,status=uncertain"] = 0
-	want["endpoint=gpu4,reason=none,rnic=rnic0,status=abnormal"] = 1
 	ms = collect(t, reader)
-	assertGaugeSeries(t, "path.status", gaugeInt(t, ms, "hostping.path.status"), want)
-	if got := gaugeInt(t, ms, "hostping.path.abnormal")["endpoint=gpu4,rnic=rnic0"]; got != 1 {
+	assertGaugeSeries(t, "path.status_code", gaugeInt(t, ms, "hostping.path.status_code"), map[string]int64{key: 3})
+	assertGaugeSeries(t, "path.uncertain_reason_code", gaugeInt(t, ms, "hostping.path.uncertain_reason_code"), map[string]int64{key: 0})
+	if got := gaugeInt(t, ms, "hostping.path.abnormal")[key]; got != 1 {
 		t.Errorf("path.abnormal = %d, want 1: the existing metric is unchanged", got)
 	}
 }
 
-// Every reason reaches its own series, and exactly one series per path is 1.
-// RecordReport writes whatever report it is handed, so a reason left on a
-// decided path is ignored rather than leaving the path with no series at 1.
+// Every reason reaches its own code. RecordReport writes whatever report it is
+// handed, so a reason left on a decided path is exported as none.
 func TestRecordReportPathStatusReasons(t *testing.T) {
 	cases := []struct {
-		name string
-		path model.PathMeasurement
-		want string
-	}{{
-		name: "busy RNIC",
-		path: model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainRNICBusy},
-		want: "endpoint=gpu0,reason=rnic_busy,rnic=rnic0,status=uncertain",
-	}, {
-		name: "no graph route",
-		path: model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainNoPath},
-		want: "endpoint=gpu0,reason=no_path,rnic=rnic0,status=uncertain",
-	}, {
-		name: "affinitive path below its ceiling",
-		path: model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainBelowCeiling},
-		want: "endpoint=gpu0,reason=below_ceiling,rnic=rnic0,status=uncertain",
-	}, {
-		name: "affinitive path with no ceiling to hold it to",
-		path: model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainNoCeiling},
-		want: "endpoint=gpu0,reason=no_ceiling,rnic=rnic0,status=uncertain",
-	}, {
-		name: "host-wide slow state in the bandwidth recheck",
-		path: model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainHostShift},
-		want: "endpoint=gpu0,reason=host_shift,rnic=rnic0,status=uncertain",
-	}, {
-		name: "uncertain with no reason recorded",
-		path: model.PathMeasurement{Status: model.PathUncertain},
-		want: "endpoint=gpu0,reason=none,rnic=rnic0,status=uncertain",
-	}, {
-		name: "decided path carrying a stale reason",
-		path: model.PathMeasurement{Status: model.PathNormal, UncertainReason: model.UncertainNonAffinitive},
-		want: "endpoint=gpu0,reason=none,rnic=rnic0,status=normal",
-	}}
-
+		name       string
+		path       model.PathMeasurement
+		wantStatus int64
+		wantReason int64
+	}{
+		{"no graph route", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainNoPath}, 2, 1},
+		{"busy RNIC", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainRNICBusy}, 2, 2},
+		{"non-affinitive GPU", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainNonAffinitive}, 2, 3},
+		{"affinitive path below its ceiling", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainBelowCeiling}, 2, 4},
+		{"affinitive path with no ceiling to hold it to", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainNoCeiling}, 2, 5},
+		{"host-wide slow state in the bandwidth recheck", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainHostShift}, 2, 6},
+		{"busy CPU package", model.PathMeasurement{Status: model.PathUncertain, UncertainReason: model.UncertainCPUBusy}, 2, 7},
+		{"uncertain with no reason recorded", model.PathMeasurement{Status: model.PathUncertain}, 2, 0},
+		{"decided path carrying a stale reason", model.PathMeasurement{Status: model.PathNormal, UncertainReason: model.UncertainNonAffinitive}, 1, 0},
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tel, reader := newTestTelemetry(t)
 			p := tc.path
 			p.RNIC, p.Endpoint = "rnic0", "gpu0"
 			tel.RecordReport(context.Background(), model.Report{Paths: []model.PathMeasurement{p}})
-
-			var set []string
-			for k, v := range gaugeInt(t, collect(t, reader), "hostping.path.status") {
-				if v == 1 {
-					set = append(set, k)
-				}
-			}
-			if len(set) != 1 || set[0] != tc.want {
-				t.Errorf("path.status series at 1 = %v, want exactly [%s]", set, tc.want)
-			}
+			ms := collect(t, reader)
+			const key = "endpoint=gpu0,rnic=rnic0"
+			assertGaugeSeries(t, "path.status_code", gaugeInt(t, ms, "hostping.path.status_code"), map[string]int64{key: tc.wantStatus})
+			assertGaugeSeries(t, "path.uncertain_reason_code", gaugeInt(t, ms, "hostping.path.uncertain_reason_code"), map[string]int64{key: tc.wantReason})
 		})
 	}
 }
 
-// hostping.path.latency_status is the advisory latency verdict. Like
-// path.status it rewrites all of its series on every report, so a path whose
-// latency recovers drops back to 0 on the abnormal series.
+// hostping.path.latency_status_code and latency_reason_code are the advisory
+// latency verdict. Like path.status_code they are rewritten on every report,
+// so a path whose latency recovers leaves no abnormal value behind.
 func TestRecordReportPathLatencyStatus(t *testing.T) {
 	tel, reader := newTestTelemetry(t)
 	ctx := context.Background()
+	const key = "endpoint=gpu3,rnic=rnic0"
+	check := func(status, reason int64) {
+		t.Helper()
+		ms := collect(t, reader)
+		assertGaugeSeries(t, "path.latency_status_code", gaugeInt(t, ms, "hostping.path.latency_status_code"), map[string]int64{key: status})
+		assertGaugeSeries(t, "path.latency_reason_code", gaugeInt(t, ms, "hostping.path.latency_reason_code"), map[string]int64{key: reason})
+	}
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC: "rnic0", Endpoint: "gpu3", Status: model.PathNormal,
 		LatencyStatus: model.LatencyAbnormal, LatencyReason: model.LatencyBySiblings,
 	}}})
-	want := map[string]int64{
-		"endpoint=gpu3,reason=none,rnic=rnic0,status=unknown":           0,
-		"endpoint=gpu3,reason=busy,rnic=rnic0,status=unknown":           0,
-		"endpoint=gpu3,reason=few_siblings,rnic=rnic0,status=unknown":   0,
-		"endpoint=gpu3,reason=no_path,rnic=rnic0,status=unknown":        0,
-		"endpoint=gpu3,reason=no_reading,rnic=rnic0,status=unknown":     0,
-		"endpoint=gpu3,reason=cpu_busy,rnic=rnic0,status=unknown":       0,
-		"endpoint=gpu3,reason=user_baseline,rnic=rnic0,status=normal":   0,
-		"endpoint=gpu3,reason=siblings,rnic=rnic0,status=normal":        0,
-		"endpoint=gpu3,reason=recheck_cleared,rnic=rnic0,status=normal": 0,
-		"endpoint=gpu3,reason=locality_shift,rnic=rnic0,status=normal":  0,
-		"endpoint=gpu3,reason=user_baseline,rnic=rnic0,status=abnormal": 0,
-		"endpoint=gpu3,reason=siblings,rnic=rnic0,status=abnormal":      1,
-	}
-	ms := collect(t, reader)
-	assertGaugeSeries(t, "path.latency_status", gaugeInt(t, ms, "hostping.path.latency_status"), want)
+	check(3, 2)
 	// The bandwidth verdict is untouched by the latency one.
-	if got := gaugeInt(t, ms, "hostping.path.abnormal")["endpoint=gpu3,rnic=rnic0"]; got != 0 {
+	ms := collect(t, reader)
+	if got := gaugeInt(t, ms, "hostping.path.abnormal")[key]; got != 0 {
 		t.Errorf("path.abnormal = %d, want 0: latency does not make a path abnormal", got)
+	}
+	if got := gaugeInt(t, ms, "hostping.path.status_code")[key]; got != 1 {
+		t.Errorf("path.status_code = %d, want 1 (normal): latency does not change it", got)
 	}
 
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC: "rnic0", Endpoint: "gpu3", LatencyStatus: model.LatencyUnknown, LatencyReason: model.LatencyBusy,
 	}}})
-	want["endpoint=gpu3,reason=siblings,rnic=rnic0,status=abnormal"] = 0
-	want["endpoint=gpu3,reason=busy,rnic=rnic0,status=unknown"] = 1
-	assertGaugeSeries(t, "path.latency_status", gaugeInt(t, collect(t, reader), "hostping.path.latency_status"), want)
+	check(2, 3)
 
 	// A sibling verdict the paired recheck cleared is normal with its own reason.
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC: "rnic0", Endpoint: "gpu3", LatencyStatus: model.LatencyNormal, LatencyReason: model.LatencyRecheckCleared,
 	}}})
-	want["endpoint=gpu3,reason=busy,rnic=rnic0,status=unknown"] = 0
-	want["endpoint=gpu3,reason=recheck_cleared,rnic=rnic0,status=normal"] = 1
-	assertGaugeSeries(t, "path.latency_status", gaugeInt(t, collect(t, reader), "hostping.path.latency_status"), want)
+	check(1, 7)
 
 	// So is one cleared as a rise shared by the RNICs of its NUMA node.
 	tel.RecordReport(ctx, model.Report{Paths: []model.PathMeasurement{{
 		RNIC: "rnic0", Endpoint: "gpu3", LatencyStatus: model.LatencyNormal, LatencyReason: model.LatencyLocalityShift,
 	}}})
-	want["endpoint=gpu3,reason=recheck_cleared,rnic=rnic0,status=normal"] = 0
-	want["endpoint=gpu3,reason=locality_shift,rnic=rnic0,status=normal"] = 1
-	assertGaugeSeries(t, "path.latency_status", gaugeInt(t, collect(t, reader), "hostping.path.latency_status"), want)
+	check(1, 8)
 }
 
 // hostping.verb.duration carries one series per (path, verb): gpu_alloc only
