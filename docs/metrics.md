@@ -40,10 +40,12 @@ agent from one with nothing to report; see
 | `hostping.loopback.latency` | gauge (µs) | `rnic`, `endpoint` | Small-message loopback latency, p50 of the last run |
 | `hostping.loopback.bandwidth` | gauge (bit/s) | `rnic`, `endpoint` | Bandwidth from Eq. 1 |
 | `hostping.path.abnormal` | gauge (0/1) | `rnic`, `endpoint` | 1 when the path is abnormal |
-| `hostping.path.status` | gauge (0/1) | `rnic`, `endpoint`, `status`, `reason` | 1 on the path's current status (`uncertain`/`normal`/`abnormal`) and, when uncertain, why (`no_path`/`rnic_busy`/`non_affinitive`/`below_ceiling`/`no_ceiling`/`host_shift`/`cpu_busy`; `none` on a decided path, and on an uncertain one only if no reason was recorded), 0 on the others |
-| `hostping.path.latency_status` | gauge (0/1) | `rnic`, `endpoint`, `status`, `reason` | 1 on the path's advisory small-message latency verdict (`unknown`/`normal`/`abnormal`) and its reason (`user_baseline`/`siblings` when judged, `recheck_cleared` when the paired recheck cleared a sibling verdict, `locality_shift` when the other RNICs on its NUMA node read as high; `busy`/`few_siblings`/`no_path`/`no_reading`/`cpu_busy` when not, `none` only if no reason was recorded), 0 on the others |
+| `hostping.path.status_code` | gauge (code) | `rnic`, `endpoint` | The path's current status: 1 `normal`, 2 `uncertain`, 3 `abnormal` |
+| `hostping.path.uncertain_reason_code` | gauge (code) | `rnic`, `endpoint` | Why an uncertain path is uncertain: 1 `no_path`, 2 `rnic_busy`, 3 `non_affinitive`, 4 `below_ceiling`, 5 `no_ceiling`, 6 `host_shift`, 7 `cpu_busy`; 0 `none` on a normal or abnormal path |
+| `hostping.path.latency_status_code` | gauge (code) | `rnic`, `endpoint` | The path's advisory small-message latency verdict: 1 `normal`, 2 `unknown`, 3 `abnormal` |
+| `hostping.path.latency_reason_code` | gauge (code) | `rnic`, `endpoint` | What the latency verdict was judged against (1 `user_baseline`, 2 `siblings`; 7 `recheck_cleared` when the paired recheck cleared a sibling verdict, 8 `locality_shift` when the other RNICs on its NUMA node read as high) or why it was not judged (3 `busy`, 4 `few_siblings`, 5 `no_path`, 6 `no_reading`, 9 `cpu_busy`); 0 `none` on a path never classified |
 | `hostping.link.abnormal_count` | gauge | `link` | Algorithm 1 `abnormal_cnt` |
-| `hostping.link.status` | gauge (0/1) | `link`, `status` | 1 on the link's current status (`uncertain`/`normal`/`abnormal`/`gray`), 0 on the others |
+| `hostping.link.status_code` | gauge (code) | `link` | The link's current Algorithm 1 status: 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
 | `hostping.bus.utilization` | gauge (0–1) | `link` | Intra-host bus utilization of the hop, sampled before the run; no sample when unknown (see [Bus utilization](design.md#bus-utilization)) |
 | `hostping.mutual.rtt` | gauge (µs) | `src`, `dst` | RNIC↔RNIC round trip, p50 of the last run's burst, or over the probe window when `--mutual-interval` is set (the JSON `mutual` entry marks a cross-rail pair with `cross_rail`) |
 | `hostping.mutual.loss_ratio` | gauge | `src`, `dst` | Simulated drop loss; on the live probe, whose losses are timeouts, 0, or 1 on a pair that cannot be reached |
@@ -67,16 +69,19 @@ agent from one with nothing to report; see
 | `hostping.build.info` | gauge | `version`, `commit`, `zig`, `go` | Always 1; names the running build. Exported from start-up, before any run |
 | `hostping.rnic.info` | gauge | `rnic`, `device`, `pcie_bdf`, `netdev`, `link_layer`, `fabric`, `socket`, `numa` | Always 1, one series per RNIC; maps the `rnic` ID the other series carry to the IB device name (`mlx5_N`), PCI address, netdev, port link layer (`Ethernet`/`InfiniBand`), mutual-probe pairing key (`fabric`, e.g. `v4:10.0.0.0`) and NUMA placement. An identifier discovery could not read is `unknown`. Exported from start-up; RNICs dropped by `--exclude-rnic` have none |
 | `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |
+| `hostping.status_code.info` | gauge | `metric`, `code`, `status` or `reason` | Always 1, one series per code of the `*_code` gauges above (28 in all); names what `code` means on the gauge `metric` (the OpenTelemetry name, e.g. `hostping.path.status_code`). Status gauges' rows carry `status`, reason gauges' rows `reason`. Exported from start-up |
 
 Loopback latency, mutual RTT and verb durations are gauges, not histograms: the
 probe produces one p50 per path (or RNIC pair) per run, and calls each setup
 verb once, so a histogram would only bucket summary values and its count would
-be a run count. Link and path status are
-enum-style gauges rather than a `status` attribute on `abnormal_count`, so a
-link or path that changes state leaves no stale series behind; that is also why
-`hostping.path.status` writes every status and uncertain reason as its own
-series (10 per path) and not just the one that currently applies, and
-`hostping.path.latency_status` likewise writes 12 per path. `hostping.path.abnormal`
+be a run count. Link and path status are code gauges: one series per path or
+link whose value is the code of the current state, rewritten on every report,
+so a link or path that changes state changes a value instead of leaving a
+stale series behind. The codes are fixed (a new state gets a new code; none is
+renumbered or reused), status codes start at 1 and reason codes use 0 for
+`none`; [Status codes](operations.md#status-codes) has the full
+table, Grafana value mappings and how to join `hostping.status_code.info` in
+PromQL. `hostping.path.abnormal`
 keeps its meaning — 1 only when the path is abnormal — but it cannot express
 uncertain, which reads there as the same 0 as normal. `hostping.endpoint.skipped`
 follows the same rule: every kind is written on every report so a recovered kind
@@ -87,7 +92,7 @@ log line and the `skipped_endpoints` report field. The `hostping.mutual.*`
 gauges are absent altogether on a host where no RNIC pair qualifies for the
 mutual probe; see [Diagnoses](design.md#diagnoses).
 
-Per host the series count is roughly 28 per RNIC→endpoint path plus 5 per
+Per host the series count is roughly 10 per RNIC→endpoint path plus 2 per
 link; see [Series cardinality](operations.md#series-cardinality). For
 what each `hostping.diagnosis.count` code means and which ones to page on, see
 the [runbook](runbook.md).

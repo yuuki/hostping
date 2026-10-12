@@ -417,11 +417,176 @@ mutual series name RNICs as `src` and `dst`; join each side with
 "rnic", "(.*)")`). The diagnosis counter has no RNIC label, so the bundled
 alerting rules do not join: the report names the devices of each cause.
 
+## Status codes
+
+Path and link states are exported as codes: one series per path or link
+whose value is the code of its current state. Every report rewrites the value
+of every path and link it carries, so a state change replaces the number and
+leaves no series of the old state behind.
+
+| Series (Prometheus name) | Labels | Codes |
+| --- | --- | --- |
+| `hostping_path_status_code` | `rnic`, `endpoint` | 1 `normal`, 2 `uncertain`, 3 `abnormal` |
+| `hostping_path_uncertain_reason_code` | `rnic`, `endpoint` | 0 `none` (the path is normal or abnormal), 1 `no_path`, 2 `rnic_busy`, 3 `non_affinitive`, 4 `below_ceiling`, 5 `no_ceiling`, 6 `host_shift`, 7 `cpu_busy` |
+| `hostping_path_latency_status_code` | `rnic`, `endpoint` | 1 `normal`, 2 `unknown`, 3 `abnormal` |
+| `hostping_path_latency_reason_code` | `rnic`, `endpoint` | 0 `none` (never classified), 1 `user_baseline`, 2 `siblings`, 3 `busy`, 4 `few_siblings`, 5 `no_path`, 6 `no_reading`, 7 `recheck_cleared`, 8 `locality_shift`, 9 `cpu_busy` |
+| `hostping_link_status_code` | `link` | 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
+
+The names are those of the report JSON (`status`, `uncertain_reason`,
+`latency_status`, `latency_reason` of a path; `status` of a link), whose
+format does not change. The reasons are documented with the classification in
+[design.md](design.md#baselines) and the [runbook](runbook.md).
+
+**The codes are fixed.** They are a table in `internal/telemetry/statuscode.go`,
+not the position of a value in its Go enum, and a test pins them. A state added
+later gets the next unused code of its gauge; an existing code is never
+renumbered, and the code of a removed state is not reused. Codes are names, not
+a scale: compare with `==`, not `<` or `>`, even though the three status
+gauges happen to share 1 for healthy and 3 for abnormal.
+
+**Zero.** A status always has a value, so status codes start at 1 and 0 is not
+a status: a query that fills a missing series with 0 (`or vector(0)`, a
+dashboard's null-as-zero) or a backend that defaults an unwritten gauge cannot
+make it read as a state. Reason codes use 0 for `none`, the reason of a path
+that needs none, so `!= 0` reads "has a reason". A value of -1 means hostping
+wrote a state its table has no code for; the tests rule that out, so it is a
+bug to report.
+
+`hostping_status_code_info` names every code: one series per `(metric, code)`
+(28 in all), always 1 and exported from the first scrape. `metric` is the
+OpenTelemetry instrument name, with dots (`hostping.path.status_code`), the
+same on every backend; rows of a status gauge carry `status`, rows of a reason
+gauge `reason`:
+
+```
+hostping_status_code_info{metric="hostping.path.status_code",code="3",status="abnormal"} 1
+hostping_status_code_info{metric="hostping.path.uncertain_reason_code",code="4",reason="below_ceiling"} 1
+```
+
+### Querying
+
+```promql
+# Abnormal paths, by bandwidth.
+hostping_path_status_code == 3
+
+# Uncertain paths that are uncertain for a reason other than the steady state
+# of a healthy multi-GPU host (non_affinitive) or load (rnic_busy, cpu_busy).
+hostping_path_uncertain_reason_code == 4 or hostping_path_uncertain_reason_code == 5
+  or hostping_path_uncertain_reason_code == 6
+
+# An uncertain path with no reason recorded: an uncertain branch forgot to say
+# why. Should never match.
+hostping_path_status_code == 2 and hostping_path_uncertain_reason_code == 0
+
+# Paths whose latency is abnormal against the operator's baseline.
+hostping_path_latency_status_code == 3 and hostping_path_latency_reason_code == 1
+
+# Gray links.
+hostping_link_status_code == 4
+```
+
+A filter like `== 3` keeps the code as the value, so count the result
+(`count by (instance) (...)`) rather than summing it.
+
+To get names instead of numbers, turn the code into a label with
+`count_values` and join it on the info gauge. `count_values` keeps the labels
+it groups by, so list the ones that identify a path or link:
+
+```promql
+# Every path with its status as a label: {instance, rnic, endpoint, code, status} 1.
+count_values by (job, instance, rnic, endpoint) ("code", hostping_path_status_code)
+  * on (job, instance, code) group_left (status)
+    hostping_status_code_info{metric="hostping.path.status_code"}
+
+# Paths per uncertain reason on each host.
+count_values by (job, instance) ("code", hostping_path_uncertain_reason_code != 0)
+  * on (job, instance, code) group_left (reason)
+    hostping_status_code_info{metric="hostping.path.uncertain_reason_code"}
+```
+
+The bundled rules record the per-host counts as `hostping:path_status:count`,
+`hostping:path_uncertain_reason:count` and `hostping:link_status:count`
+([Alerting rules](#alerting-rules)).
+
+The join also lets an alert select states by name and carry the name as a
+label. For example, an affinitive path that has been held below its ceiling,
+or had no ceiling to hold it to, for two hours (not a bundled rule):
+
+```yaml
+- alert: HostpingPathBelowCeiling
+  expr: |
+    count_values by (job, instance, rnic, endpoint) ("code", hostping_path_uncertain_reason_code)
+      * on (job, instance, code) group_left (reason)
+        hostping_status_code_info{metric="hostping.path.uncertain_reason_code", reason=~"below_ceiling|no_ceiling"}
+  for: 2h
+  labels:
+    severity: info
+  annotations:
+    summary: "hostping: {{ $labels.rnic }} → {{ $labels.endpoint }} is uncertain ({{ $labels.reason }}) on {{ $labels.instance }}"
+```
+
+The status gauges hold the verdict of the last report until the next one, so
+they are for locating a hop or path, not for paging; see
+[Paging policy](runbook.md#paging-policy).
+
+### Grafana
+
+A State timeline or Table panel on a code gauge shows names with value
+mappings. In the panel's JSON (`fieldConfig.defaults.mappings`), for
+`hostping_path_status_code`:
+
+```json
+[{
+  "type": "value",
+  "options": {
+    "1": {"text": "normal", "color": "green", "index": 0},
+    "2": {"text": "uncertain", "color": "yellow", "index": 1},
+    "3": {"text": "abnormal", "color": "red", "index": 2}
+  }
+}]
+```
+
+`hostping_link_status_code` adds `"4": {"text": "gray", "color": "orange"}`;
+the reason gauges map their codes from the table above the same way. A
+mapping is copied into each dashboard and does not follow a new code, so a
+panel that should name every state as it is added can query the
+`count_values` join above instead and use `{{status}}` (or `{{reason}}`) as
+the legend.
+
+### Migrating from 0.1.1
+
+0.1.1 exported one 0/1 series per possible state (`hostping_path_status`,
+`hostping_path_latency_status`, `hostping_link_status`). 0.1.2 removes them
+for the code gauges; there is no option to keep the old series. Rewrite
+dashboards and rules before upgrading, or run both expressions for a release
+cycle while hosts are upgraded:
+
+| 0.1.1 | 0.1.2 |
+| --- | --- |
+| `hostping_path_status{status="abnormal"} == 1` | `hostping_path_status_code == 3` |
+| `hostping_path_status{status="normal"} == 1` | `hostping_path_status_code == 1` |
+| `hostping_path_status{status="uncertain"} == 1` (any reason) | `hostping_path_status_code == 2` |
+| `hostping_path_status{status="uncertain", reason="R"} == 1` | `hostping_path_uncertain_reason_code == <code of R>` |
+| `hostping_path_status{status="uncertain", reason="none"} == 1` | `hostping_path_status_code == 2 and hostping_path_uncertain_reason_code == 0` |
+| `hostping_path_latency_status{status="S"} == 1` | `hostping_path_latency_status_code == <code of S>` |
+| `hostping_path_latency_status{status="S", reason="R"} == 1` | `hostping_path_latency_status_code == <code of S> and hostping_path_latency_reason_code == <code of R>` |
+| `hostping_link_status{status="S"} == 1` | `hostping_link_status_code == <code of S>` |
+| `sum by (instance, status) (hostping_path_status)` | `hostping:path_status:count` (bundled rule) |
+| `sum by (instance, status) (hostping_link_status)` | `hostping:link_status:count` (bundled rule) |
+| a `status` / `reason` label in a legend or alert | the `count_values` join above |
+
+The old expressions return 1 per matching path; the new filters return the
+code, which matters only to `sum()`. 0.1.1 had no latency series for a few
+(status, reason) pairs the classifier does not produce; with separate status
+and reason gauges every pair is representable. After the upgrade the old
+series stop being scraped and go stale after Prometheus's 5-minute lookback.
+
 ## Alerting rules
 
 [`contrib/prometheus/hostping-rules.yml`](../contrib/prometheus/hostping-rules.yml)
 packages the expressions above, plus alerts on diagnoses and on skipped
-endpoints, with unit tests in `hostping-rules.test.yml`:
+endpoints and per-host counts of path and link states by name
+([Status codes](#status-codes)), with unit tests in `hostping-rules.test.yml`:
 
 ```bash
 promtool check rules contrib/prometheus/hostping-rules.yml
@@ -451,11 +616,10 @@ against a scrape of the `--sim` Fig.2 host. Notation:
 | Series | Count | Labels that multiply |
 | --- | --- | --- |
 | `hostping_loopback_latency_microseconds`, `hostping_loopback_bandwidth_bit_per_second`, `hostping_path_abnormal` | 3 P | `rnic` × `endpoint` |
-| `hostping_path_status` | 10 P | `status` × `reason`: 8 uncertain reasons plus normal and abnormal |
-| `hostping_path_latency_status` | 12 P | `status` × `reason`: 6 unknown reasons, normal and abnormal each by `user_baseline` and `siblings`, plus normal by `recheck_cleared` and by `locality_shift` |
+| `hostping_path_status_code`, `hostping_path_uncertain_reason_code`, `hostping_path_latency_status_code`, `hostping_path_latency_reason_code` | 4 P | `rnic` × `endpoint`; the state is the value, not a label |
 | `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup` |
 | `hostping_link_abnormal_count` | L | `link` |
-| `hostping_link_status` | 4 L | `status`: uncertain, normal, abnormal, gray |
+| `hostping_link_status_code` | L | `link`; the state is the value |
 | `hostping_bus_utilization` | ≤ L | `link`; only hops a live source read (RNIC and GPU PCIe, `mem.N` and `upi.A-B` with `--uncore-util`) |
 | `hostping_mutual_rtt_microseconds`, `hostping_mutual_loss_ratio`, `hostping_mutual_timeout_ratio` | 3 M | `src` × `dst` |
 | `hostping_rnic_throughput_bit_per_second`, `hostping_rnic_pause_duration_ratio`, `hostping_rnic_drop_delta` | ≤ 3 R | `rnic` |
@@ -465,18 +629,20 @@ against a scrape of the `--sim` Fig.2 host. Notation:
 | `hostping_engine_run_count_total` | T ≤ 6 for the daemon | `trigger` × `mode`: idle × {`idle`, `mutual_timeout`}, busy × {`pfc`, `packet_drops`, `periodic`, `mutual_timeout`} |
 | `hostping_rnic_info` | R | `rnic` (the other labels are fixed per RNIC) |
 | `hostping_endpoint_info` | E | `endpoint` (the other labels are fixed per endpoint) |
+| `hostping_status_code_info` | 28 | `metric` × `code`: fixed by the code tables, whatever the host |
 | Liveness: `hostping_host_idle`, `hostping_monitor_host_idle`, three `*_timestamp_seconds`, `hostping_engine_run_failed_total` (2 `stage`), `hostping_engine_run_discarded_total` (2 `reason`), `hostping_monitor_poll_errors_total`, `hostping_build_info` | 11 | |
 
 Per host:
 
 ```
-series ≈ 28 P_gpu + 27 P_mem + 5 L + U + 3 M + 4 R + E + N + 13 + D + T
+series ≈ 10 P_gpu + 9 P_mem + 2 L + U + 3 M + 4 R + E + N + 41 + D + T
 ```
 
 where U ≤ L is the number of links with a utilization source, plus about 50
 Go runtime, process and `target_info` series the Prometheus client adds. The
-path terms dominate: about 28 series per RNIC→endpoint pair, so a host grows
-with R × E. Prometheus adds its own `job` and `instance` labels and the
+constant 41 is the 11 liveness series, the 2 `hostping_endpoint_skipped` and
+the 28 `hostping_status_code_info`. The path terms dominate: about 10 series
+per RNIC→endpoint pair, so a host grows with R × E. Prometheus adds its own `job` and `instance` labels and the
 exporter the constant `otel_scope_*` labels; none of those multiply. The
 endpoint skip reason (free-form probe text), a path's baseline sub-class and a
 cause's subjects (which GPU, which link) are not labels.
@@ -488,11 +654,14 @@ under rail scope, no live bus utilization so U = 0, no CPU load read so
 N = 0):
 
 ```
-28 × 32 + 27 × 8 + 5 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 0 + 13 + D + T
-= 896 + 216 + 115 + 18 + 16 + 10 + 13 + D + T = 1284 + D + T
+10 × 32 + 9 × 8 + 2 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 0 + 41 + D + T
+= 320 + 72 + 46 + 18 + 16 + 10 + 0 + 41 + D + T = 523 + D + T
 ```
 
-A healthy idle sim run scrapes 1285 `hostping_*` series (D = 0, T = 1).
+A healthy idle sim run scrapes 524 `hostping_*` series (D = 0, T = 1);
+0.1.1, with one-hot status gauges at 22 series per path and 4 per link,
+scraped 1285. The rail-optimized `--topology fig2-rails` host has M = 0 and
+scrapes 506.
 Each further diagnosis code and confidence, and each further trigger/mode
 combination, adds one series for the life of the process. The same host
 under `--mutual-scope=host` has the same M = 6; an 8-RNIC host would have
@@ -501,7 +670,8 @@ M = 28 there.
 When series appear and disappear:
 
 - **Present from the first scrape:** `hostping_build_info`,
-  `hostping_rnic_info` and `hostping_endpoint_info` (fixed at start-up), and
+  `hostping_rnic_info`, `hostping_endpoint_info` and
+  `hostping_status_code_info` (fixed at start-up), and
   the liveness counters (written as 0).
 - **Absent until first written:** path, link and verb series until the first
   run reports them; `hostping_diagnosis_count_total` per `(code, confidence)`
@@ -522,11 +692,13 @@ When series appear and disappear:
   and skipped afterwards, a busy run that probes only the reduced set, or a
   bus whose source stopped answering leaves the earlier series in place with
   its old value. The report of the current run is authoritative.
-- **Enum gauges never strand a series:** `hostping_path_status`,
-  `hostping_path_latency_status`, `hostping_link_status` and
-  `hostping_endpoint_skipped` write every label value on every report, so the
-  count above is fixed, and a state change moves the 1 rather than creating a
-  series.
+- **State gauges never strand a series:** the `*_status_code` and
+  `*_reason_code` gauges hold the state as their value, one series per path or
+  link, so a state change rewrites that value rather than creating a series.
+  `hostping_endpoint_skipped` writes every `kind` on every report, so a
+  recovered kind falls back to 0. A path or link missing from a later report
+  keeps its last code, like every other path and link gauge (previous
+  item).
 - **Restart:** every series restarts. Counters begin again from 0 (`rate()`
   and `changes()` handle the reset), and the series that are absent until
   first written are absent again.
@@ -687,7 +859,7 @@ The latency verdict has its own guard against this drift. Without a `LAT` baseli
 
 Some platforms drift per NUMA node rather than over time: the small-message latency of every RNIC attached to one node rises together, by about the sibling floor, and stays there for minutes, so the recheck confirms it (its siblings sit on other nodes). The affected node may move between runs, and loading CPU cores may move it rather than remove it. The analyzer therefore compares each sibling verdict the recheck kept (or did not reach) with the same-class paths of the other RNICs on its RNIC's NUMA node, without probing anything: a path that does not read high against them is `normal` with `latency_reason` `locality_shift`, and its `latency_locality` shows the node, the reference and the RNICs it came from. A per-RNIC fault raises one RNIC, not all of a node, so it stays flagged; so does a slow endpoint, which a strict majority of the other NUMA nodes also read as `abnormal`. A shift spanning several nodes at once (every node of one package, say) still leaves the remaining nodes reading the endpoint normally, so it is cleared. The check needs a second RNIC on the node: a host with one RNIC per NUMA node (sub-NUMA clustering often does this) keeps the plain sibling verdict, and so does an RNIC whose NUMA node is unknown. Fixing the platform's power management, as above, removes the drift itself.
 
-What both checks leave is now and then a single path that reads high in one idle run, holds up in its recheck, and is not shared by its node, while the next run flags a different path or none. A per-path latency fault does not come and go between runs, so the daemon reports a sibling verdict only after the same path read `abnormal` in 3 consecutive idle runs, so the cause appears on the third of them, about two idle intervals after the first run that sees the rise: each path's `latency_streak` in the report counts them, a run that reads it normal or does not judge it resets it, and busy runs leave it alone. A run whose recheck cap left the path out holds its streak and reports nothing for it, since no recheck confirmed that run's reading; the rotating window reaches it in a later run. A path below 3 keeps `latency_status` `abnormal` (and `hostping_path_latency_status`) but gets no cause. A discarded idle run rolls the streaks back, and `--state-dir` keeps them across a restart. A one-shot run cannot see persistence, so it reports a sibling verdict only when the paired recheck confirmed it; a verdict against a `LAT` you set needs neither.
+What both checks leave is now and then a single path that reads high in one idle run, holds up in its recheck, and is not shared by its node, while the next run flags a different path or none. A per-path latency fault does not come and go between runs, so the daemon reports a sibling verdict only after the same path read `abnormal` in 3 consecutive idle runs, so the cause appears on the third of them, about two idle intervals after the first run that sees the rise: each path's `latency_streak` in the report counts them, a run that reads it normal or does not judge it resets it, and busy runs leave it alone. A run whose recheck cap left the path out holds its streak and reports nothing for it, since no recheck confirmed that run's reading; the rotating window reaches it in a later run. A path below 3 keeps `latency_status` `abnormal` (and `hostping_path_latency_status_code` 3) but gets no cause. A discarded idle run rolls the streaks back, and `--state-dir` keeps them across a restart. A one-shot run cannot see persistence, so it reports a sibling verdict only when the paired recheck confirmed it; a verdict against a `LAT` you set needs neither.
 
 ## Calibrating baselines
 

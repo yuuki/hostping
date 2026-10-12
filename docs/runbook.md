@@ -189,13 +189,14 @@ Why:
   rail-optimized host whose rails are isolated by design reports on **every**
   run under `--mutual-scope=host`.
 
-Why the counter and not the status gauges: `hostping_path_status` and
-`hostping_link_status` hold the verdict of the **last report** until the next
+Why the counter and not the status gauges: `hostping_path_status_code` and
+`hostping_link_status_code` hold the verdict of the **last report** until the next
 one, which may be hours away on a host that turned busy; a single busy run sets
 them; and they carry no root cause, so an abnormal path explained by
 `acs_enabled` looks the same as a failed link. They are the right series to
-find the hop once an alert has fired (`hostping_link_status{status="abnormal"} == 1`,
-`hostping_path_status{status="abnormal"} == 1`), not to decide whether to page.
+find the hop once an alert has fired (`hostping_link_status_code == 3` for
+abnormal links, `hostping_path_status_code == 3` for abnormal paths; see
+[Status codes](operations.md#status-codes)), not to decide whether to page.
 
 ## PCIe and intra-host buses
 
@@ -796,7 +797,7 @@ loopback bandwidth pattern.
 
 **Confidence and derivation.** `low`.
 
-**Check first.** `hostping_path_status{status="abnormal"} == 1` for which paths,
+**Check first.** `hostping_path_status_code == 3` for which paths,
 and whether they share a component in `hostpingctl topology`. In a busy run
 this is often the sibling comparison's residual noise; if it repeats in idle
 runs, compare with the other hosts of the same hardware class, check the

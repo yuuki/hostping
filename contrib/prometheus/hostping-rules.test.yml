@@ -278,3 +278,72 @@ tests:
               summary: "hostping skips 1 gpu endpoint(s) on host-c:9464"
               description: "Loopback probes to 1 gpu endpoint(s) have been skipped for an hour, so paths to them are not diagnosed. The journal and the report's skipped_endpoints give the reason."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingendpointsskipped"
+
+  # Status codes named through hostping_status_code_info. Two paths turn from
+  # normal to abnormal and uncertain at 10m; the counts follow the codes, not
+  # the series, so nothing of the earlier state is left.
+  - interval: 1m
+    input_series:
+      - series: 'hostping_path_status_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu0"}'
+        values: '1x9 3x10'
+      - series: 'hostping_path_status_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu1"}'
+        values: '1x9 2x10'
+      - series: 'hostping_path_status_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu1"}'
+        values: '1x19'
+      - series: 'hostping_path_uncertain_reason_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu0"}'
+        values: '0x19'
+      - series: 'hostping_path_uncertain_reason_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu1"}'
+        values: '0x9 3x10'
+      - series: 'hostping_path_uncertain_reason_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu1"}'
+        values: '0x19'
+      - series: 'hostping_link_status_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",link="rp.0"}'
+        values: '1x9 4x10'
+      - series: 'hostping_link_status_code{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",link="rp.1"}'
+        values: '1x19'
+      # The code table, as the daemon exports it (the rows the test reads).
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.status_code",code="1",status="normal"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.status_code",code="2",status="uncertain"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.status_code",code="3",status="abnormal"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.uncertain_reason_code",code="0",reason="none"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.uncertain_reason_code",code="3",reason="non_affinitive"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.link.status_code",code="1",status="normal"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.link.status_code",code="3",status="abnormal"}'
+        values: '1x19'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-d:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.link.status_code",code="4",status="gray"}'
+        values: '1x19'
+    promql_expr_test:
+      - expr: hostping:path_status:count
+        eval_time: 5m
+        exp_samples:
+          - labels: 'hostping:path_status:count{job="hostping",instance="host-d:9464",code="1",status="normal"}'
+            value: 3
+      - expr: hostping:path_status:count
+        eval_time: 15m
+        exp_samples:
+          - labels: 'hostping:path_status:count{job="hostping",instance="host-d:9464",code="1",status="normal"}'
+            value: 1
+          - labels: 'hostping:path_status:count{job="hostping",instance="host-d:9464",code="2",status="uncertain"}'
+            value: 1
+          - labels: 'hostping:path_status:count{job="hostping",instance="host-d:9464",code="3",status="abnormal"}'
+            value: 1
+      - expr: hostping:path_uncertain_reason:count
+        eval_time: 5m
+        exp_samples: []
+      - expr: hostping:path_uncertain_reason:count
+        eval_time: 15m
+        exp_samples:
+          - labels: 'hostping:path_uncertain_reason:count{job="hostping",instance="host-d:9464",code="3",reason="non_affinitive"}'
+            value: 1
+      - expr: hostping:link_status:count
+        eval_time: 15m
+        exp_samples:
+          - labels: 'hostping:link_status:count{job="hostping",instance="host-d:9464",code="1",status="normal"}'
+            value: 1
+          - labels: 'hostping:link_status:count{job="hostping",instance="host-d:9464",code="4",status="gray"}'
+            value: 1

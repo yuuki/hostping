@@ -37,7 +37,9 @@ type Telemetry struct {
 	loopBW   metric.Float64Gauge
 	pathAbn  metric.Int64Gauge
 	pathStat metric.Int64Gauge
+	pathWhy  metric.Int64Gauge
 	pathLat  metric.Int64Gauge
+	latWhy   metric.Int64Gauge
 	linkAbn  metric.Int64Gauge
 	linkStat metric.Int64Gauge
 	pause    metric.Float64Gauge
@@ -102,65 +104,6 @@ type options struct {
 // stalled. Without it /healthz is 200 while the process serves.
 func WithLiveness(l *Liveness) Option {
 	return func(o *options) { o.live = l }
-}
-
-// linkStatuses is every model.LinkStatus. hostping.link.status writes one
-// 0/1 sample per status per link on every report, so a link that changes
-// state overwrites all of its own series instead of leaving a stale one
-// behind (which is what a status attribute on a gauge would do).
-var linkStatuses = []model.LinkStatus{
-	model.LinkUncertain,
-	model.LinkNormal,
-	model.LinkAbnormal,
-	model.LinkGray,
-}
-
-// pathSeries is the (status, reason) pairs hostping.path.status writes for
-// every path on every report, following linkStatuses: the set is fixed and
-// independent of what a path actually measured, so a path that changes status
-// or reason overwrites all of its own series instead of stranding the last one
-// at 1.
-//
-// A reason only narrows model.PathUncertain, so the decided statuses carry
-// UncertainNone rather than a full status × reason product. (uncertain, none)
-// is written too: it is 0 on a classified report, and turns into the alert that
-// some uncertain branch forgot to record why.
-var pathSeries = []struct {
-	status model.PathStatus
-	reason model.PathUncertainReason
-}{
-	{model.PathUncertain, model.UncertainNone},
-	{model.PathUncertain, model.UncertainNoPath},
-	{model.PathUncertain, model.UncertainRNICBusy},
-	{model.PathUncertain, model.UncertainNonAffinitive},
-	{model.PathUncertain, model.UncertainBelowCeiling},
-	{model.PathUncertain, model.UncertainNoCeiling},
-	{model.PathUncertain, model.UncertainHostShift},
-	{model.PathUncertain, model.UncertainCPUBusy},
-	{model.PathNormal, model.UncertainNone},
-	{model.PathAbnormal, model.UncertainNone},
-}
-
-// latencySeries is the (status, reason) pairs hostping.path.latency_status
-// writes for every path on every report, fixed for the same reason as
-// pathSeries. A decided verdict carries what it was judged against; an unknown
-// one why it was not judged. (unknown, none) is 0 on a classified report.
-var latencySeries = []struct {
-	status model.LatencyStatus
-	reason model.LatencyReason
-}{
-	{model.LatencyUnknown, model.LatencyReasonNone},
-	{model.LatencyUnknown, model.LatencyBusy},
-	{model.LatencyUnknown, model.LatencyFewSiblings},
-	{model.LatencyUnknown, model.LatencyNoPath},
-	{model.LatencyUnknown, model.LatencyNoReading},
-	{model.LatencyUnknown, model.LatencyCPUBusy},
-	{model.LatencyNormal, model.LatencyByBaseline},
-	{model.LatencyNormal, model.LatencyBySiblings},
-	{model.LatencyNormal, model.LatencyRecheckCleared},
-	{model.LatencyNormal, model.LatencyLocalityShift},
-	{model.LatencyAbnormal, model.LatencyByBaseline},
-	{model.LatencyAbnormal, model.LatencyBySiblings},
 }
 
 // endpointKinds is every model.EndpointKind. hostping.endpoint.skipped writes
@@ -330,14 +273,25 @@ func (t *Telemetry) initInstruments() error {
 	// hostping.path.abnormal is binary, so normal and uncertain are both 0 and
 	// a path hostping never judged is indistinguishable from a healthy one. It
 	// keeps its meaning (alerts are built on the name); the full status, and
-	// why an uncertain path is uncertain, live here.
-	t.pathStat, err = t.meter.Int64Gauge("hostping.path.status", metric.WithDescription("1 for the path's current status and uncertain reason, 0 for the others"))
+	// why an uncertain path is uncertain, live in the code gauges below. Each
+	// is one series per path holding a code from statuscode.go, rewritten on
+	// every report, so a state change replaces the value instead of leaving a
+	// stale series behind.
+	t.pathStat, err = t.meter.Int64Gauge("hostping.path.status_code", metric.WithDescription("Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code"))
 	if err != nil {
 		return err
 	}
-	// The latency verdict is advisory and separate from path.status, which
-	// stays the bandwidth verdict Algorithm 1 reads.
-	t.pathLat, err = t.meter.Int64Gauge("hostping.path.latency_status", metric.WithDescription("1 for the path's current small-message latency verdict and its reason, 0 for the others"))
+	t.pathWhy, err = t.meter.Int64Gauge("hostping.path.uncertain_reason_code", metric.WithDescription("Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code"))
+	if err != nil {
+		return err
+	}
+	// The latency verdict is advisory and separate from path.status_code,
+	// which stays the bandwidth verdict Algorithm 1 reads.
+	t.pathLat, err = t.meter.Int64Gauge("hostping.path.latency_status_code", metric.WithDescription("Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code"))
+	if err != nil {
+		return err
+	}
+	t.latWhy, err = t.meter.Int64Gauge("hostping.path.latency_reason_code", metric.WithDescription("Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code"))
 	if err != nil {
 		return err
 	}
@@ -345,7 +299,7 @@ func (t *Telemetry) initInstruments() error {
 	if err != nil {
 		return err
 	}
-	t.linkStat, err = t.meter.Int64Gauge("hostping.link.status", metric.WithDescription("1 for the link's current Algorithm 1 status, 0 for the others"))
+	t.linkStat, err = t.meter.Int64Gauge("hostping.link.status_code", metric.WithDescription("Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code"))
 	if err != nil {
 		return err
 	}
@@ -402,6 +356,9 @@ func (t *Telemetry) initInstruments() error {
 	}
 	t.idle, err = t.meter.Int64Gauge("hostping.host.idle")
 	if err != nil {
+		return err
+	}
+	if err := t.registerStatusCodeInfo(); err != nil {
 		return err
 	}
 	return t.initLivenessInstruments()
@@ -648,36 +605,16 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		}
 		t.pathAbn.Record(ctx, abn, attrs)
 		t.recordVerbs(ctx, p)
-		// A reason on a decided path would not match any series below, which
-		// would leave the path with no 1 at all. Only PathUncertain carries one.
+		// Only PathUncertain carries a reason; one left on a decided path is
+		// not exported, so a normal or abnormal path always reads none.
 		reason := p.UncertainReason
 		if p.Status != model.PathUncertain {
 			reason = model.UncertainNone
 		}
-		for _, s := range pathSeries {
-			v := int64(0)
-			if s.status == p.Status && s.reason == reason {
-				v = 1
-			}
-			t.pathStat.Record(ctx, v, metric.WithAttributes(
-				attribute.String("rnic", p.RNIC),
-				attribute.String("endpoint", p.Endpoint),
-				attribute.String("status", s.status.String()),
-				attribute.String("reason", s.reason.String()),
-			))
-		}
-		for _, s := range latencySeries {
-			v := int64(0)
-			if s.status == p.LatencyStatus && s.reason == p.LatencyReason {
-				v = 1
-			}
-			t.pathLat.Record(ctx, v, metric.WithAttributes(
-				attribute.String("rnic", p.RNIC),
-				attribute.String("endpoint", p.Endpoint),
-				attribute.String("status", s.status.String()),
-				attribute.String("reason", s.reason.String()),
-			))
-		}
+		t.pathStat.Record(ctx, pathStatusCode(p.Status), attrs)
+		t.pathWhy.Record(ctx, uncertainReasonCode(reason), attrs)
+		t.pathLat.Record(ctx, latencyStatusCode(p.LatencyStatus), attrs)
+		t.latWhy.Record(ctx, latencyReasonCode(p.LatencyReason), attrs)
 	}
 	for _, l := range rep.Links {
 		attrs := metric.WithAttributes(attribute.String("link", l.ID))
@@ -687,16 +624,7 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		if u, ok := l.Util(); ok {
 			t.bus.Record(ctx, u, attrs)
 		}
-		for _, s := range linkStatuses {
-			v := int64(0)
-			if s == l.Status {
-				v = 1
-			}
-			t.linkStat.Record(ctx, v, metric.WithAttributes(
-				attribute.String("link", l.ID),
-				attribute.String("status", s.String()),
-			))
-		}
+		t.linkStat.Record(ctx, linkStatusCode(l.Status), attrs)
 	}
 	for _, k := range endpointKinds {
 		t.skipped.Record(ctx, int64(rep.SkippedEndpointCount(k)), metric.WithAttributes(attribute.String("kind", string(k))))
