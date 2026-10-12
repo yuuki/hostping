@@ -22,7 +22,7 @@ Cursor / VS Code can also **Reopen in Container** via `.devcontainer/`.
 `make bin` and `make bin-linux-amd64` (and so `make docker-bin*`) stamp both binaries with `VERSION` (`git describe --tags --always --dirty`) and `COMMIT` (`git rev-parse --short HEAD`). Override them for a release build, e.g. `make docker-bin-amd64 VERSION=1.2.3 COMMIT=abc1234`. A plain `go build` falls back to the module version and VCS stamping, and to `devel` / `unknown` without them. `hostping --version` and `hostpingctl version` print the result:
 
 ```
-hostping 1.2.3 (commit abc1234, zig probe 0.2.0, go1.27.0)
+hostping 1.2.3 (commit abc1234, zig probe 0.2.0, go1.27.2)
 ```
 
 `make docker-bin` writes Linux ELF for the container arch into `bin/` (and a `.so` into `zig/zig-out`). `make docker-bin-amd64` writes `x86_64` binaries into `bin/linux-amd64/` (copy that directory onto the host; `libibverbs` comes from the target OS). Rebuild with native `make bin` if you need Darwin binaries again.
@@ -33,7 +33,7 @@ The `x86_64` build links against glibc 2.28 (`GLIBC_VERSION` in the Makefile), s
 
 ## Native macOS (optional, `--sim` only)
 
-Apple Silicon can build and run the Fig.2 path without Docker. Live sysfs / ibverbs stay Linux-only and fail closed.
+Apple Silicon can build and run `--sim` (the Fig.2 host) without Docker. Live sysfs / ibverbs stay Linux-only and fail closed.
 
 1. Xcode Command Line Tools: `xcode-select --install`
 2. [mise](https://mise.jdx.dev/): `brew install mise` (and `mise activate` in your shell)

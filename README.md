@@ -74,7 +74,8 @@ where it fails closed.
 
 The privileges and devices the daemon needs are listed in
 [Privileges and devices](docs/operations.md#privileges-and-devices).
-`--sim` runs without any of the above, on Linux or macOS.
+`--sim` needs no RNIC, GPU or privileges, but the Linux binaries still load
+`libibverbs.so.1`; a source build also runs it on macOS.
 
 ## Install
 

@@ -63,7 +63,7 @@ absent when the path was judged against its distance's own value.
 
 Each cause carries `links` (`pcie.<rnic>`, `pcie.<gpu>`, `rp.N`, `sw.N`,
 `mem.N`, `upi.A-B`, `mesh.A-B`), `rnics`, `endpoints`, `confidence` and
-`evidence`. `/opt/hostping/current/hostpingctl topology` maps those IDs to the
+`evidence`. `hostpingctl topology` maps those IDs to the
 RDMA device, netdev, PCI address (`pcie_bdf`), socket (CPU package), NUMA node
 and root port; `lspci` and the sysfs
 paths below take that address.
@@ -210,7 +210,8 @@ find the hop once an alert has fired (`hostping_link_status{status="abnormal"} =
   below the lower of its device and upstream port maxima (whichever is
   readable), and the negotiated link (`current_link_speed` × width) no longer
   carries the RNIC's line rate; or the link trained below `min(device, upstream
-  port)` maximum and an affinitive path is also abnormal; or, in a busy run,
+  port)` maximum, no longer carries the line rate, and an affinitive path is
+  also abnormal; or, in a busy run,
   every affinitive path is uncertain and the link is down-trained the same way
   and below line rate.
 - `medium`, "likely failed": every affinitive path is abnormal, but config
@@ -268,9 +269,11 @@ artefact; config space read in a transient state is why config-only is
   width with no slow path yet; or the hop is abnormal while its utilization is
   at or above `--util-high` (summary "GPU PCIe link overloaded").
 
-GPU link **speed** is never evidence (GPUs lower it when idle). It is not
-reported when `acs_enabled`/`ats_disabled` already explains the path or when an
-RNIC-wide cause covers the GPU's RNIC.
+GPU link **speed** is never evidence (GPUs lower it when idle). The bandwidth
+verdicts are not reported when the host has an `acs_enabled`/`ats_disabled`
+cause or when an RNIC-wide cause covers the GPU's RNIC; the width check still
+reports a narrow link, at `medium` while an `acs_enabled`/`ats_disabled` cause
+is present.
 
 **Check first.**
 
@@ -302,8 +305,8 @@ failure #5).
 local to RNICs under it test normal, and cross-root GPU paths through it are
 abnormal (or memory on that socket is still normal, in which case the
 evidence names the abnormal paths through the root port instead of cross-root
-GPU paths). It needs cross-root GPU paths, which only the idle full mesh
-probes, so in practice it comes from idle runs. It suppresses
+GPU paths). Cross-root GPU paths, its main evidence, are probed only in the
+idle full mesh, so in practice it comes from idle runs. It suppresses
 `memory_channel_failure` on the same socket.
 
 **Check first.** The root port and its downstream links in
@@ -373,7 +376,7 @@ resets on a run that tests the link without graying it, and on restart unless
 `--state-dir` carried it over (same boot and topology, last run recent enough;
 see [Stopping, upgrading and rolling back](operations.md#stopping-upgrading-and-rolling-back)).
 It is reported only while the current run still sees the link gray
-([Diagnoses](design.md#diagnoses)).
+([Flapping](design.md#flapping)).
 
 **Check first / remediation.** As for
 [`memory_channel_failure`](#memory_channel_failure); intermittent memory
@@ -403,8 +406,9 @@ specific; not verified.
 
 **Remediation.** Drain the host; firmware/BIOS update or reset; vendor ticket.
 
-**False positives.** Cross-socket paths only appear in the idle full mesh, so
-in practice this comes from idle runs.
+**False positives.** Cross-socket GPU paths only appear in the idle full
+mesh; busy runs measure only the remote-memory paths across it, so in practice
+this comes from idle runs.
 
 ### `snc_mesh_failure`
 
@@ -569,7 +573,8 @@ looks the same from the host.
 
 ### `rnic_intermittent_timeout`
 
-**Meaning.** The RNIC's mean timeout ratio over its partially answered pairs
+**Meaning.** The RNIC's mean timeout ratio over its pairs that answered at
+least one probe (pairs with a down peer left out)
 exceeds `--timeout-th` (0.1) without being total: sudden timeouts such as a
 flapping link (ToN #15/#16).
 
@@ -616,7 +621,7 @@ RNIC's netdev address first.
 each other.
 
 **Confidence and derivation.**
-([Rail-optimized hosts](design.md#rail-optimized-hosts-and---mutual-scope))
+([RNIC and fabric](design.md#rnic-and-fabric))
 
 - `low`: **no** cross-rail pair answers. That is what rails isolated **by
   design** look like, and it is reported on every run of such a host. It is
@@ -644,8 +649,8 @@ delta, or (in `--sim`) loss on the mutual probe. Probe timeouts are not drops.
 **Confidence and derivation.** `high`: the counter moved. A drop delta also
 triggers a busy run itself, so a host with steady drops reports this on every
 drop-triggered run (at most one per `--busy-cooldown`). The counters include
-`out_of_buffer` (no receive WQE posted), names containing `discard` and netdev
-`dropped` counters.
+`out_of_buffer` (no receive WQE posted), `rx_missed_errors`, names containing
+`discard` and netdev `dropped` counters.
 
 **Check first.** Which counter moved: `ethtool -S <netdev>` and
 `/sys/class/infiniband/<device>/ports/1/hw_counters/` before and after a
@@ -696,7 +701,7 @@ has no streak to carry, so it reports a sibling verdict only when the recheck
 confirmed it (evidence `one-shot run`). A `LAT` verdict is reported on the
 first run. Grouped
 by distance, then endpoint, then RNIC
-([Latency](design.md#latency)).
+([Latency](design.md#latency), [Latency increase](design.md#latency-increase)).
 
 **Check first.** Paths `abnormal` with `latency_streak` 1 or 2 and no cause
 are a reading that has not persisted yet; one that is gone in the next idle
@@ -741,7 +746,7 @@ is rolled back, and `--state-dir` keeps it across a restart. A one-shot run
 never reports it. The evidence names the lower median, the sample count and
 the number of consecutive idle runs. `medium` when the GPU was slow from every
 one of at least two RNICs, `low` otherwise. Idle runs only, needs three other
-GPUs ([Diagnoses](design.md#diagnoses)).
+GPUs ([Slow verbs](design.md#slow-verbs)).
 
 **Check first.** `hostping_verb_duration_microseconds{verb="mr_reg"}` for that
 GPU over time; the GPU's health in `nvidia-smi -q` and `dmesg` (Xid messages);
@@ -786,7 +791,8 @@ probes into that fabric's management subnet. See
 ### `unknown`
 
 **Meaning.** Some paths are abnormal but tomography left only gray or
-uncertain links: no hop could be isolated, and no other cause fired.
+uncertain links: no hop could be isolated, and no other cause fired from the
+loopback bandwidth pattern.
 
 **Confidence and derivation.** `low`.
 

@@ -54,7 +54,7 @@ same files with `make docker-bin-amd64`, which writes them to
 `bin/linux-amd64/` (see [building.md](building.md)).
 
 ```bash
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar xzf hostping-1.2.3-linux-amd64.tar.gz    # hostping-1.2.3/ holds the files below
 ```
 
@@ -117,7 +117,7 @@ The unit runs `hostping` as root. What it uses, and why:
 | `/dev/infiniband/uverbs*` | Every loopback and mutual probe (`ibv_open_device`, QPs, MRs) | Often mode 0666 already; check with `ls -l`. |
 | `RLIMIT_MEMLOCK` | Host-memory MRs (`ibv_reg_mr`) | See below. |
 | `/dev/nvidia*`, `libcuda.so.1` (or `libcudart.so.*`), and `nvidia-peermem` or dma-buf support | GPU loopback (GPUDirect RDMA) | AMD: `libamdhip64.so`. Missing pieces skip the GPU endpoints with a reason; they never stop the daemon. |
-| sysfs: `/sys/class/infiniband`, `/sys/class/net`, `/sys/bus/pci/devices`, `/sys/class/drm` | Discovery, line rate, counters, PCIe link speed and width, AMD GPU busy | Read only. |
+| sysfs: `/sys/class/infiniband`, `/sys/class/net`, `/sys/bus/pci/devices`, `/sys/class/drm`; `/proc/stat` | Discovery, line rate, counters, PCIe link speed and width, AMD GPU busy; CPU load per NUMA node | Read only. |
 | PCI config space (`/sys/bus/pci/devices/*/config`) beyond the first 64 bytes | ACS / ATS | Root only; see below. |
 | `nvidia-smi` on `PATH` | GPU utilization, compute mode, GPU PCIe throughput | Each call bounded (2 s; 5 s for `nvidia-smi dmon`). |
 | `ethtool` on `PATH` | PFC pause duration and drops not exposed in sysfs (RoCE only) | Each call bounded to 2 s, backed off per netdev when it answers nothing. Without it a RoCE RNIC with no sysfs pause counter has no PFC trigger; the start-up log says so. Unprivileged `ethtool -S` is not verified. |
@@ -175,14 +175,17 @@ distribution restricts the device nodes to a group. What is lost:
 Enabled: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
 `ProtectControlGroups`, `RestrictRealtime`, `RestrictSUIDSGID`,
 `RestrictNamespaces`, `LockPersonality`. None of them touches `/dev`, `/sys`,
-`/proc` or the network, and hostping itself writes no files.
+`/proc` or the network, and hostping itself writes no files other than the
+opt-in `--report-file` and `--state-dir` ones, for which the unit's
+`LogsDirectory=` and `StateDirectory=` provide directories under `/var`.
 
 Left out, with the reason next to each in the unit: `PrivateDevices` and
 `DevicePolicy=closed` (hide the verbs and GPU device nodes),
 `ProtectKernelTunables` (read-only `/sys`), `ProtectKernelModules` (CUDA loads
 `nvidia_uvm` on demand), `PrivateTmp` (hides the CUDA MPS pipe directory),
 `PrivateNetwork`, `RestrictAddressFamilies`, `SystemCallFilter`,
-`MemoryDenyWriteExecute`, `ProtectSystem=strict`, `ProtectProc`. Enable any of
+`MemoryDenyWriteExecute`, `ProtectSystem=strict`, `ProtectProc`,
+`ProtectKernelLogs`. Enable any of
 them only after checking on your hardware that memory loopback, GPU loopback,
 `nvidia-smi` and `ethtool -S` still work.
 
@@ -226,6 +229,7 @@ or idle. Where a source has no unknown state, the table says so.
 | PFC pause duration, drops: never found | InfiniBand link layer (no PFC; `ethtool` is not run), or no vendor `*pause*duration*` sysfs counter and no `ethtool -S` answer since start | **Not applicable**, logged once per RNIC: `hostping: rnic3 has no PFC pause-duration source (…); the PFC trigger cannot fire for it`. The reason says `ethtool not on PATH` when that is the fix. The trigger cannot fire for that RNIC, it does not block the idle verdict, and `hostping.rnic.pause_duration_ratio` / `hostping.rnic.drop.delta` are absent for it, not 0. A source that appears later is logged and used from then on. |
 | PFC pause duration, drops: lost | A source read before is gone: the file vanished or is unreadable, or `ethtool -S` fails, times out or is backed off | **Unknown**, logged once per change: the host is not idle (no idle run; a live `hostpingctl diagnose` refuses), no ratio or delta is computed and the gauge is not written (the exporter keeps its last measured value; the log line is the signal). PFC/drop runs from other RNICs and `--busy-interval` still happen. When it reads again the first sample only re-baselines, so the jump does not trigger a run. A counter that is present and reads 0 is known. |
 | GPU utilization | No `nvidia-smi` on `PATH` and no DRM `gpu_busy_percent` | The GPU is unknown, so the host is never idle: no idle runs. PFC/drop busy runs still happen. A live `hostpingctl diagnose` refuses to run. |
+| CPU load of a NUMA node | `/proc/stat` unreadable | The host is never idle while it is unread: no idle runs, a held idle-mode run is discarded (`idle_unknown`), and a live `hostpingctl diagnose` refuses to run. Logged once when it fails and once when it reads again, which only re-baselines. No `hostping.cpu.busy` sample is written, never a 0 (the exporter keeps its last measured value). |
 | GPU compute mode | No `nvidia-smi`, AMD GPU, `[N/A]` | The GPU is probed as if `Default`. |
 | GPU loopback (GDR) | No GPU device nodes, CUDA/HIP library, or `nvidia-peermem`/dma-buf | GPU endpoints skipped with the probe's reason: one log line per change, `skipped_endpoints`, `hostping.endpoint.skipped`. Memory paths still diagnose. |
 | Memory loopback | Device node, MR registration (memlock) or NUMA binding fails | Same skip channels, kind `memory`. |
@@ -298,11 +302,10 @@ the URL scheme) are a start-up error rather than one silently winning. The
 start-up log names the transport and what chose it:
 `hostping otlp exporter endpoint=10.0.0.20:4317 tls=true (non-loopback endpoint)`.
 
-**Upgrading from a release before this change:** OTLP used to be plaintext to
-every endpoint. A collector on a non-loopback address that only speaks
-plaintext now needs `--otlp-insecure`, `OTEL_EXPORTER_OTLP_INSECURE=true`, or
-an `http://` endpoint; without one the exporter attempts TLS, every push
-fails, and the error is logged.
+A collector on a non-loopback address that only speaks plaintext needs
+`--otlp-insecure`, `OTEL_EXPORTER_OTLP_INSECURE=true`, or an `http://`
+endpoint; without one the exporter attempts TLS, every push fails, and the
+error is logged.
 
 ## Liveness and staleness alerts
 
@@ -467,7 +470,7 @@ against a scrape of the `--sim` Fig.2 host. Notation:
 Per host:
 
 ```
-series ≈ 28 P_gpu + 27 P_mem + 5 L + U + 3 M + 4 R + E + 13 + D + T
+series ≈ 28 P_gpu + 27 P_mem + 5 L + U + 3 M + 4 R + E + N + 13 + D + T
 ```
 
 where U ≤ L is the number of links with a utilization source, plus about 50
@@ -481,10 +484,11 @@ cause's subjects (which GPU, which link) are not labels.
 Worked example, the Fig.2 host of `--sim` (R = 4, E = 10 with 8 GPUs and
 2 memory nodes, so P = 40 with P_gpu = 32 and P_mem = 8; L = 23: 4 RNIC
 PCIe, 8 GPU PCIe, 4 switch, 4 root port, 2 memory, 1 inter-socket; M = 6
-under rail scope, no live bus utilization so U = 0):
+under rail scope, no live bus utilization so U = 0, no CPU load read so
+N = 0):
 
 ```
-28 × 32 + 27 × 8 + 5 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 13 + D + T
+28 × 32 + 27 × 8 + 5 × 23 + 0 + 3 × 6 + 4 × 4 + 10 + 0 + 13 + D + T
 = 896 + 216 + 115 + 18 + 16 + 10 + 13 + D + T = 1284 + D + T
 ```
 
@@ -508,7 +512,8 @@ When series appear and disappear:
 - **Absent when unknown, never 0:** `hostping_bus_utilization` for a hop no
   source read; `hostping_rnic_pause_duration_ratio` and
   `hostping_rnic_drop_delta` for an RNIC with no source (InfiniBand, or no
-  counter found); `hostping_mutual_timeout_ratio` for a pair that reported no
+  counter found); `hostping_cpu_busy` for a NUMA node whose CPU load was not
+  read; `hostping_mutual_timeout_ratio` for a pair that reported no
   probe count; every `hostping_mutual_*` series on a host with no qualifying
   pair; no path or verb series for a skipped endpoint (it is counted in
   `hostping_endpoint_skipped` instead), and no verb series for a probe that
@@ -701,8 +706,8 @@ on RDMA hardware yet.
    apart, with the same flags as `diagnose`. It refuses to start on a busy
    host or one whose idle state cannot be read. A run that the host became
    busy during is discarded and retried, as the daemon discards one; after
-   `--max-discards` (default 3) it gives up. The file goes to `--out` or
-   stdout; a table with the spread of the readings behind each number goes to
+   more than `--max-discards` (default 3) discards it gives up. The file
+   goes to `--out` or stdout; a table with the spread of the readings behind each number goes to
    stderr. Read the warnings before going on: a path more than
    `--abnormal-th` below its distance's calibrated value will diagnose
    `abnormal` against the file, which on a host believed healthy is either a

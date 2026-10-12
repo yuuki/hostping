@@ -39,7 +39,7 @@ RestartSec=30s
 
 # SIGTERM is honored between probes, not during one. A loopback probe stops
 # within --timeout (5s) of a stalled transfer; a mutual burst against a pair
-# that does not answer can wait up to --iters x --mutual-timeout (32s at the
+# that does not answer can wait up to --mutual-iters x --mutual-timeout (32s at the
 # defaults). The final OTLP push is bounded by the exporter's own timeout.
 KillSignal=SIGTERM
 TimeoutStopSec=90s
