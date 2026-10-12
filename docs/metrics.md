@@ -24,15 +24,36 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
 
 ## Reports
 
-Each confirmed report goes to stdout as JSON, and diagnoses and other log lines go to stderr. `--report-format` picks the stdout form: `pretty` (indented, the default for one-shot runs), `json` (one compact object per line, the daemon's default, so journald and log shippers see one entry per report) or `none`. The default depends on the run kind, never on whether stdout is a terminal. `--report-file PATH` additionally appends every report to `PATH` as one JSON line (created 0640, reopened per report so logrotate needs no signal). Every report carries `reported_at` (UTC), `version` and `commit` next to its own fields. A discarded idle-mode run reaches neither output. See [Logs and reports under journald](operations.md#logs-and-reports-under-journald).
+Each confirmed report goes to stdout as JSON. Diagnoses and other log lines go
+to stderr.
+
+`--report-format` picks the stdout form:
+
+- `pretty`: indented. The default for one-shot runs.
+- `json`: one compact object per line. The daemon's default, so journald and
+  log shippers see one entry per report.
+- `none`
+
+The default depends on the run kind. It does not depend on whether stdout is a
+terminal.
+
+`--report-file PATH` additionally appends every report to `PATH` as one JSON
+line. The file is created 0640 and reopened per report, so logrotate needs no
+signal.
+
+Every report carries `reported_at` (UTC), `version` and `commit` next to its
+own fields. A discarded idle-mode run reaches neither output. See
+[Logs and reports under journald](operations.md#logs-and-reports-under-journald).
 
 ## Metrics
 
-Each confirmed report records the report metrics; each monitor poll records the
+Each confirmed report records the report metrics. Each monitor poll records the
 `hostping.rnic.*`, `hostping.cpu.busy` and `hostping.monitor.*` ones. Every
-instrument is a gauge (last value) except the `counter` rows. The liveness metrics (`hostping.engine.last_*`,
+instrument is a gauge (last value) except the `counter` rows.
+
+The liveness metrics (`hostping.engine.last_*`,
 `hostping.engine.run.failed` / `.discarded`, `hostping.monitor.*`) tell a stuck
-agent from one with nothing to report; see
+agent from one with nothing to report. See
 [operations.md](operations.md#liveness-and-staleness-alerts).
 
 | Name | Type (unit) | Attributes | Meaning |
@@ -71,45 +92,58 @@ agent from one with nothing to report; see
 | `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |
 | `hostping.status_code.info` | gauge | `metric`, `code`, `status` or `reason` | Always 1, one series per code of the `*_code` gauges above (28 in all); names what `code` means on the gauge `metric` (the OpenTelemetry name, e.g. `hostping.path.status_code`). Status gauges' rows carry `status`, reason gauges' rows `reason`. Exported from start-up |
 
-Loopback latency, mutual RTT and verb durations are gauges, not histograms: the
-probe produces one p50 per path (or RNIC pair) per run, and calls each setup
-verb once, so a histogram would only bucket summary values and its count would
-be a run count. Link and path status are code gauges: one series per path or
-link whose value is the code of the current state, rewritten on every report,
-so a link or path that changes state changes a value instead of leaving a
-stale series behind. The codes are fixed (a new state gets a new code; none is
-renumbered or reused), status codes start at 1 and reason codes use 0 for
-`none`; [Status codes](operations.md#status-codes) has the full
-table, Grafana value mappings and how to join `hostping.status_code.info` in
-PromQL. `hostping.path.abnormal`
-keeps its meaning — 1 only when the path is abnormal — but it cannot express
-uncertain, which reads there as the same 0 as normal. `hostping.endpoint.skipped`
-follows the same rule: every kind is written on every report so a recovered kind
-falls back to 0, and the failure reason is deliberately *not* an attribute —
-it is free-form probe text, so it would be unbounded in cardinality and would
-strand a series behind every reason that gets fixed. The reason belongs to the
-log line and the `skipped_endpoints` report field. The `hostping.mutual.*`
-gauges are absent altogether on a host where no RNIC pair qualifies for the
-mutual probe; see [Diagnoses](design.md#diagnoses).
+Loopback latency, mutual RTT and verb durations are gauges. The probe produces
+one p50 per path (or RNIC pair) per run and calls each setup verb once. A
+histogram would only bucket summary values, and its count would be a run
+count.
+
+Link and path status are code gauges. Each path or link has one series whose
+value is the code of its current state, rewritten on every report. A link or
+path that changes state changes that value and leaves no stale series behind.
+The codes are fixed: a new state gets a new code, and no code is renumbered or
+reused. Status codes start at 1, and reason codes use 0 for `none`.
+[Status codes](operations.md#status-codes) has the full table, Grafana value
+mappings and how to join `hostping.status_code.info` in PromQL.
+
+`hostping.path.abnormal` keeps its meaning of 1 only when the path is
+abnormal. It cannot express uncertain, which reads there as the same 0 as
+normal.
+
+`hostping.endpoint.skipped` follows the same rule as the status gauges. Every
+kind is written on every report, so a recovered kind falls back to 0. The
+failure reason is not an attribute. It is free-form probe text, so it would be
+unbounded in cardinality and would strand a series behind every reason that
+gets fixed. The reason is in the log line and the `skipped_endpoints` report
+field instead.
+
+The `hostping.mutual.*` gauges are absent altogether on a host where no RNIC
+pair qualifies for the mutual probe. See [Diagnoses](design.md#diagnoses).
 
 Per host the series count is roughly 10 per RNIC→endpoint path plus 2 per
-link; see [Series cardinality](operations.md#series-cardinality). For
-what each `hostping.diagnosis.count` code means and which ones to page on, see
-the [runbook](runbook.md).
+link. See [Series cardinality](operations.md#series-cardinality). For what
+each `hostping.diagnosis.count` code means and which ones to page on, see the
+[runbook](runbook.md).
 
 ## Endpoints
 
-`--metrics` (default `:9464`) serves `/metrics` and `/healthz`, which is 503
-when the daemon's poll loop has stalled (see
-[Liveness and staleness alerts](operations.md#liveness-and-staleness-alerts)). It is plain,
-unauthenticated HTTP unless `--metrics-web-config` names a Prometheus
-exporter-toolkit web config (TLS, basic auth); bind it to a management address
-in production. An address that cannot be bound fails the start. OTLP
-(`--otlp` or `OTEL_EXPORTER_OTLP_ENDPOINT`) is TLS with the system roots for a
-non-loopback `host:port`, plaintext for loopback, and follows the scheme of an
-`http://` / `https://` URL. For a `host:port`, `--otlp-insecure` or the
-standard `OTEL_EXPORTER_OTLP_INSECURE` overrides that choice, so a plaintext
-collector on another host needs one of them; settings that contradict each
-other fail the start. `OTEL_EXPORTER_OTLP_CERTIFICATE` / `_HEADERS` are
-honoured. See
-[operations.md](operations.md#metrics-endpoint).
+`--metrics` (default `:9464`) serves `/metrics` and `/healthz`. `/healthz`
+returns 503 when the daemon's poll loop has stalled (see
+[Liveness and staleness alerts](operations.md#liveness-and-staleness-alerts)).
+
+The metrics endpoint is plain, unauthenticated HTTP unless
+`--metrics-web-config` names a Prometheus exporter-toolkit web config (TLS,
+basic auth). In production, bind it to a management address. An address that
+cannot be bound fails the start.
+
+OTLP is enabled by `--otlp` or `OTEL_EXPORTER_OTLP_ENDPOINT`. The transport
+security depends on the endpoint:
+
+- A non-loopback `host:port` uses TLS with the system roots.
+- A loopback `host:port` uses plaintext.
+- An `http://` or `https://` URL follows its scheme.
+
+For a `host:port`, `--otlp-insecure` or the standard
+`OTEL_EXPORTER_OTLP_INSECURE` overrides that choice. A plaintext collector on
+another host therefore needs one of them. Settings that contradict each other
+fail the start. `OTEL_EXPORTER_OTLP_CERTIFICATE` / `_HEADERS` are honoured.
+See [operations.md](operations.md#metrics-endpoint).

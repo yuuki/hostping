@@ -11,29 +11,31 @@ hostping is not affiliated with the authors of these papers. See
 
 ## Overview
 
-An agent runs on each host. It measures the latency and bandwidth of every
-path between an RNIC and an endpoint (a NUMA node's memory or a GPU) with
-RDMA loopback, localizes a degraded path to the hop that explains it (RNIC or
-GPU PCIe link, CPU root port, memory channel, inter-socket bus), and checks
-RNIC-to-RNIC reachability with a mutual probe. Results are exported as
-OpenTelemetry metrics (Prometheus scrape, optionally OTLP) and as JSON reports.
+An agent runs on each host. It uses RDMA loopback to measure the latency and
+bandwidth of every path between an RNIC and an endpoint, which is either a
+NUMA node's memory or a GPU. When a path degrades, the agent localizes it to
+the hop that explains it: the RNIC or GPU PCIe link, a CPU root port, a memory
+channel or the inter-socket bus. A separate mutual probe checks RNIC-to-RNIC
+reachability. Results are exported as OpenTelemetry metrics (Prometheus
+scrape, optionally OTLP) and as JSON reports.
 
-- **Loopback.** RDMA WRITE through the RNIC from host DRAM back to host DRAM,
-  and from a GPU back to the same GPU over GPUDirect RDMA.
-- **Triggers.** A full-mesh run when the host is idle, a reduced run when
-  PFC pauses or drops rise, and optionally a periodic run under load.
-- **Classification.** Idle paths are judged against distance-class baselines
-  (the paper's Fig. 4, scaled to the hardware, or calibrated per host);
-  loaded paths against their siblings. Suspect verdicts are re-read before
-  they are reported.
-- **Localization.** The paper's Algorithm 1 turns path verdicts into link
-  verdicts and diagnosis codes.
-- **Mutual probe.** RNIC pairs on the same rail (or every pair with
-  `--mutual-scope=host`) exchange probes; timeouts identify unreachable,
-  flapping RNICs and ToR switch anomalies (ToN'24).
+The loopback probe issues RDMA WRITEs through the RNIC from host DRAM back to
+host DRAM, and from a GPU back to the same GPU over GPUDirect RDMA. The agent
+runs a full mesh of probes when the host is idle and a reduced set when PFC
+pauses or drops rise. It can also run periodically under load.
 
-The agent and analyzer are written in Go; the probes and sysfs counters in
-Zig, called through a C ABI.
+Paths measured on an idle host are judged against distance-class baselines.
+These come from the paper's Fig. 4 scaled to the hardware, or from a per-host
+calibration. Paths measured under load are compared with their siblings.
+Suspect verdicts are re-read before they are reported. The paper's
+Algorithm 1 then turns path verdicts into link verdicts and diagnosis codes.
+
+In the mutual probe, RNIC pairs on the same rail exchange probes, or every
+pair does with `--mutual-scope=host`. Timeouts identify unreachable or
+flapping RNICs and ToR switch anomalies (ToN'24).
+
+The agent and analyzer are written in Go. The probes and sysfs counters are
+written in Zig and called through a C ABI.
 
 ```
 hardware monitor ──► Hostping engine ──► data analyzer ──► OTel / JSON
@@ -54,14 +56,14 @@ Known limitations:
   mutual probe (`--mutual-interval`) have not been exercised on RDMA hardware.
   The default is the RC transport.
 - RNIC slow start and Tx window misconfiguration are diagnosed under `--sim`
-  only; on a live host they cannot be told apart from an RNIC PCIe failure.
+  only. On a live host they cannot be told apart from an RNIC PCIe failure.
 - Memory and inter-socket bus utilization are read only on Intel processors
   with uncore PMUs, and only when the operator supplies the bus capacity.
 - InfiniBand RNICs take part in the mutual probe only with
   `--mutual-infiniband`.
 
-[docs/design.md](docs/design.md) lists what each path does on live hardware and
-where it fails closed.
+[docs/design.md](docs/design.md) describes what each path does on live
+hardware and where it fails closed.
 
 ## Requirements
 
@@ -75,7 +77,7 @@ where it fails closed.
 The privileges and devices the daemon needs are listed in
 [Privileges and devices](docs/operations.md#privileges-and-devices).
 `--sim` needs no RNIC, GPU or privileges, but the Linux binaries still load
-`libibverbs.so.1`; a source build also runs it on macOS.
+`libibverbs.so.1`. A source build can also run `--sim` on macOS.
 
 ## Install
 
@@ -122,7 +124,7 @@ hostpingctl calibrate --out baselines.json
 hostping --baseline-file baselines.json
 ```
 
-`hostping -h` lists every flag; `hostpingctl` with no arguments lists its
+`hostping -h` lists every flag. `hostpingctl` with no arguments lists its
 subcommands.
 
 ## Documentation
