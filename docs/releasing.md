@@ -24,7 +24,7 @@ hostping-X.Y.Z/
   hostpingctl
   libhostping_probe.so
   LICENSE  NOTICE  PATENTS.md  README.md
-  docs/operations.md
+  docs/operations.md  docs/design.md  docs/metrics.md  docs/runbook.md
   contrib/systemd/hostping.service
   contrib/systemd/hostping.default
 ```

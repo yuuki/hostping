@@ -182,7 +182,7 @@ dist: package
 	mkdir -p "$$d/docs" "$$d/contrib/systemd"; \
 	install -m 0755 bin/linux-amd64/hostping bin/linux-amd64/hostpingctl "$$d/"; \
 	install -m 0644 bin/linux-amd64/libhostping_probe.so $(DIST_DOCS) "$$d/"; \
-	install -m 0644 docs/operations.md "$$d/docs/"; \
+	install -m 0644 docs/operations.md docs/design.md docs/metrics.md docs/runbook.md "$$d/docs/"; \
 	install -m 0644 contrib/systemd/* "$$d/contrib/systemd/"; \
 	tar --format=gnu --sort=name --mtime=@$(SOURCE_DATE_EPOCH) \
 		--owner=0 --group=0 --numeric-owner --mode=u+w,go-w,a+rX \

@@ -31,7 +31,7 @@ The package pulls in `libibverbs` and installs:
 /usr/bin/hostping, /usr/bin/hostpingctl  -> /usr/lib/hostping/
 /usr/lib/systemd/system/hostping.service  # ExecStart=/usr/lib/hostping/hostping
 /etc/default/hostping                     # a config file: kept across upgrades once edited
-/usr/share/doc/hostping/                  # README.md, operations.md, licenses
+/usr/share/doc/hostping/                  # README.md, operations.md, design.md, metrics.md, runbook.md, licenses
 ```
 
 It neither enables nor starts the service. Check discovery and the options
@@ -51,7 +51,7 @@ service. Roll back by installing the previous package (`dnf downgrade`, or
 
 Take the release tarball `hostping-<version>-linux-amd64.tar.gz`, or build the
 same files with `make docker-bin-amd64`, which writes them to
-`bin/linux-amd64/` (see the [README](../README.md#build)).
+`bin/linux-amd64/` (see [building.md](building.md)).
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -102,7 +102,7 @@ fabric's control plane. Discovery logs a warning naming `--exclude-rnic` for an
 InfiniBand RNIC that looks like one (its subnet manager runs on the host, or
 its IPoIB netdev is administratively down while the port is ACTIVE); exclude
 such a device in `/etc/default/hostping` before `systemctl enable`, and see
-[Excluding RNICs](../README.md#excluding-rnics---exclude-rnic). RNIC IDs
+[Excluding RNICs](design.md#excluding-rnics---exclude-rnic). RNIC IDs
 (`rnicN`) are positions in the sorted device list and shift when a device is
 excluded, added or removed: key dashboards and alerts on `device` or
 `pcie_bdf` rather than on the ID, by joining `hostping_rnic_info` (see
@@ -656,14 +656,14 @@ Every run puts real traffic on the RNICs and PCIe links the service uses, and a 
 | Situation | What the workload sees |
 | --- | --- |
 | Busy-mode run during service traffic (PFC/drop trigger, `--busy-interval`, or a manual `diagnose` on a loaded host) | Bus bandwidth 10–15% lower for 1–2 s per run, in every repetition. The loopback probes share the loaded RNICs and their PCIe hops with the service. |
-| Idle-mode run already in flight when a job starts | Job launch about 0.4 s slower and the first ~2 s a few percent slower, then back to normal. hostping detects that the host became busy and discards the report (see the idle-mode hold in the [README](../README.md#what-is-implemented-vs-what-needs-hardware)). |
+| Idle-mode run already in flight when a job starts | Job launch about 0.4 s slower and the first ~2 s a few percent slower, then back to normal. hostping detects that the host became busy and discards the report (see the idle-mode hold in [Triggers](design.md#triggers)). |
 | GPU endpoint being probed | One GPU context per probed GPU, on the order of 0.5 GiB of device memory, held only while the run probes that GPU (a few seconds) and released after the run. |
 
 So the cost that matters on a busy fleet is the busy-mode run, not the idle one. Each PFC/drop trigger costs one such dip, at most once per `--busy-cooldown`; keep the cooldown at its default or longer on hosts whose fabric pauses routinely. `--busy-interval D` adds one dip per `D` on every loaded host even without a trigger, so set it in minutes and weigh a 1–2 s slowdown per `D` against how often you need a busy verdict. Avoid scripting `hostpingctl diagnose` against hosts that are running jobs: on a loaded host it runs in busy mode and costs the same dip. A job that sizes its GPU memory to the last few hundred MiB could still fail to allocate if it starts while an idle run holds a context on its GPU; this has not been measured.
 
-A busy run that flags a path against its siblings re-reads it before reporting it (the paired busy recheck, see the [README](../README.md#busy-classification-and-hosts-without-siblings)): 3 rounds of the path and up to 4 other paths of its class on the same loaded RNIC, so at most 15 extra probes per flagged path (9 in a class of three) and 8 paths, 120 probes, per run. A busy run that flags nothing costs nothing extra. Like the sweep's probes, these share the loaded RNIC with the service, so a busy run with flagged paths holds its bandwidth dip a little longer.
+A busy run that flags a path against its siblings re-reads it before reporting it (the paired busy recheck, see [Busy classification](design.md#busy-classification)): 3 rounds of the path and up to 4 other paths of its class on the same loaded RNIC, so at most 15 extra probes per flagged path (9 in a class of three) and 8 paths, 120 probes, per run. A busy run that flags nothing costs nothing extra. Like the sweep's probes, these share the loaded RNIC with the service, so a busy run with flagged paths holds its bandwidth dip a little longer.
 
-A run that flags a path against its idle baseline (an idle run, or an unloaded RNIC in a busy run) re-reads it too (the paired bandwidth recheck, see the [README](../README.md#run-no-rnic-required)): one path per RNIC and distance class, 3 rounds of it and up to 2 references on other RNICs, so at most 9 extra probes per group and 12 groups, 108 probes, per run. Its probes land on RNICs that are not carrying service traffic.
+A run that flags a path against its idle baseline (an idle run, or an unloaded RNIC in a busy run) re-reads it too (the paired bandwidth recheck, see [Bandwidth recheck](design.md#bandwidth-recheck)): one path per RNIC and distance class, 3 rounds of it and up to 2 references on other RNICs, so at most 9 extra probes per group and 12 groups, 108 probes, per run. Its probes land on RNICs that are not carrying service traffic.
 
 Probe length itself is small: a loopback probe's setup (QP creation, memory registration) dominates its time even at the default 512 timed WRITE pairs, so `--iters` barely changes how long a run holds a path. `--mem-warmup D` does add time: `D` of CPU stores to one NUMA node per memory path, sequentially, so an idle run grows by about `D` × the number of memory paths (RNICs × NUMA nodes), and a busy run by `D` for each memory-path probe it takes. It is off by default; see below for when to turn it on.
 
@@ -676,9 +676,9 @@ Two ways to handle it:
 1. **Fix the platform's uncore/memory frequency** in firmware or with the platform's tools, so idle and loaded hosts measure the same. This is the robust fix.
 2. **Try `--mem-warmup`** (e.g. `--mem-warmup 50ms`): each memory-path probe writes its own NUMA-bound buffers from the CPU for that long right before measuring, so the memory subsystem is carrying traffic when the timed WRITEs start. Whether a given platform settles within the warm-up is a property of that platform: compare the spread of repeated idle runs (or `hostpingctl calibrate`) with and without it before relying on it, and calibrate baselines with the same setting the daemon will use. `verb_ns.mem_warmup` shows the time each probe actually spent.
 
-The bandwidth verdict has a guard against the same drift over time. A run reads RNIC by RNIC, so a slow state over the batches of a few consecutive RNICs drops their memory paths below the baseline together, which reads as failed root ports (`cpu_root_port_failure`) and RNIC links (`rnic_pcie_failure`). Before such a verdict is kept, one path of each flagged RNIC and distance class is re-read interleaved with the same class on other RNICs that met the baseline, and the group stays `abnormal` only if the path still reads low against them; otherwise it is `normal` again, or `uncertain` with `host_shift` when it reads level with them but still below the baseline (see the [README](../README.md#run-no-rnic-required)). A `host_shift` that keeps recurring is the platform drifting, not a fault; fixing its power management, as above, removes it. The report's `bw_recheck` shows the numbers.
+The bandwidth verdict has a guard against the same drift over time. A run reads RNIC by RNIC, so a slow state over the batches of a few consecutive RNICs drops their memory paths below the baseline together, which reads as failed root ports (`cpu_root_port_failure`) and RNIC links (`rnic_pcie_failure`). Before such a verdict is kept, one path of each flagged RNIC and distance class is re-read interleaved with the same class on other RNICs that met the baseline, and the group stays `abnormal` only if the path still reads low against them; otherwise it is `normal` again, or `uncertain` with `host_shift` when it reads level with them but still below the baseline (see [Bandwidth recheck](design.md#bandwidth-recheck)). A `host_shift` that keeps recurring is the platform drifting, not a fault; fixing its power management, as above, removes it. The report's `bw_recheck` shows the numbers.
 
-The latency verdict has its own guard against this drift. Without a `LAT` baseline a path's latency is judged against the median of its siblings, and a run probes RNIC by RNIC, so a slow window over one RNIC's batch would read as a slow RNIC (and an advisory `path_latency_abnormal`). Before such a verdict is kept, the run re-reads the path interleaved with siblings of its class, on other RNICs where it can, and keeps it only if the path still reads high against them; otherwise the path is `normal` with `latency_reason` `recheck_cleared` (see the [README](../README.md#run-no-rnic-required)). That recheck costs 6 extra probes per flagged path, at most 16 paths per run, and only in idle runs that flag a path. Paths the locality check below clears anyway are not rechecked. On a host with many RNICs a drift can flag more paths than that: the run then rechecks them in turn across RNICs from a window that moves on by 16 every run, so each flagged path is rechecked within a few runs, and a path left out carries `latency_recheck_skipped` `cap`.
+The latency verdict has its own guard against this drift. Without a `LAT` baseline a path's latency is judged against the median of its siblings, and a run probes RNIC by RNIC, so a slow window over one RNIC's batch would read as a slow RNIC (and an advisory `path_latency_abnormal`). Before such a verdict is kept, the run re-reads the path interleaved with siblings of its class, on other RNICs where it can, and keeps it only if the path still reads high against them; otherwise the path is `normal` with `latency_reason` `recheck_cleared` (see [Latency](design.md#latency)). That recheck costs 6 extra probes per flagged path, at most 16 paths per run, and only in idle runs that flag a path. Paths the locality check below clears anyway are not rechecked. On a host with many RNICs a drift can flag more paths than that: the run then rechecks them in turn across RNICs from a window that moves on by 16 every run, so each flagged path is rechecked within a few runs, and a path left out carries `latency_recheck_skipped` `cap`.
 
 Some platforms drift per NUMA node rather than over time: the small-message latency of every RNIC attached to one node rises together, by about the sibling floor, and stays there for minutes, so the recheck confirms it (its siblings sit on other nodes). The affected node may move between runs, and loading CPU cores may move it rather than remove it. The analyzer therefore compares each sibling verdict the recheck kept (or did not reach) with the same-class paths of the other RNICs on its RNIC's NUMA node, without probing anything: a path that does not read high against them is `normal` with `latency_reason` `locality_shift`, and its `latency_locality` shows the node, the reference and the RNICs it came from. A per-RNIC fault raises one RNIC, not all of a node, so it stays flagged; so does a slow endpoint, which a strict majority of the other NUMA nodes also read as `abnormal`. A shift spanning several nodes at once (every node of one package, say) still leaves the remaining nodes reading the endpoint normally, so it is cleared. The check needs a second RNIC on the node: a host with one RNIC per NUMA node (sub-NUMA clustering often does this) keeps the plain sibling verdict, and so does an RNIC whose NUMA node is unknown. Fixing the platform's power management, as above, removes the drift itself.
 
@@ -779,7 +779,7 @@ portable between hosts with the same board layout and no further. Calibrate
 and merge per hardware class as above; on a host whose layout differs, the
 pairs it does not have are ignored (one start-up line lists them) and its
 paths fall back to the distance's value. A hand-edited file may define
-sub-classes too; see the README for the schema. Only the fast cluster
+sub-classes too; see [Baselines](design.md#baselines) for the schema. Only the fast cluster
 becomes a sub-class; the slow paths stay with the distance.
 
 ### RNICs that derive different Fig.4 tables

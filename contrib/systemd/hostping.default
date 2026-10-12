@@ -2,7 +2,7 @@
 #
 # HOSTPING_OPTS is passed to the daemon on its command line, split on
 # whitespace (quotes are not parsed, so no value may contain a space).
-# Every flag is listed by `hostping -h`; the README documents each one.
+# Every flag is listed by `hostping -h`; docs/design.md documents each one.
 # Restart the service after editing: systemctl restart hostping
 
 # Default: Prometheus /metrics and /healthz on :9464 (every interface), idle

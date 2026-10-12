@@ -8,6 +8,15 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Changed
+
+- The README is reduced to an overview, install and usage. The reference
+  material it held moved to `docs/design.md` (measurement, classification,
+  diagnoses, mutual probe, bus utilization, simulated faults),
+  `docs/metrics.md` (metrics and reports) and `docs/building.md`. The
+  tarball and packages ship `design.md`, `metrics.md` and `runbook.md` next to
+  `operations.md`.
+
 ## [0.1.1] - 2026-10-12
 
 ### Added

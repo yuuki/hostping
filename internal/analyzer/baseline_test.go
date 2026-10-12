@@ -105,7 +105,7 @@ func TestClassify400GUserBaselineOverridesClamp(t *testing.T) {
 		}
 	}
 
-	// The README's 270 Gbps override keeps working.
+	// The documented 270 Gbps override keeps working.
 	ov = map[model.Distance]baseline.PathBaseline{
 		model.DistanceLocalMem:  {BandwidthBPS: 270_000_000_000},
 		model.DistanceRemoteMem: {BandwidthBPS: 270_000_000_000},

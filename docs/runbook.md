@@ -5,7 +5,7 @@ One section per diagnosis code, plus one per agent-health alert in
 Each alert's `runbook_url` points at the section of the same name.
 
 The "how it is derived" lines summarize the analyzer; the
-[README](../README.md#diagnoses) is the reference. The checks and remediations
+[design document](design.md#diagnoses) is the reference. The checks and remediations
 are generic: hostping does not know your hardware vendor, and nothing below has
 been validated against a particular platform. Where a step is a reasonable
 first look rather than something hostping's evidence implies, it says so.
@@ -118,7 +118,7 @@ probe set (one memory node per side and one affinitive GPU, for example),
 busy runs have nothing to compare and every busy-probed path stays
 `uncertain` with `rnic_busy`. Busy reports from such hosts never carry a
 bandwidth verdict; rely on idle runs and on the PFC/drop counters there (see
-[README: busy classification](../README.md#busy-classification-and-hosts-without-siblings)).
+[Busy classification](design.md#busy-classification-and-hosts-without-siblings)).
 
 To re-test on demand, stop the daemon first (`hostpingctl diagnose` and the
 daemon do not coordinate, and each reads the other's probe traffic as load),
@@ -204,7 +204,7 @@ find the hop once an alert has fired (`hostping_link_status{status="abnormal"} =
 **Meaning.** An RNIC's PCIe link is degraded or failed (NSDI'23 failure #1).
 
 **Confidence and derivation.** Three ways
-([README](../README.md#run-no-rnic-required)):
+([PCIe link checks](design.md#pcie-link-checks)):
 
 - `high`: every affinitive path of the RNIC is abnormal, the link trained
   below the lower of its device and upstream port maxima (whichever is
@@ -373,7 +373,7 @@ resets on a run that tests the link without graying it, and on restart unless
 `--state-dir` carried it over (same boot and topology, last run recent enough;
 see [Stopping, upgrading and rolling back](operations.md#stopping-upgrading-and-rolling-back)).
 It is reported only while the current run still sees the link gray
-([README](../README.md#diagnoses)).
+([Diagnoses](design.md#diagnoses)).
 
 **Check first / remediation.** As for
 [`memory_channel_failure`](#memory_channel_failure); intermittent memory
@@ -501,7 +501,7 @@ utilization is at or above `--util-high` (90%): the link is busy, not broken.
 
 **Confidence and derivation.** `high`. Utilization is the max(rx, tx) port byte
 rate over the hop's capacity, a lower bound
-([Bus utilization](../README.md#bus-utilization)). Also reported in busy runs
+([Bus utilization](design.md#bus-utilization)). Also reported in busy runs
 where every affinitive path is uncertain and the link is saturated.
 
 **Check first.** What the workload is doing on that RNIC
@@ -545,7 +545,7 @@ sees sustained loss; `ud` has **not** been validated on RDMA hardware, and a bug
 in it would read as every probe timing out on every host (false
 `rnic_connectivity_failure` / `tor_switch_anomaly` fleet-wide). If those codes
 appear on many hosts at once right after enabling `ud`, suspect the transport
-first ([README](../README.md#mutual-probe-transports-and-schedule)).
+first ([Mutual probe](design.md#mutual-probe-transports-and-schedule)).
 
 ### `rnic_connectivity_failure`
 
@@ -606,7 +606,7 @@ a whole host losing its fabric is a page for you.
 gateway also time out on every pair: before rails were keyed by the netdev's
 real IPv4 prefix, RNICs in one /24 but on narrower subnets (e.g. two /26s) were
 paired and produced this code on a healthy host. Rail keys now follow the
-prefix ([README](../README.md#rail-optimized-hosts-and---mutual-scope)); if the
+prefix ([Rail-optimized hosts](design.md#rail-optimized-hosts-and---mutual-scope)); if the
 startup log says a prefix length was unreadable and /24 was assumed, check that
 RNIC's netdev address first.
 
@@ -616,7 +616,7 @@ RNIC's netdev address first.
 each other.
 
 **Confidence and derivation.**
-([README](../README.md#rail-optimized-hosts-and---mutual-scope))
+([Rail-optimized hosts](design.md#rail-optimized-hosts-and---mutual-scope))
 
 - `low`: **no** cross-rail pair answers. That is what rails isolated **by
   design** look like, and it is reported on every run of such a host. It is
@@ -696,7 +696,7 @@ has no streak to carry, so it reports a sibling verdict only when the recheck
 confirmed it (evidence `one-shot run`). A `LAT` verdict is reported on the
 first run. Grouped
 by distance, then endpoint, then RNIC
-([README](../README.md#run-no-rnic-required)).
+([Latency](design.md#latency)).
 
 **Check first.** Paths `abnormal` with `latency_streak` 1 or 2 and no cause
 are a reading that has not persisted yet; one that is gone in the next idle
@@ -741,7 +741,7 @@ is rolled back, and `--state-dir` keeps it across a restart. A one-shot run
 never reports it. The evidence names the lower median, the sample count and
 the number of consecutive idle runs. `medium` when the GPU was slow from every
 one of at least two RNICs, `low` otherwise. Idle runs only, needs three other
-GPUs ([README](../README.md#diagnoses)).
+GPUs ([Diagnoses](design.md#diagnoses)).
 
 **Check first.** `hostping_verb_duration_microseconds{verb="mr_reg"}` for that
 GPU over time; the GPU's health in `nvidia-smi -q` and `dmesg` (Xid messages);
@@ -763,7 +763,7 @@ that maximum, and the effective bandwidth (`current_link_speed` × width, less
 line-code overhead) below the line rate. A link below a known maximum is a
 down-train and goes to [`rnic_pcie_failure`](#rnic_pcie_failure) instead; a
 link whose maxima are unread gets neither. It changes no path or link status
-and never feeds Algorithm 1 ([README](../README.md#run-no-rnic-required)).
+and never feeds Algorithm 1 ([PCIe link checks](design.md#pcie-link-checks)).
 
 **Check first.** The evidence names the negotiated link, the maxima and the
 effective bandwidth against the line rate. Confirm with `lspci -vvv -s <bdf>`
@@ -780,7 +780,7 @@ whose subnet manager runs on the host itself, which discovery warns about at
 start — do not silence the advisory: exclude the device with `--exclude-rnic`
 (every function of it) and restart. hostping otherwise keeps sending loopback
 probes into that fabric's management subnet. See
-[Excluding RNICs](../README.md#excluding-rnics---exclude-rnic) and
+[Excluding RNICs](design.md#excluding-rnics---exclude-rnic) and
 [operations](operations.md#install).
 
 ### `unknown`
