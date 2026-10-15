@@ -239,6 +239,7 @@ func TestStatusCodePrometheusNames(t *testing.T) {
 		"hostping_path_uncertain_reason_code": {"endpoint=mem0,rnic=rnic0,": 7},
 		"hostping_path_latency_status_code":   {"endpoint=mem0,rnic=rnic0,": 2},
 		"hostping_path_latency_reason_code":   {"endpoint=mem0,rnic=rnic0,": 0},
+		"hostping_path_latency_streak":        {"endpoint=mem0,rnic=rnic0,": 0},
 		"hostping_link_status_code":           {"link=mem.0,": 4},
 	} {
 		if fmt.Sprint(values[name]) != fmt.Sprint(want) {

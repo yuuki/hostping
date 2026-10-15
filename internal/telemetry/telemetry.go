@@ -40,6 +40,7 @@ type Telemetry struct {
 	pathWhy  metric.Int64Gauge
 	pathLat  metric.Int64Gauge
 	latWhy   metric.Int64Gauge
+	latRuns  metric.Int64Gauge
 	linkAbn  metric.Int64Gauge
 	linkStat metric.Int64Gauge
 	pause    metric.Float64Gauge
@@ -311,6 +312,13 @@ func (t *Telemetry) initInstruments() error {
 		return err
 	}
 	t.latWhy, err = t.meter.Int64Gauge("hostping.path.latency_reason_code", metric.WithDescription("Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code"))
+	if err != nil {
+		return err
+	}
+	// latency_status_code is per run, so one healthy path reading high in a
+	// single run flips it. The streak lets a dashboard or alert wait for the
+	// persistence the analyzer itself requires before it names a cause.
+	t.latRuns, err = t.meter.Int64Gauge("hostping.path.latency_streak", metric.WithDescription("Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not"))
 	if err != nil {
 		return err
 	}
@@ -709,6 +717,7 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		t.pathWhy.Record(ctx, uncertainReasonCode(reason), attrs)
 		t.pathLat.Record(ctx, latencyStatusCode(p.LatencyStatus), attrs)
 		t.latWhy.Record(ctx, latencyReasonCode(p.LatencyReason), attrs)
+		t.latRuns.Record(ctx, int64(p.LatencyStreak), attrs)
 	}
 	for _, l := range rep.Links {
 		attrs := metric.WithAttributes(attribute.String("link", l.ID))
