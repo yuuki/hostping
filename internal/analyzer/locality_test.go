@@ -164,12 +164,12 @@ func TestLocalityShiftLeavesUserBaseline(t *testing.T) {
 func TestLocalityShiftAfterRecheck(t *testing.T) {
 	g := topology.Fig2()
 	ms := flatPaths(t, g, "rnic0", "rnic1")
-	th := config.Defaults().AbnormalTh
+	cfg := config.Defaults()
 	cleared, confirmed := ms[0], ms[1]
 	in := analyzer.Input{Graph: g, Cfg: config.Defaults(), Mode: model.ModeIdle, Measurements: ms,
 		LatencyRecheck: map[string]model.LatencyRecheck{
-			cleared.RNIC + "->" + cleared.Endpoint:     analyzer.JudgeLatencyRecheck([]uint64{1000, 1000, 1000}, []uint64{1000, 1000, 1000}, th),
-			confirmed.RNIC + "->" + confirmed.Endpoint: analyzer.JudgeLatencyRecheck([]uint64{2000, 2000, 2000}, []uint64{1000, 1000, 1000}, th),
+			cleared.RNIC + "->" + cleared.Endpoint:     analyzer.JudgeLatencyRecheck([]uint64{1000, 1000, 1000}, []uint64{1000, 1000, 1000}, cfg),
+			confirmed.RNIC + "->" + confirmed.Endpoint: analyzer.JudgeLatencyRecheck([]uint64{2000, 2000, 2000}, []uint64{1000, 1000, 1000}, cfg),
 		}}
 	r := analyzer.Analyze(in)
 	if m := r.Paths[0]; m.RNIC != "rnic0" || m.LatencyReason != model.LatencyRecheckCleared || m.LatencyLocality != nil {

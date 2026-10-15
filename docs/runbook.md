@@ -816,8 +816,8 @@ cause covers them (NSDI'23 §3.2).
 
 - `medium` when every path was judged against a `LAT` you set in `--baseline` /
   `--baseline-file`.
-- `low` when any path rests on the sibling median, which also needs a 500 ns
-  margin.
+- `low` when any path rests on the sibling median, which also needs a
+  `--latency-floor` margin (500 ns by default).
 
 The findings are grouped by distance, then endpoint, then RNIC
 ([Latency](design.md#latency), [Latency increase](design.md#latency-increase)).

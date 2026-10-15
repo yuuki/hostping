@@ -106,7 +106,7 @@ func PlanLatencyRecheck(g topology.Graph, ms []model.PathMeasurement, mode model
 		return LatencyRecheckSelection{}
 	}
 	judged := ClassifyLatency(g, ms, mode, cfg, bases)
-	shifted := localityShifts(g, judged, bases, cfg.AbnormalTh)
+	shifted := localityShifts(g, judged, bases, cfg)
 	byClass := map[latClass][]int{}
 	classOf := map[int]latClass{}
 	for i, m := range judged {
@@ -238,12 +238,12 @@ func recheckSiblings(ms []model.PathMeasurement, normal []int, rnic string) []Pa
 
 // JudgeLatencyRecheck decides a recheck from the path's re-read small-message
 // p50s and the interleaved sibling re-reads: the verdict holds when the median
-// of the path's reads exceeds the median of the siblings' by more than th and
-// by at least latencyFloorNs, exactly as the sweep judged it against the
-// sibling median. Siblings is left for the caller to fill.
-func JudgeLatencyRecheck(path, siblings []uint64, th float64) model.LatencyRecheck {
+// of the path's reads exceeds the median of the siblings' by more than
+// cfg.AbnormalTh and by at least cfg.LatencyFloor, exactly as the sweep judged
+// it against the sibling median. Siblings is left for the caller to fill.
+func JudgeLatencyRecheck(path, siblings []uint64, cfg config.Config) model.LatencyRecheck {
 	p, s := medianU64(path), medianU64(siblings)
-	return model.LatencyRecheck{PathNsP50: p, SiblingNsP50: s, Confirmed: siblingLatencyHigh(p, s, th)}
+	return model.LatencyRecheck{PathNsP50: p, SiblingNsP50: s, Confirmed: siblingLatencyHigh(p, s, cfg)}
 }
 
 // applyLatencyRecheck attaches each recheck, keyed by "rnic->endpoint", to its

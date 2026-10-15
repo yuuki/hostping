@@ -195,7 +195,7 @@ func TestLatencyStreakNotNeededForUserBaseline(t *testing.T) {
 func TestLatencyStreakOneShot(t *testing.T) {
 	g := topology.Fig2()
 	ms := slowOne(t, g, "rnic0", "mem0")
-	th := config.Defaults().AbnormalTh
+	cfg := config.Defaults()
 
 	r := runStreak(g, nil, streakRun{mode: model.ModeIdle, ms: ms, oneShot: true})
 	if m := latencyOf(t, r, "rnic0", "mem0"); m.LatencyStatus != model.LatencyAbnormal {
@@ -205,7 +205,7 @@ func TestLatencyStreakOneShot(t *testing.T) {
 		t.Errorf("unconfirmed one-shot verdict reported %+v", lc)
 	}
 
-	rc := map[string]model.LatencyRecheck{"rnic0->mem0": analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, th)}
+	rc := map[string]model.LatencyRecheck{"rnic0->mem0": analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, cfg)}
 	r = runStreak(g, nil, streakRun{mode: model.ModeIdle, ms: ms, oneShot: true, recheck: rc})
 	lc := latencyCauses(r.Causes)
 	if len(lc) != 1 || !reflect.DeepEqual(lc[0].Endpoints, []string{"mem0"}) {

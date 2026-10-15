@@ -1241,7 +1241,7 @@ A distance no path of the host measured (Fig.2 has no `multi_switch` path,
 for example) is left out of the file and keeps its Fig.4 default.
 
 Latency is off unless `--latency` is given. A latency set in the file is a
-strict reference without the 500 ns floor the sibling comparison has, so a
+strict reference without the `--latency-floor` the sibling comparison has, so a
 calibrated latency flags smaller increases. Prefer leaving it out until the
 sibling comparison has proved too loose.
 

@@ -20,6 +20,15 @@ type Config struct {
 	PFCHigh float64
 	// AbnormalTh is the fractional drop vs baseline (or vs sibling paths) that marks a path abnormal.
 	AbnormalTh float64
+	// LatencyFloor is the least excess over the sibling median, on top of
+	// AbnormalTh, a path's small-message latency must show to be judged
+	// abnormal against its siblings (the sweep, the paired recheck and the
+	// locality shift all apply it). A user latency baseline has no floor.
+	// The default suits platforms whose healthy paths jitter by a few
+	// hundred ns; one whose paths move by more between runs needs it raised,
+	// at the cost of missing rises smaller than the floor. At most
+	// MaxLatencyFloor.
+	LatencyFloor time.Duration
 	// UtilHigh marks a bus as overloaded.
 	UtilHigh float64
 	// CPUBusyHigh is the CPU busy fraction of a NUMA node (from /proc/stat,
@@ -188,6 +197,7 @@ func Defaults() Config {
 		ThpLowFraction: 0.05,
 		PFCHigh:        0.03,
 		AbnormalTh:     0.20,
+		LatencyFloor:   500 * time.Nanosecond,
 		UtilHigh:       0.90,
 		CPUBusyHigh:    0.5,
 		SmallMsgBytes:  1,
@@ -280,6 +290,7 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.MutualInterval, "mutual-interval", c.MutualInterval, "daemon: every RNIC probes one random peer this often (opt-in, 0 = off: pairs are probed in a burst per engine run; ToN'24 recommends 100ms)")
 	fs.DurationVar(&c.MutualWindow, "mutual-window", c.MutualWindow, "daemon: sliding window of the scheduled mutual probe's timeout ratio (ToN'24: 20s)")
 	fs.Float64Var(&c.AbnormalTh, "abnormal-th", c.AbnormalTh, "path abnormality threshold")
+	fs.Var(&boundedDuration{p: &c.LatencyFloor, max: MaxLatencyFloor}, "latency-floor", "least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor)")
 	fs.Float64Var(&c.PFCHigh, "pfc-high", c.PFCHigh, "Tx pause duration ratio that triggers busy diagnosis")
 	fs.Float64Var(&c.UtilHigh, "util-high", c.UtilHigh, "bus utilization that marks a link overloaded")
 	fs.Var(&boundedFloat{p: &c.CPUBusyHigh, max: 1}, "cpu-busy-high", "CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1)")
@@ -406,6 +417,10 @@ func (v *boundedUint32) Set(s string) error {
 // path of every run, so a typo must not turn into seconds of CPU and memory
 // traffic per path. The Zig probe applies the same cap.
 const MaxMemWarmup = time.Second
+
+// MaxLatencyFloor bounds --latency-floor. A small-message p50 is a few µs,
+// so a floor this high already turns the sibling latency verdict off.
+const MaxLatencyFloor = 10 * time.Microsecond
 
 // MaxUPIBytesPerFlit bounds --upi-bytes-per-flit: one count never carries more
 // than a 64-byte cache line.

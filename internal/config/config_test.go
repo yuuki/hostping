@@ -317,6 +317,7 @@ func TestProbeFlagDefaultsInUsage(t *testing.T) {
 		"iters":              "512",
 		"mutual-iters":       "64",
 		"mem-warmup":         "0s",
+		"latency-floor":      "500ns",
 		"upi-bytes-per-flit": "0",
 		"small-msg":          "1",
 		"large-msg":          "262144",
@@ -565,6 +566,34 @@ func TestMemWarmupFlag(t *testing.T) {
 	for _, v := range []string{"-1ms", "1001ms", "5s", "fast"} {
 		if _, err := parse(v); err == nil {
 			t.Errorf("--mem-warmup %s accepted", v)
+		}
+	}
+}
+
+func TestLatencyFloorFlag(t *testing.T) {
+	parse := func(v string) (Config, error) {
+		cfg := Defaults()
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(&strings.Builder{})
+		cfg.RegisterFlags(fs)
+		return cfg, fs.Parse([]string{"--latency-floor", v})
+	}
+	if d := Defaults().LatencyFloor; d != 500*time.Nanosecond {
+		t.Errorf("LatencyFloor = %v, want 500ns", d)
+	}
+	for v, want := range map[string]time.Duration{
+		"0":     0,
+		"1.5us": 1500 * time.Nanosecond,
+		"10us":  MaxLatencyFloor,
+	} {
+		cfg, err := parse(v)
+		if err != nil || cfg.LatencyFloor != want {
+			t.Errorf("--latency-floor %s = %v %v, want %v", v, cfg.LatencyFloor, err, want)
+		}
+	}
+	for _, v := range []string{"-1ns", "10001ns", "1ms", "high"} {
+		if _, err := parse(v); err == nil {
+			t.Errorf("--latency-floor %s accepted", v)
 		}
 	}
 }

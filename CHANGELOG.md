@@ -10,6 +10,12 @@ becomes the notes of its GitHub Release (see
 
 ### Added
 
+- `--latency-floor` (default `500ns`, at most `10us`): the least excess over
+  the sibling median a path's small-message latency must show, on top of
+  `--abnormal-th`, to be latency-abnormal against its siblings. The sweep, the
+  paired recheck and the locality check all apply it. Raise it on a platform
+  whose healthy paths move by more than 500 ns between runs, where
+  `latency_status` otherwise flags a different healthy path every few runs.
 - `hostping.path.latency_streak` (`hostping_path_latency_streak{rnic,endpoint}`):
   each path's `latency_streak`, the consecutive idle runs that read its latency
   `abnormal` against its siblings. `hostping_path_latency_status_code` is per
