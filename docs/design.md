@@ -70,6 +70,7 @@ Each is a flag on both binaries, alongside the other tuning flags. Fractions are
 | `--thp-low` | 0.05 | `Thplow`, a fraction of unidirectional line rate. |
 | `--pfc-high` | 0.03 | `PFChigh`. |
 | `--abnormal-th` | 0.20 | `Abnormalth`. |
+| `--latency-floor` | 500ns | Least excess over the sibling median a path's small-message p50 needs, on top of `--abnormal-th`, to read latency-`abnormal` against its siblings; at most 100us. See [Latency verdict and reference](#latency-verdict-and-reference). |
 | `--util-high` | 0.90 | `Utilhigh`. |
 | `--cpu-busy-high` | 0.5 | CPU busy fraction at which a package counts as loaded; see [CPU load](#cpu-load-on-an-idle-host). |
 | `--small-msg` | 1 | Small message, in bytes. |
@@ -239,7 +240,7 @@ At start-up one `baselines: per Fig.4 table:` log line names each of the host's 
 
 To derive that file instead of writing it by hand, run `hostpingctl calibrate` on an idle host believed healthy. It performs `--runs` (default 5) idle-mode runs of the one-shot path, `--interval` (default 30 s) apart. It refuses to start when the host is busy or its idle state is unknown. A run the host became busy during is discarded and retried, up to `--max-discards`.
 
-Per distance, the bandwidth is the median over runs of each run's median path, so neither one slow path nor one disturbed run moves it. Every measured path of the distance counts, whatever status the Fig.4 default gave it, since the default is what is being replaced. That is safe for GPUs because a distance never mixes affinitive and non-affinitive paths. Latency (small-message p50, same statistic) is written only with `--latency`, since a set latency is judged without the sibling comparison's 500 ns floor.
+Per distance, the bandwidth is the median over runs of each run's median path, so neither one slow path nor one disturbed run moves it. Every measured path of the distance counts, whatever status the Fig.4 default gave it, since the default is what is being replaced. That is safe for GPUs because a distance never mixes affinitive and non-affinitive paths. Latency (small-message p50, same statistic) is written only with `--latency`, since a set latency is judged without the sibling comparison's `--latency-floor`.
 
 The JSON goes to `--out` or stdout, in the `--baseline-file` format. The spread (min, p25, median, p75, max over paths × runs) and warnings go to stderr, since the loader rejects unknown fields. A warning flags a path more than `--abnormal-th` below its calibrated distance, and a note names the Fig.4 tables when the host's RNICs derive several.
 
@@ -349,13 +350,15 @@ Each path's small-message p50 gets a `latency_status` (`normal`/`abnormal`/`unkn
 - the `LAT` you set for the path's distance or learned sub-class (`user_baseline`), or
 - when you set none, the median of the host's other paths at the same distance and sub-class across every RNIC (`siblings`). This needs at least three of them; otherwise the verdict is `unknown` with `few_siblings`.
 
-Against siblings, a path must also sit at least 500 ns above the median. A small-message p50 is a µs or two, so `--abnormal-th` alone is a few hundred ns, which is within what separates healthy paths of one distance. The detours §3.2 is after cost about a µs (Fig.4's root-complex detour adds 1.2 µs). A `LAT` you set has no such floor.
+Against siblings, a path must also sit at least `--latency-floor` (500 ns by default) above the median. A small-message p50 is a µs or two, so `--abnormal-th` alone is a few hundred ns, which is within what separates healthy paths of one distance. The detours §3.2 is after cost about a µs (Fig.4's root-complex detour adds 1.2 µs). A `LAT` you set has no such floor.
+
+The default sits above the run-to-run jitter of healthy paths on most hosts (about 0.3 µs). Some platforms jitter more: on a 2-socket Granite Rapids host with sub-NUMA clustering, healthy paths' p50 moves between two levels about 0.9 µs apart from run to run, so a path on the upper level clears 500 ns against siblings on the lower one and `latency_status` flaps. On such a platform, raise the floor above the observed per-path p50 range (max − min over a day of idle runs), e.g. `--latency-floor 1.5us`. The floor applies to the sweep verdict, the recheck and the locality check alike.
 
 ### Latency recheck
 
 A sibling verdict is then confirmed by a paired re-measurement. Siblings are measured at different times, because a run probes RNIC by RNIC. A slow time window over one RNIC's batch (memory latency that drifts between states, see [operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)) or a single reading in a path's tail would otherwise read as a slow path.
 
-After the sweep, each path judged `abnormal` against its siblings is re-read 3 times. Each read is followed by one sibling of its class (on other RNICs first, one RNIC after another), so both sides share a time window. The verdict stands only if the median of the path's re-reads still exceeds the median of the sibling re-reads by `--abnormal-th` and 500 ns. Otherwise the path is `normal` with reason `recheck_cleared`. Either way the report carries the re-reads in `latency_recheck` (`path_ns_p50`, `sibling_ns_p50`, `siblings`, `confirmed`), and a confirmed cause's evidence quotes them. The recheck changes only the latency verdict: `small_lat_ns_p50`, bandwidth and `status` keep the sweep's readings.
+After the sweep, each path judged `abnormal` against its siblings is re-read 3 times. Each read is followed by one sibling of its class (on other RNICs first, one RNIC after another), so both sides share a time window. The verdict stands only if the median of the path's re-reads still exceeds the median of the sibling re-reads by `--abnormal-th` and `--latency-floor`. Otherwise the path is `normal` with reason `recheck_cleared`. Either way the report carries the re-reads in `latency_recheck` (`path_ns_p50`, `sibling_ns_p50`, `siblings`, `confirmed`), and a confirmed cause's evidence quotes them. The recheck changes only the latency verdict: `small_lat_ns_p50`, bandwidth and `status` keep the sweep's readings.
 
 The recheck is bounded. It takes at most 16 paths per run, and none in a class where more than half of the judged paths are flagged (a class-wide rise), none in busy runs and none during `hostpingctl calibrate`. A path whose rise the locality check below already clears on the sweep readings is not rechecked, so it takes none of the 16.
 
@@ -365,7 +368,7 @@ When more paths are left than that, the run takes them in turn across RNICs (one
 
 A sibling verdict still standing after the recheck faces one more test. On some platforms every RNIC of one NUMA node reads slower together for minutes (power management of the die they hang off), and the recheck confirms that rise because its siblings sit on other nodes.
 
-A path still `abnormal` against its siblings is therefore compared with the paths of its class from the other RNICs on its RNIC's NUMA node, by the same rule (`--abnormal-th` and 500 ns over their median sweep reading). If it is not high against them, the rise belongs to the node and not to the path. The path is then `normal` with reason `locality_shift`, and `latency_locality` (`numa`, `ref_ns`, `rnics`) records the reference.
+A path still `abnormal` against its siblings is therefore compared with the paths of its class from the other RNICs on its RNIC's NUMA node, by the same rule (`--abnormal-th` and `--latency-floor` over their median sweep reading). If it is not high against them, the rise belongs to the node and not to the path. The path is then `normal` with reason `locality_shift`, and `latency_locality` (`numa`, `ref_ns`, `rnics`) records the reference.
 
 The sibling verdict stands when:
 

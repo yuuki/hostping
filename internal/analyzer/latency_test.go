@@ -1,6 +1,8 @@
 package analyzer_test
 
 import (
+	"time"
+
 	"reflect"
 	"testing"
 
@@ -198,6 +200,31 @@ func TestLatencySiblingFloor(t *testing.T) {
 		}
 		if got := len(latencyCauses(r.Causes)); (tc.want == model.LatencyAbnormal) != (got == 1) {
 			t.Errorf("%d ns: %d latency causes", tc.lat, got)
+		}
+	}
+}
+
+// --latency-floor moves the floor. On a platform whose healthy paths jitter by
+// about a µs between runs (issue #11), a raised floor keeps such a reading
+// normal; a floor of zero leaves Abnormal_th alone to decide.
+func TestLatencySiblingFloorFlag(t *testing.T) {
+	g := topology.Fig2()
+	for _, tc := range []struct {
+		floor time.Duration
+		lat   uint64
+		want  model.LatencyStatus
+	}{
+		{time.Microsecond, 1600, model.LatencyNormal},   // +600 ns: under a 1 µs floor
+		{time.Microsecond, 2100, model.LatencyAbnormal}, // +1100 ns: past it
+		{0, 1250, model.LatencyAbnormal},                // +25%: Abnormal_th alone
+		{0, 1150, model.LatencyNormal},                  // +15%: under Abnormal_th
+	} {
+		cfg := config.Defaults()
+		cfg.LatencyFloor = tc.floor
+		r := analyzer.Analyze(analyzer.Input{Graph: g, Cfg: cfg, Mode: model.ModeIdle, Measurements: withLat(t, g, tc.lat)})
+		p := latencyOf(t, r, "rnic0", "mem0")
+		if p.LatencyStatus != tc.want || p.LatencyReason != model.LatencyBySiblings {
+			t.Errorf("floor %v, %d ns: latency %s/%s, want %s/siblings", tc.floor, tc.lat, p.LatencyStatus, p.LatencyReason, tc.want)
 		}
 	}
 }

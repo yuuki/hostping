@@ -39,8 +39,9 @@ import (
 // median.
 const latencyMinSiblings = 3
 
-// latencyFloorNs is the least excess over the sibling median a path must show,
-// on top of Abnormal_th, to be judged abnormal against its siblings.
+// The latency floor (config.Config.LatencyFloor, --latency-floor, 500 ns by
+// default) is the least excess over the sibling median a path must show, on
+// top of Abnormal_th, to be judged abnormal against its siblings.
 //
 // A small-message p50 is one or two µs, so Abnormal_th alone is a few hundred
 // ns — within what separates healthy paths of one distance on a real host:
@@ -52,9 +53,13 @@ const latencyMinSiblings = 3
 // an extra translation or bridge hop is of that order. Half of that detour
 // still catches it, while sitting well above sub-µs jitter.
 //
+// Some platforms jitter by more than that: healthy paths whose p50 moves
+// between two levels about a µs apart from run to run clear a 500 ns floor
+// and flap the sibling verdict. The floor is therefore a flag, for an
+// operator to raise on such a platform.
+//
 // A user baseline gets no floor: the operator measured that reference for
 // this host, so Abnormal_th against it means what it says.
-const latencyFloorNs = 500
 
 // LatencyRuns is how many consecutive idle runs must read a path abnormal
 // against its siblings before diagnoseLatency reports it.
@@ -87,7 +92,7 @@ const LatencyRuns = 3
 // across every RNIC, so one RNIC or one endpoint whose every path is slow
 // cannot raise its own reference. A path compares against the others only, and
 // the median keeps a minority of slow siblings from moving the reference. A
-// sibling verdict must also clear latencyFloorNs. It is the sweep's verdict:
+// sibling verdict must also clear the latency floor. It is the sweep's verdict:
 // the engine re-reads a path flagged against its siblings next to them and
 // may clear it (PlanLatencyRecheck, applied by Analyze), and Analyze then
 // clears a rise the other RNICs on the path's NUMA node share
@@ -139,7 +144,7 @@ func ClassifyLatency(g topology.Graph, ms []model.PathMeasurement, mode model.Ru
 			m.LatencyStatus = model.LatencyNormal
 			abn := latencyHigh(m.SmallLatNsP50, ref, cfg.AbnormalTh)
 			if reason == model.LatencyBySiblings {
-				abn = siblingLatencyHigh(m.SmallLatNsP50, ref, cfg.AbnormalTh)
+				abn = siblingLatencyHigh(m.SmallLatNsP50, ref, cfg.AbnormalTh, cfg.LatencyFloorNs())
 			}
 			if abn {
 				m.LatencyStatus = model.LatencyAbnormal
@@ -179,9 +184,9 @@ func latencyClassOf(g topology.Graph, m model.PathMeasurement, bases baseline.Ov
 }
 
 // siblingLatencyHigh is the sibling verdict: lat exceeds the sibling
-// reference ref by more than th and by at least latencyFloorNs.
-func siblingLatencyHigh(lat, ref uint64, th float64) bool {
-	return latencyHigh(lat, ref, th) && lat >= ref+latencyFloorNs
+// reference ref by more than th and by at least floorNs.
+func siblingLatencyHigh(lat, ref uint64, th float64, floorNs uint64) bool {
+	return latencyHigh(lat, ref, th) && lat >= ref+floorNs
 }
 
 // latencyKey keys a path in the latency streaks, as "rnic->endpoint".

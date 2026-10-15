@@ -168,8 +168,8 @@ func TestLocalityShiftAfterRecheck(t *testing.T) {
 	cleared, confirmed := ms[0], ms[1]
 	in := analyzer.Input{Graph: g, Cfg: config.Defaults(), Mode: model.ModeIdle, Measurements: ms,
 		LatencyRecheck: map[string]model.LatencyRecheck{
-			cleared.RNIC + "->" + cleared.Endpoint:     analyzer.JudgeLatencyRecheck([]uint64{1000, 1000, 1000}, []uint64{1000, 1000, 1000}, th),
-			confirmed.RNIC + "->" + confirmed.Endpoint: analyzer.JudgeLatencyRecheck([]uint64{2000, 2000, 2000}, []uint64{1000, 1000, 1000}, th),
+			cleared.RNIC + "->" + cleared.Endpoint:     analyzer.JudgeLatencyRecheck([]uint64{1000, 1000, 1000}, []uint64{1000, 1000, 1000}, th, config.Defaults().LatencyFloorNs()),
+			confirmed.RNIC + "->" + confirmed.Endpoint: analyzer.JudgeLatencyRecheck([]uint64{2000, 2000, 2000}, []uint64{1000, 1000, 1000}, th, config.Defaults().LatencyFloorNs()),
 		}}
 	r := analyzer.Analyze(in)
 	if m := r.Paths[0]; m.RNIC != "rnic0" || m.LatencyReason != model.LatencyRecheckCleared || m.LatencyLocality != nil {

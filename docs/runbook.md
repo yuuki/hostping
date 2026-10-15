@@ -816,8 +816,8 @@ cause covers them (NSDI'23 §3.2).
 
 - `medium` when every path was judged against a `LAT` you set in `--baseline` /
   `--baseline-file`.
-- `low` when any path rests on the sibling median, which also needs a 500 ns
-  margin.
+- `low` when any path rests on the sibling median, which also needs a
+  `--latency-floor` margin (500 ns by default).
 
 The findings are grouped by distance, then endpoint, then RNIC
 ([Latency](design.md#latency), [Latency increase](design.md#latency-increase)).
@@ -847,6 +847,12 @@ The recheck has a per-run cap of 16. A run that flagged more paths rechecks
 them in turn across RNICs, moving on every run. A path it left out carries
 `latency_recheck_skipped` `cap`, holds its streak and is not reported in that
 run.
+
+**False positives.** On a platform whose healthy paths jitter by about a µs
+between runs, `latency_status` flaps between `normal` and `abnormal` with
+reason `siblings` on a different set of paths each run, while the streak keeps
+it from being reported. Raise `--latency-floor` above the per-path p50 range
+of healthy idle runs ([Latency](design.md#latency-verdict-and-reference)).
 
 A one-shot run (`hostpingctl diagnose`) has no streak to carry. It reports a
 sibling verdict only when the recheck confirmed it (evidence `one-shot run`).

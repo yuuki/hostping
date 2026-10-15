@@ -8,6 +8,19 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- `--latency-floor` (default `500ns`, at most `100us`): the least excess over
+  the sibling median a path's small-message p50 needs, on top of
+  `--abnormal-th`, to read latency-abnormal against its siblings. It was fixed
+  at 500 ns, below the run-to-run jitter of healthy paths on some platforms
+  (about 0.9 µs on Granite Rapids with SNC3 and B200), where
+  `hostping.path.latency_status_code` flapped. The sweep verdict, the paired
+  recheck and the locality check all use it; a latency from a user baseline
+  still has no floor. See
+  [Latency verdict and reference](docs/design.md#latency-verdict-and-reference)
+  ([#11](https://github.com/yuuki/hostping/issues/11)).
+
 ## [0.1.4] - 2026-10-13
 
 ### Added

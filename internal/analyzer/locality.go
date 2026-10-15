@@ -40,8 +40,8 @@ import (
 // not matter and a path the recheck cleared is not judged again.
 // PlanLatencyRecheck runs the same rule (localityShifts) on the sweep
 // verdicts, so the paths it would clear spend none of the recheck's cap.
-func applyLocalityShift(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, th float64) []model.PathMeasurement {
-	for i, loc := range localityShifts(g, paths, bases, th) {
+func applyLocalityShift(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, th float64, floorNs uint64) []model.PathMeasurement {
+	for i, loc := range localityShifts(g, paths, bases, th, floorNs) {
 		m := &paths[i]
 		m.LatencyStatus, m.LatencyReason, m.LatencyLocality = model.LatencyNormal, model.LatencyLocalityShift, &loc
 	}
@@ -50,7 +50,7 @@ func applyLocalityShift(g topology.Graph, paths []model.PathMeasurement, bases b
 
 // localityShifts returns, keyed by index into paths, the locality reference
 // of each path applyLocalityShift clears, without changing paths.
-func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, th float64) map[int]model.LatencyLocality {
+func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, th float64, floorNs uint64) map[int]model.LatencyLocality {
 	numaOf := map[string]int{}
 	for _, n := range g.RNICs {
 		numaOf[n.ID] = n.NUMA
@@ -119,7 +119,7 @@ func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases basel
 			continue
 		}
 		ref := medianU64(lats)
-		if siblingLatencyHigh(m.SmallLatNsP50, ref, th) {
+		if siblingLatencyHigh(m.SmallLatNsP50, ref, th, floorNs) {
 			continue
 		}
 		loc := model.LatencyLocality{NUMA: numa, RefNs: ref}

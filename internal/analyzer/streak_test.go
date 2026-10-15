@@ -205,7 +205,7 @@ func TestLatencyStreakOneShot(t *testing.T) {
 		t.Errorf("unconfirmed one-shot verdict reported %+v", lc)
 	}
 
-	rc := map[string]model.LatencyRecheck{"rnic0->mem0": analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, th)}
+	rc := map[string]model.LatencyRecheck{"rnic0->mem0": analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, th, config.Defaults().LatencyFloorNs())}
 	r = runStreak(g, nil, streakRun{mode: model.ModeIdle, ms: ms, oneShot: true, recheck: rc})
 	lc := latencyCauses(r.Causes)
 	if len(lc) != 1 || !reflect.DeepEqual(lc[0].Endpoints, []string{"mem0"}) {

@@ -134,7 +134,7 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 		t.Fatalf("precondition: want one latency cause, got %+v", base.Causes)
 	}
 
-	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{1000, 1010, 990}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh)}
+	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{1000, 1010, 990}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh, in.Cfg.LatencyFloorNs())}
 	r := analyzer.Analyze(in)
 	m := r.Paths[0]
 	if m.LatencyStatus != model.LatencyNormal || m.LatencyReason != model.LatencyRecheckCleared || m.LatencyRecheck == nil || m.LatencyRecheck.Confirmed {
@@ -150,7 +150,7 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 		t.Error("recheck changed the bandwidth verdict")
 	}
 
-	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh)}
+	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh, in.Cfg.LatencyFloorNs())}
 	r = analyzer.Analyze(in)
 	if m := r.Paths[0]; m.LatencyStatus != model.LatencyAbnormal || m.LatencyReason != model.LatencyBySiblings || !m.LatencyRecheck.Confirmed {
 		t.Fatalf("confirmed path = %+v", m)
@@ -166,6 +166,19 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 	in.LatencyRecheck = map[string]model.LatencyRecheck{key: {PathNsP50: 1000, SiblingNsP50: 1000}}
 	if m := analyzer.Analyze(in).Paths[0]; m.LatencyStatus != model.LatencyAbnormal || m.LatencyReason != model.LatencyByBaseline || m.LatencyRecheck != nil {
 		t.Errorf("user-baseline path = %+v, want abnormal/user_baseline untouched", m)
+	}
+}
+
+// The recheck takes the same --latency-floor as the sweep: re-reads 600 ns
+// above the siblings confirm under the default floor and clear under 1 µs.
+func TestJudgeLatencyRecheckFloor(t *testing.T) {
+	th := config.Defaults().AbnormalTh
+	path, sib := []uint64{1600, 1600, 1600}, []uint64{1000, 1000, 1000}
+	if !analyzer.JudgeLatencyRecheck(path, sib, th, 500).Confirmed {
+		t.Errorf("+600 ns not confirmed under a 500 ns floor")
+	}
+	if analyzer.JudgeLatencyRecheck(path, sib, th, 1000).Confirmed {
+		t.Errorf("+600 ns confirmed under a 1000 ns floor")
 	}
 }
 
@@ -185,7 +198,7 @@ func TestJudgeLatencyRecheck(t *testing.T) {
 		// Siblings that read slow in the same window clear the path.
 		{[]uint64{2000, 2000, 2000}, []uint64{2000, 1900, 2100}, false},
 	} {
-		got := analyzer.JudgeLatencyRecheck(tc.path, tc.sib, th)
+		got := analyzer.JudgeLatencyRecheck(tc.path, tc.sib, th, config.Defaults().LatencyFloorNs())
 		if got.Confirmed != tc.want {
 			t.Errorf("path %v vs siblings %v: confirmed %v, want %v", tc.path, tc.sib, got.Confirmed, tc.want)
 		}

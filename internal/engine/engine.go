@@ -437,7 +437,7 @@ func (e *Engine) recheckLatency(ctx context.Context, mode model.RunMode, ms []mo
 			e.logf("hostping: latency recheck of %s abandoned, keeping the sweep verdict: %v", plan.Path, failed)
 			continue
 		}
-		rc := analyzer.JudgeLatencyRecheck(path, sibs, e.Cfg.AbnormalTh)
+		rc := analyzer.JudgeLatencyRecheck(path, sibs, e.Cfg.AbnormalTh, e.Cfg.LatencyFloorNs())
 		rc.Siblings = names
 		out[plan.Path.String()] = rc
 	}
