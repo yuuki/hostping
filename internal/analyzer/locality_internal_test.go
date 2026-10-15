@@ -55,7 +55,7 @@ func judgeFourNodes(t *testing.T, g topology.Graph, slow ...string) map[string]m
 		}
 	}
 	out := map[string]model.PathMeasurement{}
-	for _, m := range applyLocalityShift(g, judged, baseline.Overlay{}, cfg.AbnormalTh) {
+	for _, m := range applyLocalityShift(g, judged, baseline.Overlay{}, cfg) {
 		out[m.RNIC+"->"+m.Endpoint] = m
 	}
 	return out

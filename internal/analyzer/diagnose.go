@@ -122,7 +122,7 @@ func Analyze(in Input) Result {
 	// the cap; it clears them again here, after the recheck.
 	paths = ClassifyLatency(in.Graph, paths, in.Mode, in.Cfg, in.Bases)
 	paths = applyLatencyRecheck(paths, in.LatencyRecheck)
-	paths = applyLocalityShift(in.Graph, paths, in.Bases, in.Cfg.AbnormalTh)
+	paths = applyLocalityShift(in.Graph, paths, in.Bases, in.Cfg)
 	paths = markLatencyRecheckSkipped(paths, in.LatencyRecheckSkipped)
 	paths = applyCPUBusyLatency(in.Graph, paths, in.CPUBusySockets)
 	latHits := latencyStreaks(in, paths)

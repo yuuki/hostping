@@ -3,6 +3,7 @@ package analyzer_test
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/yuuki/hostping/internal/analyzer"
 	"github.com/yuuki/hostping/internal/baseline"
@@ -198,6 +199,31 @@ func TestLatencySiblingFloor(t *testing.T) {
 		}
 		if got := len(latencyCauses(r.Causes)); (tc.want == model.LatencyAbnormal) != (got == 1) {
 			t.Errorf("%d ns: %d latency causes", tc.lat, got)
+		}
+	}
+}
+
+// --latency-floor moves the floor on a platform whose healthy paths jitter by
+// more than 500 ns between runs: a path +60% and +600 ns above its siblings is
+// abnormal under the default but normal under a 1 µs floor, and one past the
+// raised floor is still abnormal. A zero floor leaves Abnormal_th alone.
+func TestLatencySiblingFloorConfigurable(t *testing.T) {
+	g := topology.Fig2()
+	for _, tc := range []struct {
+		floor time.Duration
+		lat   uint64
+		want  model.LatencyStatus
+	}{
+		{time.Microsecond, 1600, model.LatencyNormal},
+		{time.Microsecond, 2100, model.LatencyAbnormal},
+		{0, 1250, model.LatencyAbnormal},
+		{0, 1150, model.LatencyNormal},
+	} {
+		cfg := config.Defaults()
+		cfg.LatencyFloor = tc.floor
+		r := analyzer.Analyze(analyzer.Input{Graph: g, Cfg: cfg, Mode: model.ModeIdle, Measurements: withLat(t, g, tc.lat)})
+		if p := latencyOf(t, r, "rnic0", "mem0"); p.LatencyStatus != tc.want {
+			t.Errorf("floor %v, %d ns: latency %s/%s, want %s", tc.floor, tc.lat, p.LatencyStatus, p.LatencyReason, tc.want)
 		}
 	}
 }

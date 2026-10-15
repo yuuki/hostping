@@ -3,6 +3,7 @@ package analyzer_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yuuki/hostping/internal/analyzer"
 	"github.com/yuuki/hostping/internal/baseline"
@@ -134,7 +135,7 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 		t.Fatalf("precondition: want one latency cause, got %+v", base.Causes)
 	}
 
-	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{1000, 1010, 990}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh)}
+	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{1000, 1010, 990}, []uint64{1000, 1000, 1000}, in.Cfg)}
 	r := analyzer.Analyze(in)
 	m := r.Paths[0]
 	if m.LatencyStatus != model.LatencyNormal || m.LatencyReason != model.LatencyRecheckCleared || m.LatencyRecheck == nil || m.LatencyRecheck.Confirmed {
@@ -150,7 +151,7 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 		t.Error("recheck changed the bandwidth verdict")
 	}
 
-	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, in.Cfg.AbnormalTh)}
+	in.LatencyRecheck = map[string]model.LatencyRecheck{key: analyzer.JudgeLatencyRecheck([]uint64{3000, 3000, 3000}, []uint64{1000, 1000, 1000}, in.Cfg)}
 	r = analyzer.Analyze(in)
 	if m := r.Paths[0]; m.LatencyStatus != model.LatencyAbnormal || m.LatencyReason != model.LatencyBySiblings || !m.LatencyRecheck.Confirmed {
 		t.Fatalf("confirmed path = %+v", m)
@@ -172,7 +173,7 @@ func TestAnalyzeAppliesLatencyRecheck(t *testing.T) {
 // The recheck applies the sweep's sibling rule to the re-reads: above
 // Abnormal_th and the floor, or not.
 func TestJudgeLatencyRecheck(t *testing.T) {
-	th := config.Defaults().AbnormalTh
+	cfg := config.Defaults()
 	for _, tc := range []struct {
 		path, sib []uint64
 		want      bool
@@ -185,9 +186,15 @@ func TestJudgeLatencyRecheck(t *testing.T) {
 		// Siblings that read slow in the same window clear the path.
 		{[]uint64{2000, 2000, 2000}, []uint64{2000, 1900, 2100}, false},
 	} {
-		got := analyzer.JudgeLatencyRecheck(tc.path, tc.sib, th)
+		got := analyzer.JudgeLatencyRecheck(tc.path, tc.sib, cfg)
 		if got.Confirmed != tc.want {
 			t.Errorf("path %v vs siblings %v: confirmed %v, want %v", tc.path, tc.sib, got.Confirmed, tc.want)
 		}
+	}
+	// The recheck applies --latency-floor as the sweep does, so a raised floor
+	// clears a re-read the default would confirm.
+	cfg.LatencyFloor = time.Microsecond
+	if got := analyzer.JudgeLatencyRecheck([]uint64{1900, 1900, 1900}, []uint64{1000, 1000, 1000}, cfg); got.Confirmed {
+		t.Errorf("+900 ns confirmed under a 1µs floor")
 	}
 }
