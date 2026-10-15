@@ -481,6 +481,41 @@ func TestRecordReportPathLatencyStatus(t *testing.T) {
 	check(1, 8)
 }
 
+// hostping.path.latency_streak exports each path's LatencyStreak beside the
+// per-run latency_status_code, rewritten on every report: a single high run
+// reads 1, a confirmed streak counts up, and a run that ends it reads 0 rather
+// than leaving the old count behind.
+func TestRecordReportPathLatencyStreak(t *testing.T) {
+	tel, reader := newTestTelemetry(t)
+	ctx := context.Background()
+	record := func(streaks map[string]int) {
+		t.Helper()
+		var ps []model.PathMeasurement
+		for ep, n := range streaks {
+			p := model.PathMeasurement{RNIC: "rnic0", Endpoint: ep, LatencyStatus: model.LatencyNormal, LatencyReason: model.LatencyBySiblings}
+			if n > 0 {
+				p.LatencyStatus, p.LatencyStreak = model.LatencyAbnormal, n
+			}
+			ps = append(ps, p)
+		}
+		tel.RecordReport(ctx, model.Report{Paths: ps})
+	}
+	check := func(want map[string]int64) {
+		t.Helper()
+		assertGaugeSeries(t, "path.latency_streak", gaugeInt(t, collect(t, reader), "hostping.path.latency_streak"), want)
+	}
+	const g0, g1 = "endpoint=gpu0,rnic=rnic0", "endpoint=gpu1,rnic=rnic0"
+
+	record(map[string]int{"gpu0": 1, "gpu1": 0})
+	check(map[string]int64{g0: 1, g1: 0})
+	// Both read abnormal in the run, but only the streak tells the one
+	// that has persisted.
+	record(map[string]int{"gpu0": 3, "gpu1": 1})
+	check(map[string]int64{g0: 3, g1: 1})
+	record(map[string]int{"gpu0": 0, "gpu1": 0})
+	check(map[string]int64{g0: 0, g1: 0})
+}
+
 // hostping.verb.duration carries one series per (path, verb): gpu_alloc only
 // for a GPU endpoint, and nothing for a probe that reported no timings.
 func TestRecordReportVerbDuration(t *testing.T) {

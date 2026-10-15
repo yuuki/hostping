@@ -16,6 +16,14 @@ becomes the notes of its GitHub Release (see
   paired recheck and the locality check all apply it. Raise it on a platform
   whose healthy paths move by more than 500 ns between runs, where
   `latency_status` otherwise flags a different healthy path every few runs.
+- `hostping.path.latency_streak` (`hostping_path_latency_streak{rnic,endpoint}`):
+  each path's `latency_streak`, the consecutive idle runs that read its latency
+  `abnormal` against its siblings. `hostping_path_latency_status_code` is per
+  run, so one healthy path reading high in a single run flips it; a dashboard
+  or alert can require `hostping_path_latency_streak >= 3`, the persistence
+  the daemon needs before it names a cause. One series per path: a Fig.2 sim
+  host gains 40, from 571 to 611. See
+  [Latency streak](docs/operations.md#latency-streak).
 
 ## [0.1.4] - 2026-10-13
 
