@@ -750,6 +750,7 @@ host. Notation:
 | --- | --- | --- |
 | `hostping_loopback_latency_microseconds`, `hostping_loopback_bandwidth_bit_per_second`, `hostping_path_abnormal` | 3 P | `rnic` × `endpoint` |
 | `hostping_path_status_code`, `hostping_path_uncertain_reason_code`, `hostping_path_latency_status_code`, `hostping_path_latency_reason_code` | 4 P | `rnic` × `endpoint`; the state is the value, not a label |
+| `hostping_path_latency_streak` | P | `rnic` × `endpoint` |
 | `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup`; none with `--metrics-verb-durations=false` |
 | `hostping_link_abnormal_count` | L | `link` |
 | `hostping_link_status_code` | L | `link`; the state is the value |
@@ -770,7 +771,7 @@ host. Notation:
 Per host:
 
 ```
-series ≈ 10 P_gpu + 9 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T
+series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T
 ```
 
 U ≤ L is the number of links with a utilization source. The Prometheus client
@@ -778,11 +779,11 @@ adds about 50 Go runtime, process and `target_info` series on top. The
 constant 41 is the 11 liveness series, the 2 `hostping_endpoint_skipped`
 series and the 28 `hostping_status_code_info` series.
 
-The path terms dominate. Each RNIC→endpoint pair costs about 10 series, so a
+The path terms dominate. Each RNIC→endpoint pair costs about 11 series, so a
 host grows with R × E. `--metrics-verb-durations=false` drops
 `hostping_verb_duration_microseconds`, the 3 P_gpu + 2 P_mem of those terms,
-leaving 7 series per path (the Fig.2 sim host below scrapes 459 instead of
-571). The probes still time the verbs, and the report's `verb_ns` and the
+leaving 8 series per path (the Fig.2 sim host below scrapes 499 instead of
+611). The probes still time the verbs, and the report's `verb_ns` and the
 `gpu_slow_mr_reg` diagnosis keep using them. Prometheus adds its own `job` and `instance` labels, and
 the exporter adds the constant `otel_scope_*` labels. None of those multiply.
 The endpoint skip reason (free-form probe text), a path's baseline sub-class
@@ -801,15 +802,16 @@ Worked example: the Fig.2 host of `--sim`.
 - N = 0, because no CPU load is read.
 
 ```
-10 × 32 + 9 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
-= 320 + 72 + 69 + 18 + 20 + 20 + 10 + 41 + D + T = 570 + D + T
+11 × 32 + 10 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
+= 352 + 80 + 69 + 18 + 20 + 20 + 10 + 41 + D + T = 610 + D + T
 ```
 
-A healthy idle sim run scrapes 571 `hostping_*` series (D = 0, T = 1), 47 of
-them the topology graph (24 nodes, 23 edges); 0.1.3 scraped 524.
+A healthy idle sim run scrapes 611 `hostping_*` series (D = 0, T = 1), 47 of
+them the topology graph (24 nodes, 23 edges) and 40 the latency streaks; 0.1.4
+scraped 571 and 0.1.3 524.
 0.1.1, with one-hot status gauges at 22 series per path and 4 per link,
 scraped 1285. The rail-optimized `--topology fig2-rails` host has M = 0 and
-scrapes 553. `--topology fig2-snc` (K = 14 with 4 NUMA nodes, S = 4, L = 27)
+scrapes 593. `--topology fig2-snc` (K = 14 with 4 NUMA nodes, S = 4, L = 27)
 has 30 nodes and 31 edges.
 
 Each further diagnosis code and confidence, and each further trigger/mode
@@ -1157,7 +1159,19 @@ rise.
   window reaches the path in a later run.
 
 A path below 3 keeps `latency_status` `abnormal` (and
-`hostping_path_latency_status_code` 3) but gets no cause. A discarded idle run
+`hostping_path_latency_status_code` 3) but gets no cause.
+`hostping_path_latency_streak` exports the count, so a dashboard or alert can
+wait for the same persistence instead of following the per-run status code,
+which one high run of a healthy path flips:
+
+```promql
+# Paths whose latency has read abnormal against their siblings for 3
+# consecutive idle runs: the persistence the daemon needs to name a cause.
+hostping_path_latency_streak >= 3
+```
+
+The gauge reads 0 in a busy run, which judges no latency, while the daemon
+keeps the count; the next idle run continues it. A discarded idle run
 rolls the streaks back, and `--state-dir` keeps them across a restart. A
 one-shot run cannot see persistence, so it reports a sibling verdict only when
 the paired recheck confirmed it. A verdict against a `LAT` you set needs
