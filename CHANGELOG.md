@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-16
+
 ### Added
 
 - `--latency-floor` (default `500ns`, at most `10us`): the least excess over
