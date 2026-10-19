@@ -110,6 +110,8 @@ A live one-shot `diagnose` in idle mode polls the same clean interval after its 
 
 The hold catches a workload that comes back and keeps running past the run. Load that returns and ends entirely within one run is not caught. Busy-mode runs are never held, since they already expect load.
 
+Neither the idle verdict nor the hold knows whether a scheduler has allocated the host to a job. A job that pauses its GPUs and RNICs for minutes (data loading, a checkpoint) looks idle, and an idle run inside that pause finishes before the job resumes. `--idle-gate-command` (default unset) asks the site instead: the daemon runs it right before each idle-trigger run and skips the run unless it exits 0. A timeout or exec failure skips too, and the next attempt follows `--idle-interval`. PFC/drop, periodic and mutual-alarm runs are not gated. See [Keeping idle runs out of scheduler jobs](operations.md#keeping-idle-runs-out-of-scheduler-jobs).
+
 Those two triggers leave one case unmeasured: a loaded host that raises neither PFC pauses nor drops. A bottleneck that costs throughput without filling the RNIC receive buffer never trips `PFChigh`, and neither does any bottleneck on a fabric that runs without PFC. The host is never idle either, so the paper's monitor runs nothing until it goes quiet.
 
 `--busy-interval D` (default `0`, off; an extension beyond §4.2) closes that gap. When neither trigger fires on a host that is not idle, the monitor starts a busy-mode run with trigger `periodic` at most once per `D`, and never inside `--busy-cooldown`. The interval starts at the first counter sample and restarts on any engine run (idle, PFC/drop or periodic), measured from the end of the run, so a PFC/drop run also satisfies it.

@@ -38,6 +38,7 @@ text says so.
   [`unknown`](#unknown)
 - Agent health: [HostpingTargetDown](#hostpingtargetdown),
   [HostpingNoSuccessfulRun](#hostpingnosuccessfulrun),
+  [HostpingIdleGateFailing](#hostpingidlegatefailing),
   [HostpingRunsFailing](#hostpingrunsfailing),
   [HostpingMonitorPollErrors](#hostpingmonitorpollerrors),
   [HostpingEndpointsSkipped](#hostpingendpointsskipped)
@@ -1019,7 +1020,31 @@ Look in the journal for `hostping` lines about:
 - An RNIC whose line rate is unread. No idle run is started (see
   [What "unknown" means](operations.md#what-unknown-means-per-data-source)).
 
+The rule leaves out a host whose `--idle-gate-command` skipped an idle run in
+the window, so a host that a scheduler job holds does not fire it.
+
 Adjust the 900 s / 15 m in the rule to 3 × your `--idle-interval`.
+
+### HostpingIdleGateFailing
+
+The `--idle-gate-command` timed out (`reason="timeout"`) or could not run
+(`reason="error"`) for 15 minutes. The gate fails closed, so the host gets no
+idle run until it answers again. A gate that exits non-zero
+(`reason="denied"`) is working and does not alert.
+
+1. Find the skip line in the journal:
+   `journalctl -u hostping | grep 'idle gate'`. It is logged when the outcome
+   changes and names the reason, the exit status and the first 256 bytes of
+   stderr.
+2. Run the command as the daemon's user, with the same sandboxing, for example
+   `systemd-run --pty -p User=hostping -p ProtectSystem=full -p ProtectHome=read-only /path/to/gate; echo $?`.
+   `error` usually means the path is wrong, not executable, or its interpreter
+   is missing.
+3. For `timeout`, check what the gate waits on, such as an unreachable
+   slurmctld. Raise `--idle-gate-timeout` (at most 20 s) only if the backend is
+   slow but healthy.
+
+See [Keeping idle runs out of scheduler jobs](operations.md#keeping-idle-runs-out-of-scheduler-jobs).
 
 ### HostpingRunsFailing
 

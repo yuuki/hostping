@@ -8,6 +8,21 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- `--idle-gate-command PATH` and `--idle-gate-timeout` (default `5s`, at most
+  `20s`): the daemon runs `PATH` right before each idle-trigger run and skips
+  the run unless it exits 0, so a site can keep the idle full mesh out of a
+  scheduler job's allocation. The utilization-based idle verdict cannot tell a
+  job's quiet stretch from a free host. A non-zero exit, a timeout or an exec
+  failure skips the attempt until the next `--idle-interval`. Busy-mode and
+  mutual-alarm runs, `hostpingctl diagnose` and `calibrate` are not gated.
+  Skips count in `hostping_engine_idle_gate_skipped_total{reason}` (`denied`,
+  `timeout`, `error`). `HostpingNoSuccessfulRun` now leaves out gate-skipped
+  hosts, and the new `HostpingIdleGateFailing` alert fires on `timeout` and
+  `error`. See
+  [Keeping idle runs out of scheduler jobs](docs/operations.md#keeping-idle-runs-out-of-scheduler-jobs).
+
 ## [0.1.5] - 2026-10-16
 
 ### Added

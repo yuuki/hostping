@@ -101,23 +101,30 @@ groups:
       # idle, so three intervals of an idle host with no confirmed run means
       # the engine is not producing diagnoses. The second branch covers a daemon
       # that has been up for 15 minutes and never succeeded (the timestamp is
-      # absent until the first success). Adjust 900 / 15m to 3 × your
+      # absent until the first success). A host whose --idle-gate-command
+      # skipped an idle run in the window is left out: a gate that denies is
+      # the site saying "not now" (a scheduler job holds the host), and one
+      # that fails has HostpingIdleGateFailing. Adjust 900 / 15m to 3 × your
       # --idle-interval.
       - alert: HostpingNoSuccessfulRun
         expr: |
           (
-              time() - hostping_engine_last_success_timestamp_seconds > 900
-            and on (job, instance)
-              min_over_time(hostping_monitor_host_idle[15m]) == 1
+            (
+                time() - hostping_engine_last_success_timestamp_seconds > 900
+              and on (job, instance)
+                min_over_time(hostping_monitor_host_idle[15m]) == 1
+            )
+            or
+            (
+                min_over_time(hostping_monitor_host_idle[15m]) == 1
+              and on (job, instance)
+                time() - process_start_time_seconds > 900
+              unless on (job, instance)
+                hostping_engine_last_success_timestamp_seconds
+            )
           )
-          or
-          (
-              min_over_time(hostping_monitor_host_idle[15m]) == 1
-            and on (job, instance)
-              time() - process_start_time_seconds > 900
-            unless on (job, instance)
-              hostping_engine_last_success_timestamp_seconds
-          )
+          unless on (job, instance)
+            sum by (job, instance) (increase(hostping_engine_idle_gate_skipped_total[15m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -125,6 +132,20 @@ groups:
           summary: "hostping on {{ $labels.instance }} makes no diagnosis on an idle host"
           description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
           runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+
+      # The --idle-gate-command timed out or could not run. The gate fails
+      # closed, so no idle run starts until it answers again. A gate that
+      # exits non-zero (reason="denied") is working as intended.
+      - alert: HostpingIdleGateFailing
+        expr: |
+          sum by (job, instance, reason) (rate(hostping_engine_idle_gate_skipped_total{reason=~"timeout|error"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hostping idle gate fails on {{ $labels.instance }} (reason {{ $labels.reason }})"
+          description: "The --idle-gate-command has timed out (reason=timeout) or could not run (reason=error) for 15 minutes. It fails closed, so no idle run is made on this host."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingidlegatefailing"
 
       - alert: HostpingRunsFailing
         expr: |

@@ -104,6 +104,9 @@ func newRig(cfg config.Config) (*rig, error) {
 	if err := cfg.ValidateMutual(); err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidateIdleGate(); err != nil {
+		return nil, err
+	}
 	// A baseline file or flag that does not parse would otherwise fail every
 	// engine run, which the daemon only logs: fail at start-up instead, and
 	// say which distances the operator's values replace.
@@ -191,7 +194,7 @@ func Run(cfg config.Config) error {
 		mon.MutualAlarm = loop.Alarm
 	}
 	ps.restore(eng, mon)
-	d := &daemon{g: g, eng: eng, world: world, sampler: sampler, mon: mon, loop: loop, tel: tel, live: live, rp: rp, ps: ps}
+	d := &daemon{g: g, eng: eng, world: world, sampler: sampler, mon: mon, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, log.Printf)}
 	defer ps.shutdown(eng, &d.pending)
 	t := time.NewTicker(cfg.MetricInterval)
 	defer t.Stop()
@@ -220,6 +223,8 @@ type daemon struct {
 	rp      *reporter
 	ps      *persister
 	pending idleHold
+	// gate is --idle-gate-command; nil allows every idle run.
+	gate *schedGate
 }
 
 // tick is one --metric-interval of the loop: a monitor poll, the held
@@ -261,6 +266,19 @@ func (d *daemon) tick(ctx context.Context) bool {
 	}
 	if !dec.Run {
 		return true
+	}
+	if dec.Trigger == model.TriggerIdle {
+		// The monitor already counted this attempt, so a skipped run is
+		// retried at the next --idle-interval, not on the next poll. Only the
+		// scheduled idle run is gated: PFC/drop, periodic and mutual-alarm
+		// runs answer a symptom and are rate-limited on their own.
+		if reason := d.gate.check(ctx); reason != "" {
+			if ctx.Err() != nil {
+				return false
+			}
+			d.tel.RecordIdleGateSkipped(ctx, reason)
+			return true
+		}
 	}
 	before := d.eng.SnapshotStreaks()
 	d.live.RunStarted()

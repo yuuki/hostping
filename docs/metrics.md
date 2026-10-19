@@ -84,6 +84,7 @@ agent from one with nothing to report. See
 | `hostping.engine.last_success_timestamp` | gauge (s) | — | Unix time the last run whose report was confirmed and written ended; absent until then |
 | `hostping.engine.run.failed` | counter | `stage` | Runs that failed: `engine` (the run returned an error) or `report` (a confirmed report could not be written to stdout or `--report-file`). 0 from start-up |
 | `hostping.engine.run.discarded` | counter | `reason` | Idle-mode runs discarded because the clean poll after them found the host `host_busy` or `idle_unknown` (idle state unreadable). 0 from start-up |
+| `hostping.engine.idle_gate.skipped` | counter | `reason` | Idle runs that `--idle-gate-command` kept from starting: `denied` (non-zero exit), `timeout` (no exit within `--idle-gate-timeout`) or `error` (could not run). 0 from start-up with a gate; not exported without one |
 | `hostping.monitor.poll.errors` | counter | — | Monitor polls that returned an error (counters or GPU state unreadable). 0 from start-up |
 | `hostping.monitor.last_poll_timestamp` | gauge (s) | — | Unix time of the last monitor poll that completed without error |
 | `hostping.monitor.host_idle` | gauge (0/1) | — | 1 when the last clean poll found the host idle, 0 when busy or unclassified. Unlike `hostping.host.idle`, follows every poll rather than the last report |
