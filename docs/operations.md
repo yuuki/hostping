@@ -1128,17 +1128,17 @@ Test the query's status before its output, as here. Testing only
 output. Exiting 2 on a failed query keeps a slurmctld outage from reading as
 "a job holds every host": the run is still skipped, but
 `HostpingIdleGateFailing` fires instead of every idle diagnosis stopping
-silently.
+silently. `-t R` skips only running jobs. Add states such as `CF`
+(configuring) or `CG` (completing) if an allocation in those states must not
+be probed either. A check that does not depend on slurmctld, such as the
+presence of `job_*` cgroups under the slurmstepd scope, also works. It fails
+open, though, if the path is not where your Slurm creates them.
 
-`hostname -s` must be the node's Slurm `NodeName`. Where it is not (a site
-that names nodes differently from their hostnames), `squeue -w` rejects the
-name on every attempt, so the gate never allows a run. With `exit 2` it shows
-as `reason="error"` and alerts. Pass the `NodeName` instead, for example from
-a file the site writes at provisioning. `-t R` skips only running jobs. Add states such as `CF` (configuring)
-or `CG` (completing) if an allocation in those states must not be probed
-either. A check that does not depend on slurmctld, such as the presence of
-`job_*` cgroups under the slurmstepd scope, also works. It fails open,
-though, if the path is not where your Slurm creates them.
+`hostname -s` must match the node's Slurm `NodeName` or `NodeHostname`
+(`squeue -w` accepts either). Where it matches neither, `squeue -w` rejects
+the name on every attempt, so the gate never allows a run. With `exit 2` it
+shows as `reason="error"` and alerts. Pass the `NodeName` instead, for
+example from a file the site writes at provisioning.
 
 `HostpingNoSuccessfulRun` in the shipped rules leaves out a host whose gate
 skipped a run in its window. `HostpingIdleGateFailing` alerts on `timeout`

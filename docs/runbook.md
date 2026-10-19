@@ -1049,8 +1049,8 @@ Widen it, and the window in `HostpingNoSuccessfulRun`'s gate clause, to
    not decide)` with the gate's stderr is the gate reporting its own failure,
    such as a scheduler query that failed. On a single host, check that the
    name the gate queries is the scheduler's name for the node: for Slurm,
-   `hostname -s` must match the `NodeName`, or `squeue -w` fails on every
-   attempt. `exit status 126` or `127`, or no exit status at all, usually
+   `hostname -s` must match the `NodeName` or `NodeHostname`, or
+   `squeue -w` fails on every attempt. `exit status 126` or `127`, or no exit status at all, usually
    means the path is wrong, not executable, or its interpreter is missing.
 3. For `timeout`, check what the gate waits on, such as an unreachable
    slurmctld. Raise `--idle-gate-timeout` (at most 20 s) only if the backend is

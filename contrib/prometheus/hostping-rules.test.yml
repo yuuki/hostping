@@ -195,6 +195,19 @@ tests:
         values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6 6 6 6 6 7 7 7 7 7 8'
       - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="gated:9464",otel_scope_name="github.com/yuuki/hostping",reason="timeout"}'
         values: '0x40'
+      # Idle host whose gate cannot decide on every attempt (exit 2, e.g.
+      # slurmctld unreachable): HostpingIdleGateFailing covers it, so this
+      # rule does not fire.
+      - series: 'hostping_engine_last_success_timestamp_seconds{job="hostping",instance="undecided:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0x40'
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="undecided:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="undecided:9464"}'
+        values: '0x40'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="undecided:9464",otel_scope_name="github.com/yuuki/hostping",reason="denied"}'
+        values: '0x40'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="undecided:9464",otel_scope_name="github.com/yuuki/hostping",reason="error"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6 6 6 6 6 7 7 7 7 7 8'
       # Idle host whose gate last skipped 15 minutes in and that has not
       # succeeded since: fires once the gate has been quiet for the 15-minute
       # window plus the rule's 5-minute hold (35m).
