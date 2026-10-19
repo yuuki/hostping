@@ -262,9 +262,15 @@ func TestRunIdleGateReapsChildren(t *testing.T) {
 	for _, timeout := range []time.Duration{5 * time.Second, idleGateWaitDelay / 5} {
 		for code, want := range map[int]string{0: "", 1: telemetry.GateDenied, 2: telemetry.GateError} {
 			gate := writeGate(t, fmt.Sprintf("sleep 30 &\necho $! > %s\nexit %d", pidFile, code))
+			start := time.Now()
 			out := runIdleGate(context.Background(), gate, timeout)
 			if out.reason != want {
 				t.Fatalf("exit %d with a child, timeout %v: %+v, want reason %q", code, timeout, out, want)
+			}
+			// The child holds stderr open until WaitDelay, so the short
+			// timeout has passed by the time the answer is read.
+			if d := time.Since(start); d < idleGateWaitDelay {
+				t.Fatalf("exit %d, timeout %v: returned after %v, before the child's stderr closed", code, timeout, d)
 			}
 			b, err := os.ReadFile(pidFile)
 			if err != nil {
