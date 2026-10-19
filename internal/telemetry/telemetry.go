@@ -89,11 +89,13 @@ const (
 // Values of hostping.engine.idle_gate.skipped's reason attribute: why
 // --idle-gate-command kept an idle run from starting.
 const (
-	// GateDenied: the command exited non-zero, the site's "not now".
+	// GateDenied: the command exited 1, the site's "not now".
 	GateDenied = "denied"
 	// GateTimeout: the command did not exit within --idle-gate-timeout.
 	GateTimeout = "timeout"
-	// GateError: the command could not be started, or was killed by a signal.
+	// GateError: the command exited with another non-zero status (it could
+	// not decide, e.g. the scheduler could not be queried), could not be
+	// started, or was killed by a signal.
 	GateError = "error"
 )
 
@@ -430,7 +432,7 @@ func (t *Telemetry) initLivenessInstruments() error {
 	if err != nil {
 		return err
 	}
-	t.gateSkip, err = t.meter.Int64Counter("hostping.engine.idle_gate.skipped", metric.WithDescription("Idle runs the --idle-gate-command kept from starting: it exited non-zero (reason=denied), timed out (reason=timeout) or could not run (reason=error)"))
+	t.gateSkip, err = t.meter.Int64Counter("hostping.engine.idle_gate.skipped", metric.WithDescription("Idle runs the --idle-gate-command kept from starting: it exited 1 (reason=denied), timed out (reason=timeout), or exited with another non-zero status or could not run (reason=error)"))
 	if err != nil {
 		return err
 	}

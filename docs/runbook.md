@@ -1027,10 +1027,14 @@ Adjust the 900 s / 15 m in the rule to 3 × your `--idle-interval`.
 
 ### HostpingIdleGateFailing
 
-The `--idle-gate-command` timed out (`reason="timeout"`) or could not run
-(`reason="error"`) for 15 minutes. The gate fails closed, so the host gets no
-idle run until it answers again. A gate that exits non-zero
-(`reason="denied"`) is working and does not alert.
+The `--idle-gate-command` timed out (`reason="timeout"`), or could not run
+or could not decide (`reason="error"`: an exit status of 2 or higher, an exec
+failure or a signal) for 15 minutes. The gate fails closed, so the host gets
+no idle run until it answers again. A gate that exits 1 (`reason="denied"`)
+is working and does not alert.
+When many hosts fire at once with `reason="error"`, suspect the shared
+backend first: a Slurm gate that follows the shipped example exits 2 as soon
+as `squeue` cannot reach slurmctld.
 The rule's 15-minute window assumes the default 5-minute `--idle-interval`.
 Widen it, and the window in `HostpingNoSuccessfulRun`'s gate clause, to
 3 × your interval.
@@ -1041,8 +1045,13 @@ Widen it, and the window in `HostpingNoSuccessfulRun`'s gate clause, to
    stderr.
 2. Run the command as the daemon's user, with the same sandboxing, for example
    `systemd-run --pty -p User=hostping -p ProtectSystem=full -p ProtectHome=read-only /path/to/gate; echo $?`.
-   `error` usually means the path is wrong, not executable, or its interpreter
-   is missing.
+   For `error`, the skip line names the exit status. `exit status 2 (could
+   not decide)` with the gate's stderr is the gate reporting its own failure,
+   such as a scheduler query that failed. On a single host, check that the
+   name the gate queries is the scheduler's name for the node: for Slurm,
+   `hostname -s` must match the `NodeName`, or `squeue -w` fails on every
+   attempt. `exit status 126` or `127`, or no exit status at all, usually
+   means the path is wrong, not executable, or its interpreter is missing.
 3. For `timeout`, check what the gate waits on, such as an unreachable
    slurmctld. Raise `--idle-gate-timeout` (at most 20 s) only if the backend is
    slow but healthy.

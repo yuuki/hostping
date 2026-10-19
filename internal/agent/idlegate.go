@@ -15,6 +15,10 @@ import (
 // idleGateStderrMax bounds how much of the gate's stderr the log line quotes.
 const idleGateStderrMax = 256
 
+// idleGateDenyExit is the exit status with which a gate denies the run. Any
+// other non-zero status means the gate could not decide.
+const idleGateDenyExit = 1
+
 // idleGateWaitDelay bounds how long the gate may hold its stderr open after
 // it was killed or exited (a grandchild that left the process group).
 const idleGateWaitDelay = time.Second
@@ -24,6 +28,11 @@ const idleGateWaitDelay = time.Second
 // job's allocation. The utilization-based idle verdict cannot see an
 // allocation: a job that is loading data or writing a checkpoint leaves the
 // GPUs and RNICs as quiet as a free host.
+//
+// Exit 1 is the site's "not now" (reason denied). Any other non-zero exit is
+// the gate saying it could not decide, for example because the scheduler
+// could not be queried (reason error), so that a broken backend alerts
+// instead of reading as a host that is always allocated.
 //
 // It fails closed. A non-zero exit, a timeout and an exec failure all skip
 // the attempt, and the next one follows --idle-interval. The outcome is
@@ -54,7 +63,7 @@ func newSchedGate(cfg config.Config, logf func(format string, args ...any)) *sch
 		return nil
 	}
 	g := &schedGate{path: cfg.IdleGateCommand, timeout: cfg.IdleGateTimeout, logf: logf}
-	logf("hostping: idle runs gated by %s (timeout %v); a non-zero exit, timeout or exec failure skips the run until the next --idle-interval", g.path, g.timeout)
+	logf("hostping: idle runs gated by %s (timeout %v); exit 1 (denied), another non-zero exit, a timeout or an exec failure skips the run until the next --idle-interval", g.path, g.timeout)
 	if _, err := exec.LookPath(g.path); err != nil {
 		// Not fatal: the site may install the script after the daemon. Until
 		// then every idle run is skipped, and the first attempt logs why.
@@ -117,8 +126,12 @@ func runIdleGate(ctx context.Context, path string, timeout time.Duration) idleGa
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		out = idleGateOutcome{reason: telemetry.GateTimeout, detail: fmt.Sprintf("no exit within %v", timeout)}
-	case errors.As(err, &exit) && exit.Exited():
+	case errors.As(err, &exit) && exit.ExitCode() == idleGateDenyExit:
 		out = idleGateOutcome{reason: telemetry.GateDenied, detail: err.Error()}
+	case exit != nil && exit.Exited():
+		// The gate ran but reports that it could not decide (exit 2 and up,
+		// or a shell's 126/127 for a missing interpreter or command).
+		out = idleGateOutcome{reason: telemetry.GateError, detail: err.Error() + " (could not decide)"}
 	default:
 		// Could not start (missing, not executable), killed by a signal, or
 		// canceled by shutdown.

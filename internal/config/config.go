@@ -69,8 +69,9 @@ type Config struct {
 	BusyCooldown time.Duration
 	// IdleGateCommand, when set, is run (no shell, no arguments) right before
 	// each idle-trigger run of the daemon: exit 0 lets the run start, anything
-	// else (a non-zero exit, IdleGateTimeout, an exec failure) skips this
-	// attempt until the next IdleInterval. It lets a site keep the idle full
+	// else skips this attempt until the next IdleInterval. Exit 1 denies the
+	// run; another non-zero exit, IdleGateTimeout or an exec failure is a gate
+	// that could not decide, which the skip counter reports apart. It lets a site keep the idle full
 	// mesh out of a scheduler job's allocation, which the utilization-based
 	// idle verdict cannot see. Empty (the default) runs no gate.
 	IdleGateCommand string
@@ -287,7 +288,7 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.IdleInterval, "idle-interval", c.IdleInterval, "idle-host full-mesh interval")
 	fs.DurationVar(&c.MetricInterval, "metric-interval", c.MetricInterval, "RNIC counter poll interval")
 	fs.DurationVar(&c.GPUUtilInterval, "gpu-util-interval", c.GPUUtilInterval, "minimum period between nvidia-smi GPU utilization queries")
-	fs.StringVar(&c.IdleGateCommand, "idle-gate-command", c.IdleGateCommand, "daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start, a non-zero exit, a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits non-zero while a scheduler job holds the host; empty: no gate)")
+	fs.StringVar(&c.IdleGateCommand, "idle-gate-command", c.IdleGateCommand, "daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start; exit 1 (denied), exit 2 or higher (the gate could not decide), a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits 1 while a scheduler job holds the host and 2 when the scheduler cannot be queried; empty: no gate)")
 	fs.Var(&boundedDuration{p: &c.IdleGateTimeout, max: MaxIdleGateTimeout}, "idle-gate-timeout", "daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most 20s)")
 	fs.DurationVar(&c.BusyCooldown, "busy-cooldown", c.BusyCooldown, "minimum interval between PFC/drop-triggered busy runs (0 disables)")
 	fs.DurationVar(&c.BusyInterval, "busy-interval", c.BusyInterval, "periodic busy-mode run on a loaded host without PFC/drops, at most once per interval (0 disables; beyond NSDI'23 §4.2)")

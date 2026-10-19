@@ -276,6 +276,10 @@ tests:
         values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6'
       - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="up:9464",otel_scope_name="github.com/yuuki/hostping",reason="denied"}'
         values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6'
+      # A gate whose scheduler query fails at once (slurmctld unreachable)
+      # exits 2 on every attempt: reason="error", which fails like a timeout.
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="undecided:9464",otel_scope_name="github.com/yuuki/hostping",reason="error"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6'
     alert_rule_test:
       - eval_time: 15m
         alertname: HostpingTargetDown
@@ -310,7 +314,16 @@ tests:
               reason: timeout
             exp_annotations:
               summary: "hostping idle gate fails on fail:9464 (reason timeout)"
-              description: "The --idle-gate-command has timed out (reason=timeout) or could not run (reason=error) for 15 minutes. It fails closed, so no idle run is made on this host."
+              description: "The --idle-gate-command has timed out (reason=timeout), or could not run or could not decide (reason=error, an exit status of 2 or higher) for 15 minutes. It fails closed, so no idle run is made on this host."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingidlegatefailing"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: undecided:9464
+              reason: error
+            exp_annotations:
+              summary: "hostping idle gate fails on undecided:9464 (reason error)"
+              description: "The --idle-gate-command has timed out (reason=timeout), or could not run or could not decide (reason=error, an exit status of 2 or higher) for 15 minutes. It fails closed, so no idle run is made on this host."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingidlegatefailing"
       - eval_time: 15m
         alertname: HostpingMonitorPollErrors
