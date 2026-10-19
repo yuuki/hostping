@@ -91,7 +91,9 @@ func (g *schedGate) check(ctx context.Context) string {
 
 // runIdleGate runs path with no arguments and no shell, stdin and stdout on
 // /dev/null, and kills it (with its process group, so a script's children go
-// too) once timeout elapses.
+// too) once timeout elapses. Whatever the gate left running in its group when
+// it exited is killed too: a gate is a check, and one attempt per
+// --idle-interval must not pile up background children.
 func runIdleGate(ctx context.Context, path string, timeout time.Duration) idleGateOutcome {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -101,23 +103,31 @@ func runIdleGate(ctx context.Context, path string, timeout time.Duration) idleGa
 	cmd.WaitDelay = idleGateWaitDelay
 	killProcessGroup(cmd)
 	err := cmd.Run()
+	reapProcessGroup(cmd)
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The gate exited 0, but a child it left behind kept stderr open
+		// past WaitDelay; the child is gone now. The answer stands.
+		err = nil
+	}
 	if err == nil {
 		return idleGateOutcome{}
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return idleGateOutcome{reason: telemetry.GateTimeout, detail: fmt.Sprintf("no exit within %v", timeout)}
-	}
+	var out idleGateOutcome
 	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.Exited() {
-		detail := err.Error()
-		if msg := stderr.String(); msg != "" {
-			detail += ": " + msg
-		}
-		return idleGateOutcome{reason: telemetry.GateDenied, detail: detail}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		out = idleGateOutcome{reason: telemetry.GateTimeout, detail: fmt.Sprintf("no exit within %v", timeout)}
+	case errors.As(err, &exit) && exit.Exited():
+		out = idleGateOutcome{reason: telemetry.GateDenied, detail: err.Error()}
+	default:
+		// Could not start (missing, not executable), killed by a signal, or
+		// canceled by shutdown.
+		out = idleGateOutcome{reason: telemetry.GateError, detail: err.Error()}
 	}
-	// Could not start (missing, not executable), killed by a signal, or
-	// canceled by shutdown.
-	return idleGateOutcome{reason: telemetry.GateError, detail: err.Error()}
+	if msg := stderr.String(); msg != "" {
+		out.detail += ": " + msg
+	}
+	return out
 }
 
 // headBuffer keeps the first idleGateStderrMax bytes written to it and

@@ -1031,6 +1031,9 @@ The `--idle-gate-command` timed out (`reason="timeout"`) or could not run
 (`reason="error"`) for 15 minutes. The gate fails closed, so the host gets no
 idle run until it answers again. A gate that exits non-zero
 (`reason="denied"`) is working and does not alert.
+The rule's 15-minute window assumes the default 5-minute `--idle-interval`.
+Widen it, and the window in `HostpingNoSuccessfulRun`'s gate clause, to
+3 × your interval.
 
 1. Find the skip line in the journal:
    `journalctl -u hostping | grep 'idle gate'`. It is logged when the outcome

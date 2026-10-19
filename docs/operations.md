@@ -1093,6 +1093,9 @@ Details:
   mutual-probe alarm runs answer a symptom and keep their own rate limits.
   `hostpingctl diagnose`, `hostpingctl calibrate` and `--once` never run the
   gate: an operator runs them on a drained host.
+- A skipped run measured nothing, so it does not restart `--busy-interval`.
+  A child the gate leaves running when it exits is killed with its process
+  group.
 - A job can still start between the gate's answer and the end of the run.
   The idle-mode hold covers that case as before.
 

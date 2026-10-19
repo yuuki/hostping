@@ -276,6 +276,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 			if ctx.Err() != nil {
 				return false
 			}
+			d.mon.SkipRun()
 			d.tel.RecordIdleGateSkipped(ctx, reason)
 			return true
 		}

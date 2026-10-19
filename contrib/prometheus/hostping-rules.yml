@@ -135,7 +135,10 @@ groups:
 
       # The --idle-gate-command timed out or could not run. The gate fails
       # closed, so no idle run starts until it answers again. A gate that
-      # exits non-zero (reason="denied") is working as intended.
+      # exits non-zero (reason="denied") is working as intended. The gate runs
+      # once per --idle-interval (default 5m) at most, so the 15m window holds
+      # three attempts; widen it to 3 × your --idle-interval, or a gate that
+      # fails on every attempt reads 0 between attempts and never holds 15m.
       - alert: HostpingIdleGateFailing
         expr: |
           sum by (job, instance, reason) (rate(hostping_engine_idle_gate_skipped_total{reason=~"timeout|error"}[15m])) > 0

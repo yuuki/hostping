@@ -238,6 +238,39 @@ func TestRunIdleGateTimeout(t *testing.T) {
 	}
 }
 
+// A gate that exits but leaves a child behind does not leak it: the rest of
+// its process group is killed once it has been waited for, and its answer
+// stands.
+func TestRunIdleGateReapsChildren(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	for code, want := range map[int]string{0: "", 1: telemetry.GateDenied} {
+		gate := writeGate(t, fmt.Sprintf("sleep 30 &\necho $! > %s\nexit %d", pidFile, code))
+		if out := runIdleGate(context.Background(), gate, 5*time.Second); out.reason != want {
+			t.Fatalf("exit %d with a child: %+v, want reason %q", code, out, want)
+		}
+		b, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pid int
+		if _, err := fmt.Sscan(string(b), &pid); err != nil {
+			t.Fatal(err)
+		}
+		if !processGone(pid, 2*time.Second) {
+			t.Fatalf("exit %d: child %d still running after the gate returned", code, pid)
+		}
+	}
+}
+
+// The timeout and error lines quote stderr too.
+func TestRunIdleGateTimeoutQuotesStderr(t *testing.T) {
+	gate := writeGate(t, "echo 'slurmctld unreachable' >&2\nsleep 30")
+	out := runIdleGate(context.Background(), gate, 200*time.Millisecond)
+	if out.reason != telemetry.GateTimeout || !strings.Contains(out.detail, "slurmctld unreachable") {
+		t.Fatalf("hung gate: %+v, want timeout quoting stderr", out)
+	}
+}
+
 func TestHeadBuffer(t *testing.T) {
 	var h headBuffer
 	n, err := h.Write([]byte(strings.Repeat("x", idleGateStderrMax-1) + "yz\n"))

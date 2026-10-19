@@ -84,6 +84,9 @@ type Monitor struct {
 	// run of any trigger (idle, PFC/drops, periodic, or a MarkRun), or the
 	// first ready poll when none has run yet.
 	lastPeriodic time.Time
+	// periodicBefore is lastPeriodic before the last poll that started a
+	// run, for SkipRun.
+	periodicBefore time.Time
 	// now is the poll clock; tests replace it to step through intervals.
 	now func() time.Time
 	// rebaseline drops the next counter delta because it also contains the
@@ -203,6 +206,14 @@ func (m *Monitor) MarkRun(t time.Time) {
 	m.rebaseline = true
 	m.lastBusy = t
 	m.lastPeriodic = t
+}
+
+// SkipRun records that the run the last Poll started did not happen (the
+// daemon's --idle-gate-command denied it). Nothing measured the host, so the
+// --busy-interval keeps counting from the run before. The attempt itself
+// still counts: the idle cadence, like the busy cooldown, is not rewound.
+func (m *Monitor) SkipRun() {
+	m.lastPeriodic = m.periodicBefore
 }
 
 // ResumeIdle sets the idle cadence as if the last idle-trigger run had
@@ -420,6 +431,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if d.Run {
 		// Any run just measured the host, so the periodic interval restarts:
 		// --busy-interval only fills the gaps the other triggers leave.
+		m.periodicBefore = m.lastPeriodic
 		m.lastPeriodic = now
 	}
 	return d, nil
