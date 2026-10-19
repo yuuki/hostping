@@ -206,10 +206,25 @@ func TestRunIdleGate(t *testing.T) {
 		t.Errorf("exit 1: %+v, want denied quoting stderr", out)
 	}
 	// The Slurm example of docs/operations.md fails closed when the query
-	// fails, even with empty output.
-	out = runIdleGate(ctx, writeGate(t, "jobs=$(false) || exit 1\n[ -z \"$jobs\" ]"), 5*time.Second)
-	if out.reason != telemetry.GateDenied {
-		t.Errorf("failed query: %+v, want denied", out)
+	// fails, even with empty output, and reports it as a gate that could not
+	// decide rather than as a denial, so HostpingIdleGateFailing fires.
+	out = runIdleGate(ctx, writeGate(t, "echo 'slurm_load_jobs error: Unable to contact slurm controller' >&2\njobs=$(false) || exit 2\n[ -z \"$jobs\" ]"), 5*time.Second)
+	if out.reason != telemetry.GateError || !strings.Contains(out.detail, "exit status 2 (could not decide): slurm_load_jobs error") {
+		t.Errorf("failed query: %+v, want error quoting stderr", out)
+	}
+	// A successful query that finds a job denies.
+	if out := runIdleGate(ctx, writeGate(t, "jobs=$(echo 4242) || exit 2\n[ -z \"$jobs\" ]"), 5*time.Second); out.reason != telemetry.GateDenied {
+		t.Errorf("query finds a job: %+v, want denied", out)
+	}
+	// Only exit 1 denies: any higher status, including a shell's 127 for a
+	// command it cannot find, is a gate that could not decide.
+	for _, code := range []int{2, 3, 125, 255} {
+		if out := runIdleGate(ctx, writeGate(t, fmt.Sprintf("exit %d", code)), 5*time.Second); out.reason != telemetry.GateError {
+			t.Errorf("exit %d: %+v, want error", code, out)
+		}
+	}
+	if out := runIdleGate(ctx, writeGate(t, "no-such-command-hostping-test"), 5*time.Second); out.reason != telemetry.GateError || !strings.Contains(out.detail, "exit status 127") {
+		t.Errorf("command not found: %+v, want error with exit status 127", out)
 	}
 	missing := filepath.Join(t.TempDir(), "missing")
 	if out := runIdleGate(ctx, missing, 5*time.Second); out.reason != telemetry.GateError {
@@ -243,7 +258,7 @@ func TestRunIdleGateTimeout(t *testing.T) {
 // stands.
 func TestRunIdleGateReapsChildren(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	for code, want := range map[int]string{0: "", 1: telemetry.GateDenied} {
+	for code, want := range map[int]string{0: "", 1: telemetry.GateDenied, 2: telemetry.GateError} {
 		gate := writeGate(t, fmt.Sprintf("sleep 30 &\necho $! > %s\nexit %d", pidFile, code))
 		if out := runIdleGate(context.Background(), gate, 5*time.Second); out.reason != want {
 			t.Fatalf("exit %d with a child: %+v, want reason %q", code, out, want)

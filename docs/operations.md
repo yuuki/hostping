@@ -358,7 +358,7 @@ these series (names as Prometheus renders them):
 | `hostping_engine_last_success_timestamp_seconds` | End of the last run whose report was confirmed and written |
 | `hostping_engine_run_failed_total{stage}` | Runs that returned an error (`stage="engine"`) or whose report could not be written (`stage="report"`) |
 | `hostping_engine_run_discarded_total{reason}` | Idle-mode runs discarded because the clean poll after them found the host busy (`reason="host_busy"`) or could not classify it (`reason="idle_unknown"`) |
-| `hostping_engine_idle_gate_skipped_total{reason}` | Idle runs `--idle-gate-command` kept from starting: it exited non-zero (`reason="denied"`), timed out (`reason="timeout"`) or could not run (`reason="error"`). Exported only with a gate ([Keeping idle runs out of scheduler jobs](#keeping-idle-runs-out-of-scheduler-jobs)) |
+| `hostping_engine_idle_gate_skipped_total{reason}` | Idle runs `--idle-gate-command` kept from starting: it exited 1 (`reason="denied"`), timed out (`reason="timeout"`), or exited 2 or higher or could not run (`reason="error"`). Exported only with a gate ([Keeping idle runs out of scheduler jobs](#keeping-idle-runs-out-of-scheduler-jobs)) |
 | `hostping_monitor_poll_errors_total` | Monitor polls that returned an error |
 | `hostping_monitor_last_poll_timestamp_seconds` | Last monitor poll that completed without error |
 | `hostping_monitor_host_idle` | 1 when the last clean poll found the host idle, 0 when busy or unclassified |
@@ -393,7 +393,7 @@ A steady `hostping_engine_run_discarded_total` increase means a workload keeps
 coming back during idle runs. That is expected on a host that pauses between
 iterations. If it never stops, no idle diagnosis is being made.
 
-With `--idle-gate-command`, a host whose gate keeps denying makes no idle run
+With `--idle-gate-command`, a host whose gate keeps denying (exit 1) makes no idle run
 and no diagnosis, by design. Leave such hosts out of the first expression with
 `unless on (job, instance) increase(hostping_engine_idle_gate_skipped_total[15m]) > 0`,
 as the shipped rules do.
@@ -1069,11 +1069,21 @@ discards a run only when the job comes back before the run ends.
 `PATH` right before each idle-trigger run:
 
 - **Exit 0**: the run starts.
-- **Non-zero exit, no exit within `--idle-gate-timeout`** (default `5s`, at
-  most `20s`), **or a command that cannot be started**: the run is skipped.
-  The next attempt follows `--idle-interval`, as after a discarded run. The
-  gate fails closed, so a broken gate stops idle runs rather than probing
-  inside a job.
+- **Exit 1**: the gate denies the run, for example because a scheduler job
+  holds the host (`reason="denied"`).
+- **Exit 2 or higher, no exit within `--idle-gate-timeout`** (default `5s`, at
+  most `20s`), **or a command that cannot be started**: the gate could not
+  decide, for example because the scheduler could not be queried
+  (`reason="error"` or `reason="timeout"`).
+
+Every outcome but exit 0 skips the run. The next attempt follows
+`--idle-interval`, as after a discarded run. The gate fails closed, so a
+broken gate stops idle runs rather than probing inside a job. Exit 1 and the
+others are counted apart so that a broken gate alerts
+(`HostpingIdleGateFailing`) instead of reading as a host that is always
+allocated. A gate script must therefore exit 1 only for "not now", and 2 for
+any failure of its own query. A shell already exits 126 or 127 when it cannot
+run a command.
 
 Details:
 
@@ -1086,8 +1096,8 @@ Details:
 - The outcome is logged when it changes, not on every attempt. A skip line
   names the reason and quotes the first 256 bytes of the gate's stderr.
 - Every skip counts in
-  `hostping_engine_idle_gate_skipped_total{reason}`: `denied` (non-zero exit),
-  `timeout` or `error`. The three series are exported as 0 from start-up when
+  `hostping_engine_idle_gate_skipped_total{reason}`: `denied` (exit 1),
+  `timeout` or `error` (exit 2 or higher, or an exec failure or signal). The three series are exported as 0 from start-up when
   a gate is set, and not at all otherwise.
 - Only the scheduled idle run is gated. PFC/drop, `--busy-interval` and
   mutual-probe alarm runs answer a symptom and keep their own rate limits.
@@ -1104,24 +1114,36 @@ running job on this node:
 
 ```sh
 #!/bin/sh
-# exit 0 only after a successful query finds no RUNNING jobs
-node=$(hostname -s) || exit 1
-[ -n "$node" ] || exit 1
-jobs=$(squeue -h -w "$node" -t R -o %i) || exit 1
-[ -z "$jobs" ]
+# exit 0: a successful query found no RUNNING job on this node
+# exit 1: a job is running here (denied)
+# exit 2: the node name or the query failed (could not decide)
+node=$(hostname -s) || exit 2
+[ -n "$node" ] || exit 2
+jobs=$(squeue -h -w "$node" -t R -o %i) || exit 2
+[ -z "$jobs" ] || exit 1
 ```
 
 Test the query's status before its output, as here. Testing only
 `[ -z "$(squeue ...)" ]` allows a run whenever `squeue` fails with empty
-output. `-t R` skips only running jobs. Add states such as `CF` (configuring)
-or `CG` (completing) if an allocation in those states must not be probed
-either. A check that does not depend on slurmctld, such as the presence of
-`job_*` cgroups under the slurmstepd scope, also works. It fails open,
-though, if the path is not where your Slurm creates them.
+output. Exiting 2 on a failed query keeps a slurmctld outage from reading as
+"a job holds every host": the run is still skipped, but
+`HostpingIdleGateFailing` fires instead of every idle diagnosis stopping
+silently. `-t R` skips only running jobs. Add states such as `CF`
+(configuring) or `CG` (completing) if an allocation in those states must not
+be probed either. A check that does not depend on slurmctld, such as the
+presence of `job_*` cgroups under the slurmstepd scope, also works. It fails
+open, though, if the path is not where your Slurm creates them.
+
+`hostname -s` must match the node's Slurm `NodeName` or `NodeHostname`
+(`squeue -w` accepts either). Where it matches neither, `squeue -w` rejects
+the name on every attempt, so the gate never allows a run. With `exit 2` it
+shows as `reason="error"` and alerts. Pass the `NodeName` instead, for
+example from a file the site writes at provisioning.
 
 `HostpingNoSuccessfulRun` in the shipped rules leaves out a host whose gate
 skipped a run in its window. `HostpingIdleGateFailing` alerts on `timeout`
-and `error` instead ([Alerting rules](#alerting-rules)).
+and `error` instead ([Alerting rules](#alerting-rules)), so a gate that cannot
+reach its scheduler must exit 2, not 1.
 
 ### Hosts with dynamic uncore or memory power management
 

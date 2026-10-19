@@ -102,9 +102,9 @@ groups:
       # the engine is not producing diagnoses. The second branch covers a daemon
       # that has been up for 15 minutes and never succeeded (the timestamp is
       # absent until the first success). A host whose --idle-gate-command
-      # skipped an idle run in the window is left out: a gate that denies is
-      # the site saying "not now" (a scheduler job holds the host), and one
-      # that fails has HostpingIdleGateFailing. Adjust 900 / 15m to 3 × your
+      # skipped an idle run in the window is left out: a gate that denies (exit
+      # 1) is the site saying "not now" (a scheduler job holds the host), and
+      # one that fails or cannot decide has HostpingIdleGateFailing. Adjust 900 / 15m to 3 × your
       # --idle-interval.
       - alert: HostpingNoSuccessfulRun
         expr: |
@@ -133,9 +133,10 @@ groups:
           description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
           runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
 
-      # The --idle-gate-command timed out or could not run. The gate fails
-      # closed, so no idle run starts until it answers again. A gate that
-      # exits non-zero (reason="denied") is working as intended. The gate runs
+      # The --idle-gate-command timed out, could not run, or exited 2 or
+      # higher because it could not decide (its scheduler query failed). The
+      # gate fails closed, so no idle run starts until it answers again. A
+      # gate that exits 1 (reason="denied") is working as intended. The gate runs
       # once per --idle-interval (default 5m) at most, so the 15m window holds
       # three attempts; widen it to 3 × your --idle-interval, or a gate that
       # fails on every attempt reads 0 between attempts and never holds 15m.
@@ -147,7 +148,7 @@ groups:
           severity: warning
         annotations:
           summary: "hostping idle gate fails on {{ $labels.instance }} (reason {{ $labels.reason }})"
-          description: "The --idle-gate-command has timed out (reason=timeout) or could not run (reason=error) for 15 minutes. It fails closed, so no idle run is made on this host."
+          description: "The --idle-gate-command has timed out (reason=timeout), or could not run or could not decide (reason=error, an exit status of 2 or higher) for 15 minutes. It fails closed, so no idle run is made on this host."
           runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingidlegatefailing"
 
       - alert: HostpingRunsFailing

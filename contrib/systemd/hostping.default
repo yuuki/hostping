@@ -24,8 +24,9 @@ HOSTPING_OPTS=""
 #                              use minutes (e.g. 30m), never seconds
 #   --idle-gate-command /usr/local/libexec/hostping-node-free
 #                              skip the idle run unless this exits 0, e.g. a
-#                              script that exits non-zero while a scheduler job
-#                              holds the host (see docs/operations.md)
+#                              script that exits 1 while a scheduler job holds
+#                              the host and 2 when it cannot query the
+#                              scheduler (see docs/operations.md)
 #   --mutual-scope host        also probe across rails (only where rails route
 #                              to each other)
 #   --exclude-rnic mlx5_4,mlx5_5

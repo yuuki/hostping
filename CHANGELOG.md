@@ -8,6 +8,20 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Changed
+
+- `--idle-gate-command` now tells a denial from a gate that could not decide.
+  Exit 1 still skips the idle run as `reason="denied"`. Any other non-zero
+  exit (2 or higher, including a shell's 126/127) also skips it but counts as
+  `reason="error"`, so `HostpingIdleGateFailing` fires. Before, every non-zero
+  exit counted as `denied`. A gate whose scheduler query failed fast, such as
+  the Slurm example with slurmctld unreachable, then read as a host held by a
+  job: no alert fired, `HostpingNoSuccessfulRun` was suppressed, and idle
+  diagnosis stopped silently. The Slurm example in
+  [Keeping idle runs out of scheduler jobs](docs/operations.md#keeping-idle-runs-out-of-scheduler-jobs)
+  now exits 2 when `hostname` or `squeue` fails. A gate that denies with a
+  status other than 1 must switch to exit 1, or it alerts.
+
 ## [0.1.6] - 2026-10-19
 
 ### Added
