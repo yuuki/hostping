@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-19
+
 ### Added
 
 - `--idle-gate-command PATH` and `--idle-gate-timeout` (default `5s`, at most
