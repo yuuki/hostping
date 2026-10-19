@@ -22,6 +22,16 @@ becomes the notes of its GitHub Release (see
   now exits 2 when `hostname` or `squeue` fails. A gate that denies with a
   status other than 1 must switch to exit 1, or it alerts.
 
+### Fixed
+
+- An `--idle-gate-command` that exits in time but leaves a background child
+  holding its stderr open no longer counts as `reason="timeout"` when
+  `--idle-gate-timeout` passes while the daemon waits up to 1s for that
+  stderr to close. Its own exit status decides: 0 allows the idle run, 1 is
+  `denied`, and any other status is `error`. Before, such a gate that ran for
+  more than `--idle-gate-timeout` minus 1s (4s with the default) read as a
+  hung gate, and an allowing answer was lost.
+
 ## [0.1.6] - 2026-10-19
 
 ### Added

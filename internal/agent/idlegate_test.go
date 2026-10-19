@@ -255,24 +255,28 @@ func TestRunIdleGateTimeout(t *testing.T) {
 
 // A gate that exits but leaves a child behind does not leak it: the rest of
 // its process group is killed once it has been waited for, and its answer
-// stands.
+// stands. That holds when the timeout passes while the child still holds
+// stderr open after the gate exited: the gate answered in time.
 func TestRunIdleGateReapsChildren(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	for code, want := range map[int]string{0: "", 1: telemetry.GateDenied, 2: telemetry.GateError} {
-		gate := writeGate(t, fmt.Sprintf("sleep 30 &\necho $! > %s\nexit %d", pidFile, code))
-		if out := runIdleGate(context.Background(), gate, 5*time.Second); out.reason != want {
-			t.Fatalf("exit %d with a child: %+v, want reason %q", code, out, want)
-		}
-		b, err := os.ReadFile(pidFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var pid int
-		if _, err := fmt.Sscan(string(b), &pid); err != nil {
-			t.Fatal(err)
-		}
-		if !processGone(pid, 2*time.Second) {
-			t.Fatalf("exit %d: child %d still running after the gate returned", code, pid)
+	for _, timeout := range []time.Duration{5 * time.Second, idleGateWaitDelay / 5} {
+		for code, want := range map[int]string{0: "", 1: telemetry.GateDenied, 2: telemetry.GateError} {
+			gate := writeGate(t, fmt.Sprintf("sleep 30 &\necho $! > %s\nexit %d", pidFile, code))
+			out := runIdleGate(context.Background(), gate, timeout)
+			if out.reason != want {
+				t.Fatalf("exit %d with a child, timeout %v: %+v, want reason %q", code, timeout, out, want)
+			}
+			b, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pid int
+			if _, err := fmt.Sscan(string(b), &pid); err != nil {
+				t.Fatal(err)
+			}
+			if !processGone(pid, 2*time.Second) {
+				t.Fatalf("exit %d, timeout %v: child %d still running after the gate returned", code, timeout, pid)
+			}
 		}
 	}
 }
