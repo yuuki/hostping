@@ -145,7 +145,7 @@ func TestLivenessMetricsBeforeAnyEvent(t *testing.T) {
 	if pe := counterInt(t, ms, "hostping.monitor.poll.errors"); len(pe) != 1 || pe[""] != 0 {
 		t.Errorf("poll.errors = %v, want one series at 0", pe)
 	}
-	for _, name := range []string{"hostping.engine.last_run_timestamp", "hostping.engine.last_success_timestamp", "hostping.monitor.last_poll_timestamp", "hostping.monitor.host_idle"} {
+	for _, name := range []string{"hostping.engine.last_run_timestamp", "hostping.engine.last_success_timestamp", "hostping.monitor.last_poll_timestamp", "hostping.monitor.host_idle", "hostping.engine.idle_gate.skipped"} {
 		if _, ok := ms[name]; ok {
 			t.Errorf("%s exported before its first event", name)
 		}
@@ -199,6 +199,30 @@ func TestLivenessMetricsRecorded(t *testing.T) {
 	nilTel.RecordMonitorIdle(ctx, true)
 }
 
+// A daemon with --idle-gate-command exports every skip reason from start-up;
+// one without has no idle_gate series (asserted in
+// TestLivenessMetricsBeforeAnyEvent).
+func TestIdleGateSkippedMetric(t *testing.T) {
+	tel, reader := newTestTelemetry(t)
+	ctx := context.Background()
+	tel.initIdleGateSeries()
+	ms := collect(t, reader)
+	got := counterInt(t, ms, "hostping.engine.idle_gate.skipped")
+	if len(got) != 3 || got[reasonKey(GateDenied)] != 0 || got[reasonKey(GateTimeout)] != 0 || got[reasonKey(GateError)] != 0 {
+		t.Errorf("idle_gate.skipped at start-up = %v, want denied, timeout and error at 0", got)
+	}
+	tel.RecordIdleGateSkipped(ctx, GateDenied)
+	tel.RecordIdleGateSkipped(ctx, GateDenied)
+	tel.RecordIdleGateSkipped(ctx, GateTimeout)
+	ms = collect(t, reader)
+	got = counterInt(t, ms, "hostping.engine.idle_gate.skipped")
+	if got[reasonKey(GateDenied)] != 2 || got[reasonKey(GateTimeout)] != 1 || got[reasonKey(GateError)] != 0 {
+		t.Errorf("idle_gate.skipped = %v, want denied=2 timeout=1 error=0", got)
+	}
+	var nilTel *Telemetry
+	nilTel.RecordIdleGateSkipped(ctx, GateError)
+}
+
 // The names operators write alerts against, as the Prometheus exporter
 // renders them. docs/operations.md quotes these.
 func TestLivenessPrometheusNames(t *testing.T) {
@@ -219,6 +243,7 @@ func TestLivenessPrometheusNames(t *testing.T) {
 	tel.RecordRunEnd(ctx, now)
 	tel.RecordSuccess(ctx, now)
 	tel.RecordMonitorIdle(ctx, true)
+	tel.RecordIdleGateSkipped(ctx, GateDenied)
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -236,6 +261,7 @@ func TestLivenessPrometheusNames(t *testing.T) {
 		"hostping_engine_run_discarded_total":            "COUNTER",
 		"hostping_monitor_poll_errors_total":             "COUNTER",
 		"hostping_monitor_host_idle":                     "GAUGE",
+		"hostping_engine_idle_gate_skipped_total":        "COUNTER",
 	} {
 		i, ok := got[name]
 		if !ok {

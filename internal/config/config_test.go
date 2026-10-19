@@ -597,3 +597,48 @@ func TestLatencyFloorFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestIdleGateFlags(t *testing.T) {
+	parse := func(args ...string) (Config, error) {
+		cfg := Defaults()
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(&strings.Builder{})
+		cfg.RegisterFlags(fs)
+		return cfg, fs.Parse(args)
+	}
+	d := Defaults()
+	if d.IdleGateCommand != "" || d.IdleGateTimeout != 5*time.Second {
+		t.Fatalf("defaults: command=%q timeout=%v, want no gate and 5s", d.IdleGateCommand, d.IdleGateTimeout)
+	}
+	if err := d.ValidateIdleGate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parse("--idle-gate-command", "/usr/local/libexec/node-free", "--idle-gate-timeout", "20s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IdleGateCommand != "/usr/local/libexec/node-free" || cfg.IdleGateTimeout != MaxIdleGateTimeout {
+		t.Fatalf("flags: command=%q timeout=%v", cfg.IdleGateCommand, cfg.IdleGateTimeout)
+	}
+	if err := cfg.ValidateIdleGate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"-1s", "21s", "1m", "soon"} {
+		if _, err := parse("--idle-gate-timeout", v); err == nil {
+			t.Errorf("--idle-gate-timeout %s accepted", v)
+		}
+	}
+	// A zero timeout kills every gate before it answers.
+	cfg, err = parse("--idle-gate-command", "/bin/true", "--idle-gate-timeout", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateIdleGate(); err == nil {
+		t.Error("--idle-gate-timeout 0 with a gate command accepted")
+	}
+	// Without a command the timeout is unused.
+	cfg, _ = parse("--idle-gate-timeout", "0")
+	if err := cfg.ValidateIdleGate(); err != nil {
+		t.Errorf("--idle-gate-timeout 0 without a gate command: %v", err)
+	}
+}

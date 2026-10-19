@@ -183,6 +183,27 @@ tests:
         values: '_x20 1x20'
       - series: 'process_start_time_seconds{job="hostping",instance="fresh:9464"}'
         values: '_x20 1200x20'
+      # Idle host whose idle gate denies every attempt (every 5m): a scheduler
+      # job holds it, so no run is expected. Does not fire.
+      - series: 'hostping_engine_last_success_timestamp_seconds{job="hostping",instance="gated:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '0x40'
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="gated:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="gated:9464"}'
+        values: '0x40'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="gated:9464",otel_scope_name="github.com/yuuki/hostping",reason="denied"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6 6 6 6 6 7 7 7 7 7 8'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="gated:9464",otel_scope_name="github.com/yuuki/hostping",reason="timeout"}'
+        values: '0x40'
+      # Idle host whose gate last skipped 15 minutes in and that has not
+      # succeeded since: fires once the gate has been quiet for the 15-minute
+      # window plus the rule's 5-minute hold (35m).
+      - series: 'hostping_monitor_host_idle{job="hostping",instance="ungated:9464",otel_scope_name="github.com/yuuki/hostping"}'
+        values: '1x40'
+      - series: 'process_start_time_seconds{job="hostping",instance="ungated:9464"}'
+        values: '0x40'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="ungated:9464",otel_scope_name="github.com/yuuki/hostping",reason="denied"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3x25'
     alert_rule_test:
       - eval_time: 30m
         alertname: HostpingNoSuccessfulRun
@@ -205,6 +226,36 @@ tests:
               summary: "hostping on never:9464 makes no diagnosis on an idle host"
               description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+      - eval_time: 40m
+        alertname: HostpingNoSuccessfulRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: idle:9464
+              otel_scope_name: github.com/yuuki/hostping
+            exp_annotations:
+              summary: "hostping on idle:9464 makes no diagnosis on an idle host"
+              description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: never:9464
+              otel_scope_name: github.com/yuuki/hostping
+            exp_annotations:
+              summary: "hostping on never:9464 makes no diagnosis on an idle host"
+              description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: ungated:9464
+              otel_scope_name: github.com/yuuki/hostping
+            exp_annotations:
+              summary: "hostping on ungated:9464 makes no diagnosis on an idle host"
+              description: "The host has been idle for 15 minutes, yet no engine run has been confirmed and written for 15 minutes (or since start)."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingnosuccessfulrun"
 
   # Agent health.
   - interval: 1m
@@ -219,6 +270,12 @@ tests:
         values: '0x30'
       - series: 'hostping_monitor_poll_errors_total{job="hostping",instance="fail:9464",otel_scope_name="github.com/yuuki/hostping"}'
         values: '0+1x30'
+      # A gate that times out on every 5-minute attempt fails; one that
+      # denies does not.
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="fail:9464",otel_scope_name="github.com/yuuki/hostping",reason="timeout"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6'
+      - series: 'hostping_engine_idle_gate_skipped_total{job="hostping",instance="up:9464",otel_scope_name="github.com/yuuki/hostping",reason="denied"}'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5 5 5 5 5 6'
     alert_rule_test:
       - eval_time: 15m
         alertname: HostpingTargetDown
@@ -243,6 +300,18 @@ tests:
               summary: "hostping runs fail on fail:9464 (stage report)"
               description: "Engine runs returned an error (stage=engine) or their confirmed report could not be written (stage=report) within the last 15 minutes."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingrunsfailing"
+      - eval_time: 25m
+        alertname: HostpingIdleGateFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: fail:9464
+              reason: timeout
+            exp_annotations:
+              summary: "hostping idle gate fails on fail:9464 (reason timeout)"
+              description: "The --idle-gate-command has timed out (reason=timeout) or could not run (reason=error) for 15 minutes. It fails closed, so no idle run is made on this host."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingidlegatefailing"
       - eval_time: 15m
         alertname: HostpingMonitorPollErrors
         exp_alerts:

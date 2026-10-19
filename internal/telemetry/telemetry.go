@@ -63,6 +63,7 @@ type Telemetry struct {
 	lastSuccess metric.Float64Gauge
 	runFailed   metric.Int64Counter
 	runDiscard  metric.Int64Counter
+	gateSkip    metric.Int64Counter
 	pollErrors  metric.Int64Counter
 	lastPoll    metric.Float64Gauge
 	monIdle     metric.Int64Gauge
@@ -84,6 +85,20 @@ const (
 	// DiscardIdleUnknown: idle state could not be read.
 	DiscardIdleUnknown = "idle_unknown"
 )
+
+// Values of hostping.engine.idle_gate.skipped's reason attribute: why
+// --idle-gate-command kept an idle run from starting.
+const (
+	// GateDenied: the command exited non-zero, the site's "not now".
+	GateDenied = "denied"
+	// GateTimeout: the command did not exit within --idle-gate-timeout.
+	GateTimeout = "timeout"
+	// GateError: the command could not be started, or was killed by a signal.
+	GateError = "error"
+)
+
+// gateReasons is the fixed attribute set of hostping.engine.idle_gate.skipped.
+var gateReasons = []string{GateDenied, GateTimeout, GateError}
 
 // failStages and discardReasons are the fixed attribute sets of the run
 // outcome counters. Each series is written as 0 at start-up, so a rate() over
@@ -192,6 +207,9 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 		return fail(err)
 	}
 	t.verbsOff = !cfg.MetricsVerbDurations
+	if cfg.IdleGateCommand != "" && !cfg.Once {
+		t.initIdleGateSeries()
+	}
 	if err := t.registerBuildInfo(build); err != nil {
 		return fail(err)
 	}
@@ -412,6 +430,10 @@ func (t *Telemetry) initLivenessInstruments() error {
 	if err != nil {
 		return err
 	}
+	t.gateSkip, err = t.meter.Int64Counter("hostping.engine.idle_gate.skipped", metric.WithDescription("Idle runs the --idle-gate-command kept from starting: it exited non-zero (reason=denied), timed out (reason=timeout) or could not run (reason=error)"))
+	if err != nil {
+		return err
+	}
 	t.pollErrors, err = t.meter.Int64Counter("hostping.monitor.poll.errors", metric.WithDescription("Monitor polls that returned an error"))
 	if err != nil {
 		return err
@@ -502,6 +524,25 @@ func (t *Telemetry) RecordDiscarded(ctx context.Context, reason string) {
 		return
 	}
 	t.runDiscard.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// RecordIdleGateSkipped counts an idle run that --idle-gate-command kept
+// from starting; reason is GateDenied, GateTimeout or GateError.
+func (t *Telemetry) RecordIdleGateSkipped(ctx context.Context, reason string) {
+	if t == nil {
+		return
+	}
+	t.gateSkip.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// initIdleGateSeries writes hostping.engine.idle_gate.skipped's fixed series
+// as 0, so a rate() over them is defined from the first scrape. Only a daemon
+// that runs a gate has them: elsewhere the counter could never move.
+func (t *Telemetry) initIdleGateSeries() {
+	ctx := context.Background()
+	for _, r := range gateReasons {
+		t.gateSkip.Add(ctx, 0, metric.WithAttributes(attribute.String("reason", r)))
+	}
 }
 
 // registerBuildInfo exports hostping.build.info: a constant 1 whose

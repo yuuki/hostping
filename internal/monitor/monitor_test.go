@@ -526,6 +526,35 @@ func TestPFCRunRestartsBusyInterval(t *testing.T) {
 	}
 }
 
+// A run the daemon skipped (--idle-gate-command) measured nothing, so it
+// leaves the busy interval where the run before put it.
+func TestSkipRunKeepsBusyInterval(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.IdleInterval = 0
+	cfg.BusyInterval = time.Minute
+	// The skipped idle run never touches the busy cooldown; a PFC run does,
+	// so turn it off to see the interval alone.
+	cfg.BusyCooldown = 0
+	h := newLoadedHost(t, cfg, "rnic0")
+	var runs []int
+	for i := 1; i <= 61; i++ {
+		if i == 51 {
+			h.pause += 100_000
+		}
+		d := h.step()
+		if !d.Run {
+			continue
+		}
+		runs = append(runs, i)
+		if i == 51 {
+			h.m.SkipRun()
+		}
+	}
+	if len(runs) != 2 || runs[0] != 51 || runs[1] != 61 {
+		t.Fatalf("runs at steps %v, want the skipped one at 51 and periodic still at 61", runs)
+	}
+}
+
 func TestMarkRunRestartsBusyInterval(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.IdleInterval = 0

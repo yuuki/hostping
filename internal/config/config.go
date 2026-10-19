@@ -67,6 +67,15 @@ type Config struct {
 	// mutual probes land in the next counter delta, so an unthrottled busy
 	// trigger re-arms itself every poll. Zero disables the cooldown.
 	BusyCooldown time.Duration
+	// IdleGateCommand, when set, is run (no shell, no arguments) right before
+	// each idle-trigger run of the daemon: exit 0 lets the run start, anything
+	// else (a non-zero exit, IdleGateTimeout, an exec failure) skips this
+	// attempt until the next IdleInterval. It lets a site keep the idle full
+	// mesh out of a scheduler job's allocation, which the utilization-based
+	// idle verdict cannot see. Empty (the default) runs no gate.
+	IdleGateCommand string
+	// IdleGateTimeout bounds one IdleGateCommand; at most MaxIdleGateTimeout.
+	IdleGateTimeout time.Duration
 	// BusyInterval starts a busy-mode run on a loaded host that raised
 	// neither PFC nor drops, at most once per interval (and never inside
 	// BusyCooldown). NSDI'23 §4.2 only measures a loaded host on PFC/drops,
@@ -210,6 +219,7 @@ func Defaults() Config {
 		// nvidia-smi costs hundreds of ms; GPU util only gates the idle run.
 		GPUUtilInterval:      10 * time.Second,
 		BusyCooldown:         30 * time.Second,
+		IdleGateTimeout:      5 * time.Second,
 		BusySamples:          3,
 		FlapWindow:           3,
 		Timeout:              5 * time.Second,
@@ -277,6 +287,8 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.IdleInterval, "idle-interval", c.IdleInterval, "idle-host full-mesh interval")
 	fs.DurationVar(&c.MetricInterval, "metric-interval", c.MetricInterval, "RNIC counter poll interval")
 	fs.DurationVar(&c.GPUUtilInterval, "gpu-util-interval", c.GPUUtilInterval, "minimum period between nvidia-smi GPU utilization queries")
+	fs.StringVar(&c.IdleGateCommand, "idle-gate-command", c.IdleGateCommand, "daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start, a non-zero exit, a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits non-zero while a scheduler job holds the host; empty: no gate)")
+	fs.Var(&boundedDuration{p: &c.IdleGateTimeout, max: MaxIdleGateTimeout}, "idle-gate-timeout", "daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most 20s)")
 	fs.DurationVar(&c.BusyCooldown, "busy-cooldown", c.BusyCooldown, "minimum interval between PFC/drop-triggered busy runs (0 disables)")
 	fs.DurationVar(&c.BusyInterval, "busy-interval", c.BusyInterval, "periodic busy-mode run on a loaded host without PFC/drops, at most once per interval (0 disables; beyond NSDI'23 §4.2)")
 	fs.Var((*uint32Value)(&c.BusySamples), "busy-samples", "loopback readings per path on a loaded RNIC in busy mode; the median is classified, so a single noisy sample no longer marks a healthy sibling abnormal (1 disables the repeat)")
@@ -349,6 +361,15 @@ func (c Config) ValidateMutual() error {
 	return nil
 }
 
+// ValidateIdleGate rejects an idle gate that could never answer: with a
+// zero timeout every attempt would be killed before it ran.
+func (c Config) ValidateIdleGate() error {
+	if c.IdleGateCommand != "" && c.IdleGateTimeout <= 0 {
+		return fmt.Errorf("--idle-gate-timeout must be positive with --idle-gate-command, got %v", c.IdleGateTimeout)
+	}
+	return nil
+}
+
 // Overrides is the user-supplied baseline table (partial). Empty when nothing is set.
 func (c Config) Overrides() (baseline.Overlay, error) {
 	return baseline.Load(c.BaselineFile, c.BaselineSpecs)
@@ -417,6 +438,11 @@ func (v *boundedUint32) Set(s string) error {
 // path of every run, so a typo must not turn into seconds of CPU and memory
 // traffic per path. The Zig probe applies the same cap.
 const MaxMemWarmup = time.Second
+
+// MaxIdleGateTimeout bounds --idle-gate-timeout. The gate runs inside the
+// poll loop, which completes no poll while it waits, so a gate must answer
+// well within the /healthz stall limit (telemetry.LivenessFloor, 30 s).
+const MaxIdleGateTimeout = 20 * time.Second
 
 // MaxLatencyFloor bounds --latency-floor. A small-message p50 is a few µs,
 // so a floor this high already turns the sibling latency verdict off.

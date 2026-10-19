@@ -358,6 +358,7 @@ these series (names as Prometheus renders them):
 | `hostping_engine_last_success_timestamp_seconds` | End of the last run whose report was confirmed and written |
 | `hostping_engine_run_failed_total{stage}` | Runs that returned an error (`stage="engine"`) or whose report could not be written (`stage="report"`) |
 | `hostping_engine_run_discarded_total{reason}` | Idle-mode runs discarded because the clean poll after them found the host busy (`reason="host_busy"`) or could not classify it (`reason="idle_unknown"`) |
+| `hostping_engine_idle_gate_skipped_total{reason}` | Idle runs `--idle-gate-command` kept from starting: it exited non-zero (`reason="denied"`), timed out (`reason="timeout"`) or could not run (`reason="error"`). Exported only with a gate ([Keeping idle runs out of scheduler jobs](#keeping-idle-runs-out-of-scheduler-jobs)) |
 | `hostping_monitor_poll_errors_total` | Monitor polls that returned an error |
 | `hostping_monitor_last_poll_timestamp_seconds` | Last monitor poll that completed without error |
 | `hostping_monitor_host_idle` | 1 when the last clean poll found the host idle, 0 when busy or unclassified |
@@ -391,6 +392,11 @@ not been diagnosed since.
 A steady `hostping_engine_run_discarded_total` increase means a workload keeps
 coming back during idle runs. That is expected on a host that pauses between
 iterations. If it never stops, no idle diagnosis is being made.
+
+With `--idle-gate-command`, a host whose gate keeps denying makes no idle run
+and no diagnosis, by design. Leave such hosts out of the first expression with
+`unless on (job, instance) increase(hostping_engine_idle_gate_skipped_total[15m]) > 0`,
+as the shipped rules do.
 
 ## Joining physical identifiers
 
@@ -766,12 +772,13 @@ host. Notation:
 | `hostping_topology_node_info` | R + E + K | `node` (the other labels are fixed per node) |
 | `hostping_topology_edge_info` | L + S | `edge` (the other labels are fixed per edge) |
 | `hostping_status_code_info` | 28 | `metric` × `code`: fixed by the code tables, whatever the host |
+| `hostping_engine_idle_gate_skipped_total` | G | `reason`: 3 with `--idle-gate-command`, else 0 |
 | Liveness: `hostping_host_idle`, `hostping_monitor_host_idle`, three `*_timestamp_seconds`, `hostping_engine_run_failed_total` (2 `stage`), `hostping_engine_run_discarded_total` (2 `reason`), `hostping_monitor_poll_errors_total`, `hostping_build_info` | 11 | |
 
 Per host:
 
 ```
-series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T
+series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T + G
 ```
 
 U ≤ L is the number of links with a utilization source. The Prometheus client
@@ -800,6 +807,7 @@ Worked example: the Fig.2 host of `--sim`.
 - M = 6 under rail scope.
 - U = 0, because there is no live bus utilization.
 - N = 0, because no CPU load is read.
+- G = 0, because no `--idle-gate-command` is set.
 
 ```
 11 × 32 + 10 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
@@ -1002,7 +1010,7 @@ with a two-node all-to-all collective between two multi-GPU RDMA hosts:
 | Situation | What the workload sees |
 | --- | --- |
 | Busy-mode run during service traffic (PFC/drop trigger, `--busy-interval`, or a manual `diagnose` on a loaded host) | Bus bandwidth 10–15% lower for 1–2 s per run, in every repetition. The loopback probes share the loaded RNICs and their PCIe hops with the service. |
-| Idle-mode run already in flight when a job starts | Job launch about 0.4 s slower and the first ~2 s a few percent slower, then back to normal. hostping detects that the host became busy and discards the report (see the idle-mode hold in [Triggers](design.md#triggers)). |
+| Idle-mode run already in flight when a job starts | Job launch about 0.4 s slower and the first ~2 s a few percent slower, then back to normal. hostping detects that the host became busy and discards the report (see the idle-mode hold in [Triggers](design.md#triggers)). An idle run that starts inside a quiet stretch of a job is not caught this way; see [Keeping idle runs out of scheduler jobs](#keeping-idle-runs-out-of-scheduler-jobs). |
 | GPU endpoint being probed | One GPU context per probed GPU, on the order of 0.5 GiB of device memory, held only while the run probes that GPU (a few seconds) and released after the run. |
 
 On a busy fleet, the cost that matters is the busy-mode run, not the idle one.
@@ -1046,6 +1054,74 @@ NUMA node, one path after another. An idle run grows by about `D` × the number
 of memory paths (RNICs × NUMA nodes), and a busy run by `D` for each
 memory-path probe it takes. It is off by default. See below for when to turn
 it on.
+
+### Keeping idle runs out of scheduler jobs
+
+The idle verdict measures activity, not allocation. A scheduler job that is
+loading data, preprocessing or writing a checkpoint can leave every GPU and
+RNIC below the idle thresholds for minutes. hostping then calls the host idle
+and starts the full mesh inside the job's allocation. The job pays the costs
+above, and the run can misread the job's own traffic. Storage I/O on an RNIC
+with no GPU path, for example, shows up as packet drops. The idle-mode hold
+discards a run only when the job comes back before the run ends.
+
+`--idle-gate-command PATH` hands that decision to the site. The daemon runs
+`PATH` right before each idle-trigger run:
+
+- **Exit 0**: the run starts.
+- **Non-zero exit, no exit within `--idle-gate-timeout`** (default `5s`, at
+  most `20s`), **or a command that cannot be started**: the run is skipped.
+  The next attempt follows `--idle-interval`, as after a discarded run. The
+  gate fails closed, so a broken gate stops idle runs rather than probing
+  inside a job.
+
+Details:
+
+- `PATH` runs without a shell and without arguments, as the daemon's user and
+  inside the unit's sandboxing. Its stdin and stdout are `/dev/null`. On a
+  timeout, its whole process group is killed.
+- The gate runs only on the poll that would start an idle run, never on every
+  poll. While it runs, the poll loop waits, which is why the timeout is capped
+  below the 30 s `/healthz` stall limit.
+- The outcome is logged when it changes, not on every attempt. A skip line
+  names the reason and quotes the first 256 bytes of the gate's stderr.
+- Every skip counts in
+  `hostping_engine_idle_gate_skipped_total{reason}`: `denied` (non-zero exit),
+  `timeout` or `error`. The three series are exported as 0 from start-up when
+  a gate is set, and not at all otherwise.
+- Only the scheduled idle run is gated. PFC/drop, `--busy-interval` and
+  mutual-probe alarm runs answer a symptom and keep their own rate limits.
+  `hostpingctl diagnose`, `hostpingctl calibrate` and `--once` never run the
+  gate: an operator runs them on a drained host.
+- A skipped run measured nothing, so it does not restart `--busy-interval`.
+  A child the gate leaves running when it exits is killed with its process
+  group.
+- A job can still start between the gate's answer and the end of the run.
+  The idle-mode hold covers that case as before.
+
+A Slurm gate that allows a run only when a query succeeds and finds no
+running job on this node:
+
+```sh
+#!/bin/sh
+# exit 0 only after a successful query finds no RUNNING jobs
+node=$(hostname -s) || exit 1
+[ -n "$node" ] || exit 1
+jobs=$(squeue -h -w "$node" -t R -o %i) || exit 1
+[ -z "$jobs" ]
+```
+
+Test the query's status before its output, as here. Testing only
+`[ -z "$(squeue ...)" ]` allows a run whenever `squeue` fails with empty
+output. `-t R` skips only running jobs. Add states such as `CF` (configuring)
+or `CG` (completing) if an allocation in those states must not be probed
+either. A check that does not depend on slurmctld, such as the presence of
+`job_*` cgroups under the slurmstepd scope, also works. It fails open,
+though, if the path is not where your Slurm creates them.
+
+`HostpingNoSuccessfulRun` in the shipped rules leaves out a host whose gate
+skipped a run in its window. `HostpingIdleGateFailing` alerts on `timeout`
+and `error` instead ([Alerting rules](#alerting-rules)).
 
 ### Hosts with dynamic uncore or memory power management
 
