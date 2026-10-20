@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
@@ -219,7 +220,7 @@ func readUPILink(dir, pmu string) (upiLink, error) {
 func cpuPackages(sysroot string, cpus []int) ([]int, error) {
 	pkgs := make([]int, len(cpus))
 	for i, c := range cpus {
-		p := readIntDef(filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", c), "topology/physical_package_id"), -1)
+		p := sysfs.PackageID(sysroot, c)
 		if p < 0 {
 			return nil, fmt.Errorf("%w: cpu%d has no physical_package_id", errUncoreUnsupported, c)
 		}

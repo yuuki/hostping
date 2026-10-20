@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 // ibFabricPrefix marks an InfiniBand rail key. RoCE keys ("v4:", "gid:")
@@ -18,7 +19,7 @@ const ibFabricPrefix = "ib:"
 // A missing or unrecognised value is "" (unknown), which every caller treats
 // as RoCE, as before link layers were read.
 func portLinkLayer(portDir string) string {
-	v := strings.TrimSpace(readFile(filepath.Join(portDir, "link_layer")))
+	v := strings.TrimSpace(sysfs.ReadString(filepath.Join(portDir, "link_layer")))
 	switch {
 	case strings.EqualFold(v, model.LinkLayerInfiniBand):
 		return model.LinkLayerInfiniBand
@@ -43,13 +44,13 @@ func rnicLinkLayer(sysroot, ibdev string) string {
 // cannot address (not ACTIVE, LID 0, no GID 0) is "unknown", so it never
 // pairs.
 func ibFabricKey(portDir string) string {
-	if !portActive(portDir) {
+	if !sysfs.PortActive(portDir) {
 		return "unknown"
 	}
 	if portLID(portDir) == 0 {
 		return "unknown"
 	}
-	hex := gidHex(readFile(filepath.Join(portDir, "gids", "0")))
+	hex := gidHex(sysfs.ReadString(filepath.Join(portDir, "gids", "0")))
 	if len(hex) != 32 || gidAllZero(hex) {
 		return "unknown"
 	}
@@ -58,7 +59,7 @@ func ibFabricKey(portDir string) string {
 
 // portLID reads ports/N/lid ("0x7"); 0 when missing or unparsable.
 func portLID(portDir string) uint64 {
-	return parseLID(readFile(filepath.Join(portDir, "lid")))
+	return parseLID(sysfs.ReadString(filepath.Join(portDir, "lid")))
 }
 
 // parseLID parses a sysfs LID ("0x7"); 0 when unparsable.
@@ -125,7 +126,7 @@ func managementHCAHints(sysroot, ibdev, netdev string, localLIDs map[uint64]bool
 		return nil
 	}
 	base := filepath.Join(sysroot, "class/infiniband", ibdev, "ports", port)
-	if !portActive(base) {
+	if !sysfs.PortActive(base) {
 		return nil
 	}
 	var why []string
@@ -138,20 +139,15 @@ func managementHCAHints(sysroot, ibdev, netdev string, localLIDs map[uint64]bool
 	return why
 }
 
-func portActive(portDir string) bool {
-	st := strings.ToUpper(readFile(filepath.Join(portDir, "state")))
-	return strings.Contains(st, "ACTIVE") || strings.HasPrefix(strings.TrimSpace(st), "4:")
-}
-
 // portSMLID reads ports/N/sm_lid; 0 when missing or unparsable.
 func portSMLID(portDir string) uint64 {
-	return parseLID(readFile(filepath.Join(portDir, "sm_lid")))
+	return parseLID(sysfs.ReadString(filepath.Join(portDir, "sm_lid")))
 }
 
 // netdevAdminDown reports a netdev without IFF_UP in its flags. Unreadable
 // flags are not down: nothing is claimed about a netdev hostping cannot read.
 func netdevAdminDown(sysroot, netdev string) bool {
-	v := strings.TrimSpace(readFile(filepath.Join(sysroot, "class/net", netdev, "flags")))
+	v := strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "class/net", netdev, "flags")))
 	if v == "" {
 		return false
 	}

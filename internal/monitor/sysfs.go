@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
@@ -66,22 +67,22 @@ func ReadRNICSysfsFrom(ctx context.Context, sysroot string, n model.RNIC) (model
 	portDir := filepath.Join(sysroot, "class/infiniband", n.Device, "ports", port)
 	base := filepath.Join(portDir, "counters")
 	c := model.RNICCounters{Device: n.Device, Netdev: n.Netdev}
-	ibRx, ibRxOK := readU64OK(filepath.Join(base, "port_rcv_data"))
-	ibTx, ibTxOK := readU64OK(filepath.Join(base, "port_xmit_data"))
+	ibRx, ibRxOK := sysfs.ReadUint64OK(filepath.Join(base, "port_rcv_data"))
+	ibTx, ibTxOK := sysfs.ReadUint64OK(filepath.Join(base, "port_xmit_data"))
 	usedIB := ibRxOK || ibTxOK
 	if usedIB {
 		c.RxBytes = ibRx * 4
 		c.TxBytes = ibTx * 4
 	} else if n.Netdev != "" {
 		st := filepath.Join(sysroot, "class/net", n.Netdev, "statistics")
-		c.RxBytes = readU64(filepath.Join(st, "rx_bytes"))
-		c.TxBytes = readU64(filepath.Join(st, "tx_bytes"))
+		c.RxBytes, _ = sysfs.ReadUint64OK(filepath.Join(st, "rx_bytes"))
+		c.TxBytes, _ = sysfs.ReadUint64OK(filepath.Join(st, "tx_bytes"))
 	}
-	if v, ok := readU64OK(filepath.Join(base, "port_xmit_discards")); ok {
+	if v, ok := sysfs.ReadUint64OK(filepath.Join(base, "port_xmit_discards")); ok {
 		c.TxDrops = v
 		c.DropSources |= srcIBDiscards
 	}
-	ib := isInfiniBandLinkLayer(readFile(filepath.Join(portDir, "link_layer")))
+	ib := isInfiniBandLinkLayer(sysfs.ReadString(filepath.Join(portDir, "link_layer")))
 	hwPause, hwDrops := scanCounterDir(filepath.Join(portDir, "hw_counters"), &c, !ib)
 	if hwPause {
 		c.PauseSources |= srcHWCounters
@@ -286,13 +287,20 @@ func drmBusy(bdf string) (float64, bool) {
 		if normalizeBDF(filepath.Base(real)) != want {
 			continue
 		}
-		if u, ok := readU64OK(filepath.Join(dev, "gpu_busy_percent")); ok {
+		if u, ok := sysfs.ReadUint64OK(filepath.Join(dev, "gpu_busy_percent")); ok {
 			return float64(u), true
 		}
 	}
 	return 0, false
 }
 
+// normalizeBDF reduces a PCI address to bus:dev.fn, dropping the domain, so
+// nvidia-smi's "00000000:3C:00.0", sysfs's "0000:3c:00.0" and a bare
+// "3c:00.0" all meet. It is NOT pci.CanonicalBDF, which keeps the domain
+// (narrowed to four digits) and rejects anything that is not a BDF: on a host
+// with more than one PCI domain two functions at the same bus:dev.fn collide
+// here and stay apart there. The GPU lookups below have always keyed on the
+// domain-less form, so this stays as it is.
 func normalizeBDF(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	parts := strings.Split(s, ":")
@@ -302,10 +310,22 @@ func normalizeBDF(s string) string {
 	return strings.TrimPrefix(s, "0000:")
 }
 
+// firstActiveIBPort is the first ACTIVE port of ibdev among the fixed port
+// names "1".."4", or "1" when none is ACTIVE; it never lists the ports
+// directory and never returns "".
+//
+// Topology discovery has its own firstActiveIBPort (topology/discover.go)
+// that is NOT this one: it lists the ports directory, sorts the names
+// numerically, falls back to the lowest-numbered port, and returns "" when
+// the directory cannot be read. The two agree on every device with ports
+// 1..4; they differ for a port numbered 5 or more, a non-numeric port name,
+// and an unreadable ports directory. Discovery's result ends up in the graph,
+// this one's in the counters, and the two have been kept separate on purpose:
+// unifying them would move the rail key or the counter source of such a
+// device.
 func firstActiveIBPort(sysroot, ibdev string) string {
 	for _, p := range []string{"1", "2", "3", "4"} {
-		st := strings.ToUpper(readFile(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", p, "state")))
-		if strings.Contains(st, "ACTIVE") || strings.HasPrefix(strings.TrimSpace(st), "4:") {
+		if sysfs.PortActive(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", p)) {
 			return p
 		}
 	}
@@ -398,7 +418,7 @@ func scanCounterDir(dir string, c *model.RNICCounters, pause bool) (pauseFound, 
 	var acc pauseAccum
 	for _, e := range ents {
 		name := strings.ToLower(e.Name())
-		v, ok := readU64OK(filepath.Join(dir, e.Name()))
+		v, ok := sysfs.ReadUint64OK(filepath.Join(dir, e.Name()))
 		if !ok {
 			continue
 		}
@@ -500,27 +520,5 @@ func (g *ethtoolGate) scan(ctx context.Context, netdev string, c *model.RNICCoun
 	return res
 }
 
-func readU64(path string) uint64 {
-	v, _ := readU64OK(path)
-	return v
-}
-
-func readU64OK(path string) (uint64, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return n, true
-}
-
-func readFile(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
+// readTrim is the trimmed contents of path, "" when unreadable.
+func readTrim(path string) string { return strings.TrimSpace(sysfs.ReadString(path)) }

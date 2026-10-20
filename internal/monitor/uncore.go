@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
@@ -419,30 +420,28 @@ var parseCPUList = topology.ParseCPUList
 // cpuDie names the package and die a CPU belongs to. die_id is absent on
 // kernels and parts without multi-die packages, which is die 0.
 func cpuDie(sysroot string, cpu int) (string, error) {
-	t := filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", cpu), "topology")
-	pkg := readIntDef(filepath.Join(t, "physical_package_id"), -1)
+	pkg := sysfs.PackageID(sysroot, cpu)
 	if pkg < 0 {
 		return "", errors.New("no physical_package_id")
 	}
-	return fmt.Sprintf("%d/%d", pkg, readIntDef(filepath.Join(t, "die_id"), 0)), nil
+	dieID := sysfs.ReadInt(filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", cpu), "topology/die_id"), 0)
+	return fmt.Sprintf("%d/%d", pkg, dieID), nil
 }
 
 // nodeDies maps every NUMA node with CPUs to its die, and each die to its
-// nodes. A node whose CPUs span dies has no single die and is left out.
+// nodes. A node whose CPUs span dies has no single die and is left out, as
+// is one whose cpulist is missing, empty or malformed (nothing is claimed
+// about it; the memory link of such a node is reported as unmapped).
 func nodeDies(sysroot string) (map[int]string, map[string][]int) {
 	byNode := map[int]string{}
 	byDie := map[string][]int{}
-	ents, err := os.ReadDir(filepath.Join(sysroot, "devices/system/node"))
+	nodes, err := sysfs.Nodes(sysroot)
 	if err != nil {
 		return byNode, byDie
 	}
-	for _, e := range ents {
-		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "node"))
-		if err != nil || !strings.HasPrefix(e.Name(), "node") {
-			continue
-		}
-		cpus, err := parseCPUList(readTrim(filepath.Join(sysroot, "devices/system/node", e.Name(), "cpulist")))
-		if err != nil || len(cpus) == 0 {
+	for _, nd := range nodes {
+		n, cpus := nd.ID, nd.CPUs
+		if nd.ParseErr != nil || len(cpus) == 0 {
 			continue
 		}
 		die := ""
@@ -864,16 +863,6 @@ func (u *Uncore) Links() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func readTrim(path string) string { return strings.TrimSpace(readFile(path)) }
-
-func readIntDef(path string, def int) int {
-	n, err := strconv.Atoi(readTrim(path))
-	if err != nil {
-		return def
-	}
-	return n
 }
 
 // Close releases every counter.

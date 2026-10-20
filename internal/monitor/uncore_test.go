@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -712,5 +713,59 @@ func TestUncoreSumsGraniteRapidsSubChannels(t *testing.T) {
 	u.Poll(false)
 	if got, want := u.Util()["mem.0"], 512e9/capBPS; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("mem.0 = %v, want %v (both sub-channels)", got, want)
+	}
+}
+
+// physical_package_id is read signed: a negative value, like a missing or
+// blank file, is "no package", and the die of such a CPU is an error.
+func TestCPUDieRejectsNegativeOrMissingPackage(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"devices/system/cpu/cpu0/topology/physical_package_id": "1\n",
+		"devices/system/cpu/cpu0/topology/die_id":              "2\n",
+		"devices/system/cpu/cpu1/topology/physical_package_id": "-1\n",
+		"devices/system/cpu/cpu2/topology/physical_package_id": "\n",
+		"devices/system/cpu/cpu3/topology/physical_package_id": "0\n",
+	})
+	if die, err := cpuDie(root, 0); err != nil || die != "1/2" {
+		t.Fatalf("cpu0 = %q, %v; want 1/2", die, err)
+	}
+	if die, err := cpuDie(root, 3); err != nil || die != "0/0" {
+		t.Fatalf("cpu3 without die_id = %q, %v; want 0/0", die, err)
+	}
+	for _, c := range []int{1, 2, 4} {
+		if _, err := cpuDie(root, c); err == nil {
+			t.Errorf("cpu%d: want an error for a CPU without a package", c)
+		}
+	}
+}
+
+// nodeDies claims nothing about a node whose cpulist is missing, empty or
+// malformed, and nothing about one whose CPUs span dies.
+func TestNodeDiesSkipsUnusableNodes(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"devices/system/node/node0/cpulist": "0-1\n",
+		"devices/system/node/node1/cpulist": "\n",
+		"devices/system/node/node2/cpulist": "x\n",
+		"devices/system/node/node3/cpulist": "2-3\n", // spans packages 0 and 1
+		"devices/system/node/node4/cpulist": "4\n",   // cpu4 has no package
+		"devices/system/node/node5/cpulist": "5\n",
+	}
+	for c, pkg := range map[int]string{0: "0", 1: "0", 2: "0", 3: "1", 5: "1"} {
+		files[fmt.Sprintf("devices/system/cpu/cpu%d/topology/physical_package_id", c)] = pkg + "\n"
+	}
+	writeTree(t, root, files)
+	if err := os.MkdirAll(filepath.Join(root, "devices/system/node/node6"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	byNode, byDie := nodeDies(root)
+	wantNode := map[int]string{0: "0/0", 5: "1/0"}
+	wantDie := map[string][]int{"0/0": {0}, "1/0": {5}}
+	if !reflect.DeepEqual(byNode, wantNode) || !reflect.DeepEqual(byDie, wantDie) {
+		t.Fatalf("byNode %v byDie %v, want %v %v", byNode, byDie, wantNode, wantDie)
+	}
+	if byNode, _ := nodeDies(filepath.Join(root, "nowhere")); len(byNode) != 0 {
+		t.Fatalf("no node directory: %v", byNode)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,5 +220,39 @@ intr 1 2 3
 	}
 	if len(got) != 1 || got[0] != (monitor.CPUTicks{Busy: 38, Total: 130}) {
 		t.Fatalf("flat host = %+v", got)
+	}
+}
+
+// A node directory without a cpulist is a node without CPUs (zero ticks, no
+// error), unlike topology's package lookup, which fails on it. A malformed
+// cpulist is an error naming the node.
+func TestReadCPUFromCPUListMissingOrMalformed(t *testing.T) {
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc")
+	sys := filepath.Join(root, "sys")
+	write := func(p, s string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(proc, "stat"), "cpu  1 0 0 1 0 0 0 0 0 0\ncpu0 1 0 0 1 0 0 0 0 0 0\n")
+	write(filepath.Join(sys, "devices/system/node/node0/cpulist"), "0\n")
+	if err := os.MkdirAll(filepath.Join(sys, "devices/system/node/node1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := monitor.ReadCPUFrom(proc, sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (monitor.CPUTicks{Busy: 1, Total: 2}) || got[1] != (monitor.CPUTicks{}) {
+		t.Fatalf("got %+v, want node0 {1 2} and an empty node1", got)
+	}
+	write(filepath.Join(sys, "devices/system/node/node1/cpulist"), "0-\n")
+	if _, err := monitor.ReadCPUFrom(proc, sys); err == nil || !strings.Contains(err.Error(), "node1 cpulist") {
+		t.Fatalf("malformed cpulist: err = %v, want one naming node1 cpulist", err)
 	}
 }

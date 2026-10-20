@@ -750,3 +750,57 @@ func TestDiscoverPCIeCapacityFallback(t *testing.T) {
 		}
 	}
 }
+
+// A device whose numa_node is -1 (no NUMA affinity) is modeled on node 0:
+// discovery reads numa_node with sysfs.ReadIntNonNegative, unlike
+// pci.ReadLink, which reports the -1 in PCIeConfig.NUMA.
+func TestDiscoverNegativeNUMANodeIsZero(t *testing.T) {
+	root := t.TempDir()
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0", "0x060400", "4", "", "-1")
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0/0000:3c:00.0", "0x020000", "0", "0x15b3", "-1")
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0/0000:3c:00.1", "0x030200", "0", "0x10de", "-1")
+	mkIB(t, root, "mlx5_0", "0000:3c:00.0", "0000:0000:0000:0000:0000:ffff:c0a8:0101")
+	g, err := DiscoverFrom(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.RNICs) != 1 || g.RNICs[0].NUMA != 0 || g.RNICs[0].Socket != 0 {
+		t.Fatalf("RNIC with numa_node -1: %+v, want NUMA 0 socket 0", g.RNICs)
+	}
+	gpus := 0
+	for _, e := range g.Endpoints {
+		if e.Kind != model.EndpointGPU {
+			continue
+		}
+		gpus++
+		if e.NUMA != 0 || e.Socket != 0 {
+			t.Fatalf("GPU with numa_node -1: %+v, want NUMA 0 socket 0", e)
+		}
+	}
+	if gpus != 1 {
+		t.Fatalf("want one GPU, got %+v", g.Endpoints)
+	}
+}
+
+// A node directory without a cpulist is a CPU node (test fixtures, odd
+// sysfs); only a cpulist that exists and is empty marks a memory-only node.
+func TestDiscoverNUMANodeWithoutCPUListIsMemory(t *testing.T) {
+	root := t.TempDir()
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0", "0x060400", "4", "", "0")
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0/0000:3c:00.0", "0x020000", "0", "0x15b3", "0")
+	mkIB(t, root, "mlx5_0", "0000:3c:00.0", "0000:0000:0000:0000:0000:ffff:c0a8:0101")
+	mustWrite(t, filepath.Join(root, "devices/system/node/node0/cpulist"), "0-31\n")
+	if err := os.MkdirAll(filepath.Join(root, "devices/system/node/node1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "devices/system/node/node2/cpulist"), "\n")
+	mustWrite(t, filepath.Join(root, "devices/system/node/node3/cpulist"), "not a list\n")
+	g, err := DiscoverFrom(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := memoryEndpoints(g)
+	if len(got) != 3 || got[0].ID != "mem0" || got[1].ID != "mem1" || got[2].ID != "mem3" {
+		t.Fatalf("missing and malformed cpulists are CPU nodes, an empty one is not: %+v", got)
+	}
+}

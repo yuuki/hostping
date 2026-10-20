@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 // CanonicalBDF returns the sysfs spelling of a PCI address: lower case with a
@@ -50,18 +51,18 @@ func ReadLink(sysroot, bdf string) (model.PCIeConfig, error) {
 	}
 	dir := filepath.Join(sysroot, "bus/pci/devices", canon)
 	cfg := model.PCIeConfig{BDF: canon, NUMA: -1}
-	speed := strings.TrimSpace(readFile(filepath.Join(dir, "current_link_speed")))
+	speed := strings.TrimSpace(sysfs.ReadString(filepath.Join(dir, "current_link_speed")))
 	if speed == "" {
 		return model.PCIeConfig{}, fmt.Errorf("pci %s: sysfs missing", canon)
 	}
 	cfg.Speed = speed
-	cfg.MaxSpeed = strings.TrimSpace(readFile(filepath.Join(dir, "max_link_speed")))
-	cfg.Width = readInt(filepath.Join(dir, "current_link_width"), 0)
-	cfg.MaxWidth = readInt(filepath.Join(dir, "max_link_width"), 0)
-	cfg.NUMA = readInt(filepath.Join(dir, "numa_node"), -1)
+	cfg.MaxSpeed = strings.TrimSpace(sysfs.ReadString(filepath.Join(dir, "max_link_speed")))
+	cfg.Width = sysfs.ReadInt(filepath.Join(dir, "current_link_width"), 0)
+	cfg.MaxWidth = sysfs.ReadInt(filepath.Join(dir, "max_link_width"), 0)
+	cfg.NUMA = sysfs.ReadInt(filepath.Join(dir, "numa_node"), -1)
 	if up := upstreamPort(sysroot, canon); up != "" {
-		cfg.PortMaxSpeed = strings.TrimSpace(readFile(filepath.Join(up, "max_link_speed")))
-		cfg.PortMaxWidth = readInt(filepath.Join(up, "max_link_width"), 0)
+		cfg.PortMaxSpeed = strings.TrimSpace(sysfs.ReadString(filepath.Join(up, "max_link_speed")))
+		cfg.PortMaxWidth = sysfs.ReadInt(filepath.Join(up, "max_link_width"), 0)
 	}
 	if caps, err := ReadConfig(sysroot, canon); err == nil {
 		cfg.ACSKnown, cfg.ACSEnabled = caps.ACSPresent, caps.ACS
@@ -84,12 +85,4 @@ func upstreamPort(sysroot, bdf string) string {
 		return ""
 	}
 	return parent
-}
-
-func readInt(path string, def int) int {
-	n, err := strconv.Atoi(strings.TrimSpace(readFile(path)))
-	if err != nil {
-		return def
-	}
-	return n
 }
