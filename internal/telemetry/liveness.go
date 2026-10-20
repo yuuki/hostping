@@ -58,6 +58,7 @@ func NewLiveness(metricInterval time.Duration, now func() time.Time) *Liveness {
 }
 
 // MaxAge is the longest the loop may go without a poll before Check fails.
+// Only the tests call it.
 func (l *Liveness) MaxAge() time.Duration {
 	if l == nil {
 		return 0

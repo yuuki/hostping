@@ -137,13 +137,13 @@ func (w *World) ApplyFault(spec string) error {
 		case "rnic_pcie":
 			// Full Gen4 speed, down-trained to four lanes: ~63 Gb/s, which the
 			// speed string alone cannot tell from a healthy x16 link.
-			id := "pcie." + arg
+			id := model.PCIeLinkID(arg)
 			w.LinkBW[id] = 67_000_000_000
 			c := w.PCIe[arg]
 			c.Width = 4
 			w.PCIe[arg] = c
 		case "gpu_pcie":
-			w.LinkBW["pcie."+arg] = 67_000_000_000
+			w.LinkBW[model.PCIeLinkID(arg)] = 67_000_000_000
 			c := w.PCIe[arg]
 			c.Width = 4
 			w.PCIe[arg] = c

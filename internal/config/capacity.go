@@ -18,9 +18,6 @@ type LinkCapacity struct {
 	ByLink map[string]uint64
 }
 
-// Set reports whether any capacity was given.
-func (c LinkCapacity) Set() bool { return c.All > 0 || len(c.ByLink) > 0 }
-
 // linkCapacityFlag is a repeatable flag.Value filling a LinkCapacity from
 // "BW" (every link of the kind) or "LINK=BW" (one link, whose ID must carry
 // prefix, e.g. "mem.1=400GB/s").

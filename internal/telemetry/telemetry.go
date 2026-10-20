@@ -290,7 +290,7 @@ func newMetricsServer(live *Liveness) *http.Server {
 }
 
 // Addr is the metrics listener's bound address, or "" without one. With
-// --metrics :0 it carries the port the kernel picked.
+// --metrics :0 it carries the port the kernel picked. Only the tests call it.
 func (t *Telemetry) Addr() string {
 	if t == nil || t.ln == nil {
 		return ""
