@@ -411,6 +411,20 @@ func TestPathContainsLink(t *testing.T) {
 	}
 }
 
+// PCIeLinkID is the "pcie." prefix discovery and the analyzer both rely on
+// to find a device's own hop among a path's links.
+func TestPCIeLinkID(t *testing.T) {
+	for _, w := range []struct{ device, id string }{
+		{"rnic0", "pcie.rnic0"},
+		{"gpu3", "pcie.gpu3"},
+		{"", "pcie."},
+	} {
+		if got := model.PCIeLinkID(w.device); got != w.id {
+			t.Errorf("PCIeLinkID(%q) = %q, want %q", w.device, got, w.id)
+		}
+	}
+}
+
 func TestRootPortPair(t *testing.T) {
 	ab := model.NewRootPortPair("rp.a", "rp.b")
 	ba := model.NewRootPortPair("rp.b", "rp.a")
