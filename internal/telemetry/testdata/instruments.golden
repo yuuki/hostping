@@ -1,0 +1,37 @@
+hostping.build.info |  | Always 1; the attributes identify the running build | Gauge | int64
+hostping.bus.utilization |  | Intra-host bus utilization | Gauge | float64
+hostping.cpu.busy |  | CPU busy fraction of a NUMA node over the monitor poll interval, from /proc/stat | Gauge | float64
+hostping.diagnosis.count |  | Root-cause diagnoses emitted | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.endpoint.info |  | Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement) | Gauge | int64
+hostping.endpoint.skipped |  | Endpoints whose loopback probes were skipped because registration failed or the GPU compute mode is not Default | Gauge | int64
+hostping.engine.idle_gate.skipped |  | Idle runs the --idle-gate-command kept from starting: it exited 1 (reason=denied), timed out (reason=timeout), or exited with another non-zero status or could not run (reason=error) | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.engine.last_run_timestamp | s | Unix time the last engine run ended, whatever its outcome | Gauge | float64
+hostping.engine.last_success_timestamp | s | Unix time the last engine run whose report was confirmed and written ended | Gauge | float64
+hostping.engine.run.count |  |  | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.engine.run.discarded |  | Idle-mode runs discarded because the clean poll after them found the host busy or unclassified | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.engine.run.failed |  | Engine runs that returned an error (stage=engine) or whose confirmed report could not be written (stage=report) | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.host.idle |  |  | Gauge | int64
+hostping.link.abnormal_count |  | Algorithm 1 abnormal_cnt per hop | Gauge | int64
+hostping.link.status_code |  | Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code | Gauge | int64
+hostping.loopback.bandwidth | bit/s | Intra-host loopback bandwidth from Eq.1 | Gauge | float64
+hostping.loopback.latency | us | Intra-host loopback latency, small-message p50 | Gauge | float64
+hostping.monitor.host_idle |  | 1 when the last clean monitor poll found the host idle, 0 when busy or unclassified | Gauge | int64
+hostping.monitor.last_poll_timestamp | s | Unix time of the last monitor poll that completed without error | Gauge | float64
+hostping.monitor.poll.errors |  | Monitor polls that returned an error | Sum(monotonic=true, CumulativeTemporality) | int64
+hostping.mutual.loss_ratio |  | Same-rail RNIC-to-RNIC loss ratio | Gauge | float64
+hostping.mutual.rtt | us | Same-rail RNIC-to-RNIC RTT p50 | Gauge | float64
+hostping.mutual.timeout_ratio |  | Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent | Gauge | float64
+hostping.path.abnormal |  | 1 if RNIC→endpoint path is abnormal | Gauge | int64
+hostping.path.latency_reason_code |  | Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code | Gauge | int64
+hostping.path.latency_status_code |  | Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code | Gauge | int64
+hostping.path.latency_streak |  | Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not | Gauge | int64
+hostping.path.status_code |  | Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code | Gauge | int64
+hostping.path.uncertain_reason_code |  | Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code | Gauge | int64
+hostping.rnic.drop.delta |  | Packet drop counter delta | Gauge | int64
+hostping.rnic.info |  | Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement) | Gauge | int64
+hostping.rnic.pause_duration_ratio |  | Tx pause duration ratio (seconds paused per second) | Gauge | float64
+hostping.rnic.throughput | bit/s |  | Gauge | float64
+hostping.status_code.info |  | Always 1; names the status or reason that code means on the code gauge named by metric | Gauge | int64
+hostping.topology.edge.info |  | Always 1; one series per edge of the host topology diagram, source upstream of target; link names the link of hostping.link.status_code | Gauge | int64
+hostping.topology.node.info |  | Always 1; one series per node of the host topology diagram (CPU package, NUMA node, memory, root port, PCIe switch, RNIC, GPU) | Gauge | int64
+hostping.verb.duration | us | Execution time of a loopback probe's setup verbs (ToN'24 §VI-C) | Gauge | float64
