@@ -190,51 +190,13 @@ func mergeRows(in []table, abnormalTh float64) ([]MergeRow, error) {
 	return rows, nil
 }
 
+// mergeSubClasses merges the learned sub-classes of row's distance across
+// the inputs that hold it, by name.
 func mergeSubClasses(row *MergeRow, in []table, abnormalTh float64) error {
-	d := row.Distance
-	var holders []string
-	var names []string
-	for _, f := range in {
-		b, ok := f.Bases[d]
-		if !ok {
-			continue
-		}
-		holders = append(holders, f.Name)
-		for _, sc := range b.SubClasses {
-			if !slices.Contains(names, sc.Name) {
-				names = append(names, sc.Name)
-			}
-		}
-	}
+	holders, names := distanceHolders(in, row.Distance)
 	owner := map[model.RootPortPair]string{}
 	for _, name := range names {
-		var bws, lats []uint64
-		listed := map[model.RootPortPair][]string{}
-		var pairs []model.RootPortPair
-		for _, f := range in {
-			b, ok := f.Bases[d]
-			if !ok {
-				continue
-			}
-			i := slices.IndexFunc(b.SubClasses, func(sc baseline.SubClass) bool { return sc.Name == name })
-			if i < 0 {
-				continue
-			}
-			sc := b.SubClasses[i]
-			if sc.BandwidthBPS > 0 {
-				bws = append(bws, sc.BandwidthBPS)
-			}
-			if sc.LatencyNs > 0 {
-				lats = append(lats, sc.LatencyNs)
-			}
-			for _, p := range sc.RootPortPairs {
-				if _, seen := listed[p]; !seen {
-					pairs = append(pairs, p)
-				}
-				listed[p] = append(listed[p], f.Name)
-			}
-		}
-		slices.SortFunc(pairs, comparePairs)
+		bws, lats, pairs, listed := collectSubClass(holders, name)
 		m := MergeSubClass{
 			Name:         name,
 			BandwidthBPS: Quantile(bws, 0.25),
@@ -242,43 +204,118 @@ func mergeSubClasses(row *MergeRow, in []table, abnormalTh float64) error {
 			BW:           SpreadOf(bws),
 			Lat:          SpreadOf(lats),
 		}
-		for _, p := range pairs {
-			files := listed[p]
-			kept := 2*len(files) >= len(holders)
-			if kept {
-				if prev, ok := owner[p]; ok {
-					return fmt.Errorf("%s: root-port pair %s is in sub-classes %q and %q for at least half of the files each", d.Key(), p, prev, name)
-				}
-				owner[p] = name
-				m.RootPortPairs = append(m.RootPortPairs, p)
-			}
-			if len(files) < len(holders) {
-				var notIn []string
-				for _, h := range holders {
-					if !slices.Contains(files, h) {
-						notIn = append(notIn, h)
-					}
-				}
-				row.Disagree = append(row.Disagree, PairDisagreement{SubClass: name, Pair: p, In: files, NotIn: notIn, Kept: kept})
-			}
+		kept, disagree, err := majorityPairs(row.Distance, name, holders, pairs, listed, owner)
+		if err != nil {
+			return err
 		}
-		if len(m.RootPortPairs) == 0 {
+		row.Disagree = append(row.Disagree, disagree...)
+		if len(kept) == 0 {
 			continue
 		}
-		for _, f := range in {
-			b, ok := f.Bases[d]
-			if !ok {
-				continue
-			}
-			for _, sc := range b.SubClasses {
-				if sc.Name == name && sc.BandwidthBPS > 0 && below(sc.BandwidthBPS, m.BandwidthBPS, abnormalTh) {
-					m.Low = append(m.Low, f.Name)
-				}
-			}
-		}
+		m.RootPortPairs = kept
+		m.Low = lowInputs(holders, name, m.BandwidthBPS, abnormalTh)
 		row.SubClasses = append(row.SubClasses, m)
 	}
 	return nil
+}
+
+// holder is one input that holds the distance being merged, with its
+// sub-classes by name.
+type holder struct {
+	name string
+	sub  map[string]baseline.SubClass
+}
+
+// distanceHolders is the inputs that hold d, in input order, and the
+// sub-class names they use, in the order the inputs first name them.
+func distanceHolders(in []table, d model.Distance) ([]holder, []string) {
+	var holders []holder
+	var names []string
+	for _, f := range in {
+		b, ok := f.Bases[d]
+		if !ok {
+			continue
+		}
+		h := holder{name: f.Name, sub: map[string]baseline.SubClass{}}
+		for _, sc := range b.SubClasses {
+			if !slices.Contains(names, sc.Name) {
+				names = append(names, sc.Name)
+			}
+			h.sub[sc.Name] = sc
+		}
+		holders = append(holders, h)
+	}
+	return holders, names
+}
+
+// collectSubClass gathers the sub-class name across the holders that carry
+// it: the bandwidths and latencies set, the root-port pairs listed (sorted),
+// and the holders listing each pair, in holder order.
+func collectSubClass(holders []holder, name string) (bws, lats []uint64, pairs []model.RootPortPair, listed map[model.RootPortPair][]string) {
+	listed = map[model.RootPortPair][]string{}
+	for _, h := range holders {
+		sc, ok := h.sub[name]
+		if !ok {
+			continue
+		}
+		if sc.BandwidthBPS > 0 {
+			bws = append(bws, sc.BandwidthBPS)
+		}
+		if sc.LatencyNs > 0 {
+			lats = append(lats, sc.LatencyNs)
+		}
+		for _, p := range sc.RootPortPairs {
+			if _, seen := listed[p]; !seen {
+				pairs = append(pairs, p)
+			}
+			listed[p] = append(listed[p], h.name)
+		}
+	}
+	slices.SortFunc(pairs, comparePairs)
+	return bws, lats, pairs, listed
+}
+
+// majorityPairs applies the majority rule to the pairs of sub-class name:
+// a pair at least half of the holders list is kept, and one not every holder
+// lists is a disagreement, in pair order. owner maps each kept pair of the
+// distance to its sub-class, across names; a pair a second sub-class would
+// keep is an error.
+func majorityPairs(d model.Distance, name string, holders []holder, pairs []model.RootPortPair, listed map[model.RootPortPair][]string, owner map[model.RootPortPair]string) ([]model.RootPortPair, []PairDisagreement, error) {
+	var kept []model.RootPortPair
+	var disagree []PairDisagreement
+	for _, p := range pairs {
+		files := listed[p]
+		keep := 2*len(files) >= len(holders)
+		if keep {
+			if prev, ok := owner[p]; ok {
+				return nil, nil, fmt.Errorf("%s: root-port pair %s is in sub-classes %q and %q for at least half of the files each", d.Key(), p, prev, name)
+			}
+			owner[p] = name
+			kept = append(kept, p)
+		}
+		if len(files) < len(holders) {
+			var notIn []string
+			for _, h := range holders {
+				if !slices.Contains(files, h.name) {
+					notIn = append(notIn, h.name)
+				}
+			}
+			disagree = append(disagree, PairDisagreement{SubClass: name, Pair: p, In: files, NotIn: notIn, Kept: keep})
+		}
+	}
+	return kept, disagree, nil
+}
+
+// lowInputs names the holders whose sub-class name reads more than
+// abnormalTh below the merged bandwidth.
+func lowInputs(holders []holder, name string, merged uint64, abnormalTh float64) []string {
+	var low []string
+	for _, h := range holders {
+		if sc, ok := h.sub[name]; ok && sc.BandwidthBPS > 0 && below(sc.BandwidthBPS, merged, abnormalTh) {
+			low = append(low, h.name)
+		}
+	}
+	return low
 }
 
 // empty reports a row no input set anything for.
@@ -288,39 +325,21 @@ func (row MergeRow) empty() bool {
 
 // Baselines is the merged result as a --baseline-file overlay.
 func (r MergeResult) Baselines() baseline.Overlay {
-	ov := baseline.Overlay{Distances: rowBaselines(r.Rows)}
-	for _, s := range r.Sections {
-		m := rowBaselines(s.Rows)
-		if len(m) == 0 {
-			continue
-		}
-		if ov.Tables == nil {
-			ov.Tables = map[string]map[model.Distance]baseline.PathBaseline{}
-		}
-		ov.Tables[s.Key] = m
-	}
-	return ov
+	return overlayOf(r.Rows, r.Sections)
 }
 
-func rowBaselines(rows []MergeRow) map[model.Distance]baseline.PathBaseline {
-	out := map[model.Distance]baseline.PathBaseline{}
-	for _, row := range rows {
-		if row.empty() {
-			continue
-		}
-		b := baseline.PathBaseline{BandwidthBPS: row.BandwidthBPS, LatencyNs: row.LatencyNs}
-		for _, sc := range row.SubClasses {
-			b.SubClasses = append(b.SubClasses, baseline.SubClass{
-				Name:          sc.Name,
-				BandwidthBPS:  sc.BandwidthBPS,
-				LatencyNs:     sc.LatencyNs,
-				RootPortPairs: slices.Clone(sc.RootPortPairs),
-			})
-		}
-		out[row.Distance] = b
+func (row MergeRow) entry() (model.Distance, baseline.PathBaseline, bool) {
+	if row.empty() {
+		return row.Distance, baseline.PathBaseline{}, false
 	}
-	return out
+	b := baseline.PathBaseline{BandwidthBPS: row.BandwidthBPS, LatencyNs: row.LatencyNs}
+	for _, sc := range row.SubClasses {
+		b.SubClasses = append(b.SubClasses, subClassEntry(sc.Name, sc.BandwidthBPS, sc.LatencyNs, sc.RootPortPairs))
+	}
+	return row.Distance, b, true
 }
+
+func (s MergeSection) keyed() (string, []MergeRow) { return s.Key, s.Rows }
 
 // WriteTable writes the merged values with the spread across hosts: the top
 // level, then each section.
