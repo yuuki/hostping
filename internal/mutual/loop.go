@@ -99,19 +99,42 @@ type Loop struct {
 	started time.Time
 }
 
+// Option adjusts a Loop at New: the clock, the peer choice and the log sink,
+// which default to the wall clock, math/rand and silence. A nil function
+// keeps the default.
+type Option func(*Loop)
+
+// WithClock replaces the wall clock; tests drive the loop on a fake one.
+func WithClock(now func() time.Time) Option {
+	return func(l *Loop) {
+		if now != nil {
+			l.now = now
+		}
+	}
+}
+
+// WithIntN replaces math/rand's IntN, which picks the peer each RNIC probes
+// in a round; tests make the choice deterministic.
+func WithIntN(intn func(int) int) Option {
+	return func(l *Loop) {
+		if intn != nil {
+			l.intn = intn
+		}
+	}
+}
+
+// WithLogf receives the loop's own messages (a failing transport wait).
+func WithLogf(logf func(string, ...any)) Option {
+	return func(l *Loop) {
+		if logf != nil {
+			l.logf = logf
+		}
+	}
+}
+
 // New builds a loop over rnics probing the given pairs, as
-// topology.Graph.MutualPairs returns them for the configured scope. now
-// and intn default to the wall clock and math/rand; tests inject both.
-func New(cfg Config, rnics []model.RNIC, pairs [][2]model.RNIC, t Transport, now func() time.Time, intn func(int) int, logf func(string, ...any)) *Loop {
-	if now == nil {
-		now = time.Now
-	}
-	if intn == nil {
-		intn = rand.IntN
-	}
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
+// topology.Graph.MutualPairs returns them for the configured scope.
+func New(cfg Config, rnics []model.RNIC, pairs [][2]model.RNIC, t Transport, opts ...Option) *Loop {
 	if cfg.Spin < 0 {
 		cfg.Spin = 0
 	}
@@ -120,10 +143,13 @@ func New(cfg Config, rnics []model.RNIC, pairs [][2]model.RNIC, t Transport, now
 		idx[n.ID] = i
 	}
 	l := &Loop{
-		cfg: cfg, t: t, now: now, intn: intn, logf: logf,
+		cfg: cfg, t: t, now: time.Now, intn: rand.IntN, logf: func(string, ...any) {},
 		peers:   make([][]int, len(rnics)),
 		pairs:   map[[2]int]int{},
 		pending: map[uint32]probe{},
+	}
+	for _, o := range opts {
+		o(l)
 	}
 	for _, p := range pairs {
 		a, okA := idx[p[0].ID]

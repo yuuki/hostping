@@ -140,7 +140,7 @@ func runFor(t *testing.T, cfg Config, n int, ft *fakeTransport, d time.Duration)
 	ft.cancel = cancel
 	i := 0
 	intn := func(k int) int { i++; return i % k }
-	l := New(cfg, rs, allPairs(rs), ft, ft.clk.Now, intn, nil)
+	l := New(cfg, rs, allPairs(rs), ft, WithClock(ft.clk.Now), WithIntN(intn))
 	l.Run(ctx)
 	if !ft.closed {
 		t.Fatal("Run must close the transport")
@@ -305,7 +305,7 @@ func TestLoopSnapshotConcurrent(t *testing.T) {
 	clk := &fakeClock{t: epoch}
 	ctx, cancel := context.WithCancel(context.Background())
 	ft := &fakeTransport{clk: clk, delay: healthy(0), stopAt: epoch.Add(30 * time.Second), cancel: cancel}
-	l := New(tonConfig(), rs, allPairs(rs), ft, clk.Now, nil, nil)
+	l := New(tonConfig(), rs, allPairs(rs), ft, WithClock(clk.Now))
 	done := make(chan struct{})
 	go func() { l.Run(ctx); close(done) }()
 	for {
@@ -331,7 +331,7 @@ func TestLoopMarksCrossRailPairs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ft := &fakeTransport{clk: clk, delay: healthy(0), stopAt: epoch.Add(21 * time.Second), cancel: cancel}
-	l := New(tonConfig(), rs, allPairs(rs), ft, clk.Now, nil, nil)
+	l := New(tonConfig(), rs, allPairs(rs), ft, WithClock(clk.Now))
 	l.Run(ctx)
 	ms, _ := l.Snapshot()
 	p := byPair(ms)
@@ -385,7 +385,7 @@ func TestLoopRandomPeersCoverEveryPair(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ft := &fakeTransport{clk: clk, delay: healthy(0), stopAt: epoch.Add(21 * time.Second), cancel: cancel}
-	l := New(tonConfig(), rs, allPairs(rs), ft, clk.Now, nil, nil)
+	l := New(tonConfig(), rs, allPairs(rs), ft, WithClock(clk.Now))
 	l.Run(ctx)
 	ms, _ := l.Snapshot()
 	if len(ms) != 6 {

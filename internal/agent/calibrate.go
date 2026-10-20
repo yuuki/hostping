@@ -170,10 +170,10 @@ func (s simGate) before(context.Context) (engine.RunRequest, error) {
 		Trigger:        model.TriggerManual,
 		Mode:           model.ModeIdle,
 		HostIdle:       true,
-		Util:           s.world.LinkUtil,
+		Util:           s.world.Util(),
 		PCIe:           pcieFrom(s.world, s.g),
 		Hints:          hintsFrom(s.world),
-		GPUComputeMode: s.world.ComputeMode,
+		GPUComputeMode: s.world.ComputeModes(),
 	}, nil
 }
 

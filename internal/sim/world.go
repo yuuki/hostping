@@ -241,7 +241,7 @@ var faults = map[string]func(w *World, arg string) error{
 		if !ok {
 			mode = model.ComputeModeExclusiveProcess
 		}
-		if !gpuEndpoint(w, id) {
+		if !w.gpuEndpoint(id) {
 			return fmt.Errorf("compute_mode: %q is not a GPU endpoint", id)
 		}
 		if mode != model.ComputeModeDefault && !model.ComputeModeBlocksProbe(mode) {
@@ -255,7 +255,7 @@ var faults = map[string]func(w *World, arg string) error{
 		// root ports at full rate.
 		a, b, ok := strings.Cut(arg, ",")
 		a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-		if !ok || a == b || !rootPortLink(w, a) || !rootPortLink(w, b) {
+		if !ok || a == b || !w.rootPortLink(a) || !w.rootPortLink(b) {
 			return fmt.Errorf("fast_rp: want two distinct root-port link IDs (fast_rp:rp.0,rp.1), got %q", arg)
 		}
 		w.FastPairs[model.NewRootPortPair(a, b)] = true
@@ -319,7 +319,39 @@ func memLink(arg string) string {
 	return arg
 }
 
-func (w *World) pathBW(p model.Path) uint64 {
+// Util is the bus utilization the simulated monitor reads, keyed by link ID:
+// the overload_* faults set it, every other link is unread.
+func (w *World) Util() map[string]float64 { return w.LinkUtil }
+
+// PCIeConfigs is every RNIC's and GPU's PCIe link as sysfs would show it,
+// keyed by RNIC or endpoint ID (the *_pcie, acs and ats faults change it).
+func (w *World) PCIeConfigs() map[string]model.PCIeConfig { return w.PCIe }
+
+// ComputeModes is each GPU's compute mode as the simulated monitor reads it,
+// keyed by endpoint ID; a GPU absent here reads as unknown.
+func (w *World) ComputeModes() map[string]string { return w.ComputeMode }
+
+// Hints is the per-RNIC monitor hint the slow_start and tx_window faults
+// stand for, keyed by RNIC ID (tx_window wins for an RNIC under both).
+func (w *World) Hints() map[string]string {
+	h := map[string]string{}
+	for id, ok := range w.SlowStart {
+		if ok {
+			h[id] = model.HintSlowStart
+		}
+	}
+	for id, ok := range w.TxWindow {
+		if ok {
+			h[id] = model.HintTxWindow
+		}
+	}
+	return h
+}
+
+// PathBW is the bandwidth p reads at: its slowest hop, capped by the RNIC
+// (slow start, tx window, line rate, a busy RNIC's service load), a
+// hairpinned GPU path's root-complex level and the level's baseline.
+func (w *World) PathBW(p model.Path) uint64 {
 	var min uint64
 	for i, id := range p.LinkIDs {
 		bw := w.LinkBW[id]
@@ -330,17 +362,15 @@ func (w *World) pathBW(p model.Path) uint64 {
 	if cap, ok := w.RNICCap[p.RNIC]; ok && (min == 0 || cap < min) {
 		min = cap
 	}
-	if (w.ACS || w.ATSOff[p.RNIC]) && gpuEndpoint(w, p.Endpoint) {
+	if (w.ACS || w.ATSOff[p.RNIC]) && w.gpuEndpoint(p.Endpoint) {
 		hairpin := w.Bases[model.DistanceCrossRoot].BandwidthBPS
 		if min == 0 || hairpin < min {
 			min = hairpin
 		}
 	}
 	n, _ := w.Graph.RNIC(p.RNIC)
-	if min == 0 || n.LineRate < min {
-		if n.LineRate > 0 {
-			min = n.LineRate
-		}
+	if n.LineRate > 0 && (min == 0 || n.LineRate < min) {
+		min = n.LineRate
 	}
 	// P2P / baseline also caps achievable BW (outstanding read limit).
 	base := baseline.ForPath(w.Bases, w.levelOf(p))
@@ -362,7 +392,7 @@ func (w *World) pathBW(p model.Path) uint64 {
 // through the root complex (ACS, ATS off) reads at cross_root, and a path
 // across a fast root-port pair at same_switch. Otherwise its own distance.
 func (w *World) levelOf(p model.Path) model.Distance {
-	if (w.ACS || w.ATSOff[p.RNIC]) && gpuEndpoint(w, p.Endpoint) {
+	if (w.ACS || w.ATSOff[p.RNIC]) && w.gpuEndpoint(p.Endpoint) {
 		return model.DistanceCrossRoot
 	}
 	if len(w.FastPairs) > 0 {
@@ -373,12 +403,15 @@ func (w *World) levelOf(p model.Path) model.Distance {
 	return p.Distance
 }
 
-func rootPortLink(w *World, id string) bool {
+// rootPortLink reports whether id names a root-port link of the graph.
+func (w *World) rootPortLink(id string) bool {
 	l, ok := w.Graph.Link(id)
 	return ok && l.Kind == model.LinkKindRootPort
 }
 
-func (w *World) pathLatNs(p model.Path) uint64 {
+// PathLatNs is the host latency p reads at: its level's baseline plus the
+// extra latency of each hop (the lat fault).
+func (w *World) PathLatNs(p model.Path) uint64 {
 	lat := baseline.ForPath(w.Bases, w.levelOf(p)).LatencyNs
 	for _, id := range p.LinkIDs {
 		lat += w.LinkLatNs[id]
@@ -386,10 +419,8 @@ func (w *World) pathLatNs(p model.Path) uint64 {
 	return lat
 }
 
-func (w *World) PathBW(p model.Path) uint64    { return w.pathBW(p) }
-func (w *World) PathLatNs(p model.Path) uint64 { return w.pathLatNs(p) }
-
-func gpuEndpoint(w *World, id string) bool {
+// gpuEndpoint reports whether id names a GPU endpoint of the graph.
+func (w *World) gpuEndpoint(id string) bool {
 	e, ok := w.Graph.Endpoint(id)
 	return ok && e.Kind == model.EndpointGPU
 }
@@ -400,8 +431,8 @@ func (w *World) Loopback(rnic, endpoint string, small, large uint32) (model.Path
 	if !ok {
 		return model.PathMeasurement{}, fmt.Errorf("no path %s -> %s", rnic, endpoint)
 	}
-	bw := w.pathBW(p)
-	host := w.pathLatNs(p)
+	bw := w.PathBW(p)
+	host := w.PathLatNs(p)
 	tproc := baseline.TprocNs
 	if host >= tproc {
 		host -= tproc
@@ -425,7 +456,7 @@ func (w *World) Loopback(rnic, endpoint string, small, large uint32) (model.Path
 // so this is the single source for both simulated probers.
 func (w *World) Verbs(endpoint string) model.VerbNs {
 	v := model.VerbNs{MRReg: simHostMRRegNs, QPSetup: simQPSetupNs}
-	if gpuEndpoint(w, endpoint) {
+	if w.gpuEndpoint(endpoint) {
 		v.GPUAlloc = simGPUAllocNs
 		v.MRReg = simGPUMRRegNs
 	}
