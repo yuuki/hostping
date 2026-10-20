@@ -1,11 +1,9 @@
 package telemetry
 
 import (
-	"context"
 	"strconv"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	"github.com/yuuki/hostping/internal/model"
 )
@@ -161,17 +159,9 @@ func statusCodeRows() []statusCodeRow {
 // observed on every collection, so it is on /metrics from the first scrape.
 func (t *Telemetry) registerStatusCodeInfo() error {
 	rows := statusCodeRows()
-	opts := make([]metric.ObserveOption, len(rows))
+	sets := make([]attribute.Set, len(rows))
 	for i, r := range rows {
-		opts[i] = metric.WithAttributeSet(r.attrs())
+		sets[i] = r.attrs()
 	}
-	_, err := t.meter.Int64ObservableGauge("hostping.status_code.info",
-		metric.WithDescription("Always 1; names the status or reason that code means on the code gauge named by metric"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for _, a := range opts {
-				o.Observe(1, a)
-			}
-			return nil
-		}))
-	return err
+	return t.constGauge("hostping.status_code.info", "Always 1; names the status or reason that code means on the code gauge named by metric", sets)
 }
