@@ -1,0 +1,74 @@
+# HELP hostping_build_info Always 1; the attributes identify the running build
+# TYPE hostping_build_info gauge
+# HELP hostping_bus_utilization Intra-host bus utilization
+# TYPE hostping_bus_utilization gauge
+# HELP hostping_cpu_busy CPU busy fraction of a NUMA node over the monitor poll interval, from /proc/stat
+# TYPE hostping_cpu_busy gauge
+# HELP hostping_diagnosis_count_total Root-cause diagnoses emitted
+# TYPE hostping_diagnosis_count_total counter
+# HELP hostping_endpoint_info Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement)
+# TYPE hostping_endpoint_info gauge
+# HELP hostping_endpoint_skipped Endpoints whose loopback probes were skipped because registration failed or the GPU compute mode is not Default
+# TYPE hostping_endpoint_skipped gauge
+# HELP hostping_engine_idle_gate_skipped_total Idle runs the --idle-gate-command kept from starting: it exited 1 (reason=denied), timed out (reason=timeout), or exited with another non-zero status or could not run (reason=error)
+# TYPE hostping_engine_idle_gate_skipped_total counter
+# HELP hostping_engine_last_run_timestamp_seconds Unix time the last engine run ended, whatever its outcome
+# TYPE hostping_engine_last_run_timestamp_seconds gauge
+# HELP hostping_engine_last_success_timestamp_seconds Unix time the last engine run whose report was confirmed and written ended
+# TYPE hostping_engine_last_success_timestamp_seconds gauge
+# HELP hostping_engine_run_count_total 
+# TYPE hostping_engine_run_count_total counter
+# HELP hostping_engine_run_discarded_total Idle-mode runs discarded because the clean poll after them found the host busy or unclassified
+# TYPE hostping_engine_run_discarded_total counter
+# HELP hostping_engine_run_failed_total Engine runs that returned an error (stage=engine) or whose confirmed report could not be written (stage=report)
+# TYPE hostping_engine_run_failed_total counter
+# HELP hostping_host_idle 
+# TYPE hostping_host_idle gauge
+# HELP hostping_link_abnormal_count Algorithm 1 abnormal_cnt per hop
+# TYPE hostping_link_abnormal_count gauge
+# HELP hostping_link_status_code Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code
+# TYPE hostping_link_status_code gauge
+# HELP hostping_loopback_bandwidth_bit_per_second Intra-host loopback bandwidth from Eq.1
+# TYPE hostping_loopback_bandwidth_bit_per_second gauge
+# HELP hostping_loopback_latency_microseconds Intra-host loopback latency, small-message p50
+# TYPE hostping_loopback_latency_microseconds gauge
+# HELP hostping_monitor_host_idle 1 when the last clean monitor poll found the host idle, 0 when busy or unclassified
+# TYPE hostping_monitor_host_idle gauge
+# HELP hostping_monitor_last_poll_timestamp_seconds Unix time of the last monitor poll that completed without error
+# TYPE hostping_monitor_last_poll_timestamp_seconds gauge
+# HELP hostping_monitor_poll_errors_total Monitor polls that returned an error
+# TYPE hostping_monitor_poll_errors_total counter
+# HELP hostping_mutual_loss_ratio Same-rail RNIC-to-RNIC loss ratio
+# TYPE hostping_mutual_loss_ratio gauge
+# HELP hostping_mutual_rtt_microseconds Same-rail RNIC-to-RNIC RTT p50
+# TYPE hostping_mutual_rtt_microseconds gauge
+# HELP hostping_mutual_timeout_ratio Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent
+# TYPE hostping_mutual_timeout_ratio gauge
+# HELP hostping_path_abnormal 1 if RNIC→endpoint path is abnormal
+# TYPE hostping_path_abnormal gauge
+# HELP hostping_path_latency_reason_code Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code
+# TYPE hostping_path_latency_reason_code gauge
+# HELP hostping_path_latency_status_code Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code
+# TYPE hostping_path_latency_status_code gauge
+# HELP hostping_path_latency_streak Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not
+# TYPE hostping_path_latency_streak gauge
+# HELP hostping_path_status_code Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code
+# TYPE hostping_path_status_code gauge
+# HELP hostping_path_uncertain_reason_code Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code
+# TYPE hostping_path_uncertain_reason_code gauge
+# HELP hostping_rnic_drop_delta Packet drop counter delta
+# TYPE hostping_rnic_drop_delta gauge
+# HELP hostping_rnic_info Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement)
+# TYPE hostping_rnic_info gauge
+# HELP hostping_rnic_pause_duration_ratio Tx pause duration ratio (seconds paused per second)
+# TYPE hostping_rnic_pause_duration_ratio gauge
+# HELP hostping_rnic_throughput_bit_per_second 
+# TYPE hostping_rnic_throughput_bit_per_second gauge
+# HELP hostping_status_code_info Always 1; names the status or reason that code means on the code gauge named by metric
+# TYPE hostping_status_code_info gauge
+# HELP hostping_topology_edge_info Always 1; one series per edge of the host topology diagram, source upstream of target; link names the link of hostping.link.status_code
+# TYPE hostping_topology_edge_info gauge
+# HELP hostping_topology_node_info Always 1; one series per node of the host topology diagram (CPU package, NUMA node, memory, root port, PCIe switch, RNIC, GPU)
+# TYPE hostping_topology_node_info gauge
+# HELP hostping_verb_duration_microseconds Execution time of a loopback probe's setup verbs (ToN'24 §VI-C)
+# TYPE hostping_verb_duration_microseconds gauge

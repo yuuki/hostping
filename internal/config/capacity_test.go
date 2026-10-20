@@ -33,7 +33,7 @@ func TestParseCapacity(t *testing.T) {
 
 func TestCapacityFlags(t *testing.T) {
 	cfg := Defaults()
-	if cfg.MemCapacity.Set() || cfg.UPICapacity.Set() || cfg.UncoreUtil {
+	if cfg.MemCapacity.All != 0 || len(cfg.MemCapacity.ByLink) != 0 || cfg.UPICapacity.All != 0 || len(cfg.UPICapacity.ByLink) != 0 || cfg.UncoreUtil {
 		t.Fatal("capacities and the uncore reader must be off by default")
 	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

@@ -73,7 +73,7 @@ func newDiagram(g Graph) *diagram {
 		}
 	}
 	for _, l := range g.Links {
-		if _, ok := d.numas[l.Socket]; !ok && (l.Kind == model.LinkKindRootPort || l.Kind == "memory") {
+		if _, ok := d.numas[l.Socket]; !ok && (l.Kind == model.LinkKindRootPort || l.Kind == model.LinkKindMemory) {
 			d.numas[l.Socket] = nil
 		}
 		d.links[l.ID] = l
@@ -174,7 +174,7 @@ func (d *diagram) build() {
 		switch l.Kind {
 		case model.LinkKindRootPort:
 			d.addRootPort(l.ID, l.Socket)
-		case "pcie_switch":
+		case model.LinkKindPCIeSwitch:
 			bdf := busBDF(l.ID)
 			d.addNode(model.TopologyNode{ID: l.ID, Kind: model.TopoNodeSwitch, Title: titleOr("switch", bdf, l.ID), Socket: l.Socket, NUMA: d.numaOfRootPort(l.RootPort, l.Socket), PCIeBDF: bdf})
 		}
@@ -207,9 +207,9 @@ func (d *diagram) build() {
 		switch l.Kind {
 		case model.LinkKindRootPort:
 			d.addEdge(l, d.cpuNode(l.Socket, d.numaOfRootPort(l.ID, l.Socket)), l.ID)
-		case "pcie_switch":
+		case model.LinkKindPCIeSwitch:
 			d.addEdge(l, d.upstream(l, "", l.RootPort), l.ID)
-		case "pcie_rnic", "pcie_gpu":
+		case model.LinkKindPCIeRNIC, model.LinkKindPCIeGPU:
 			dev := l.Device
 			if dev == "" {
 				dev = strings.TrimPrefix(l.ID, "pcie.")
@@ -219,7 +219,7 @@ func (d *diagram) build() {
 				rp = l.RootPort
 			}
 			d.addEdge(l, d.upstream(l, devOf[dev], rp), dev)
-		case "memory":
+		case model.LinkKindMemory:
 			e, ok := memOf[l.Device]
 			if !ok {
 				e, ok = memOf[l.ID]

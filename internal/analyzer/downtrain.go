@@ -77,7 +77,7 @@ func diagnosePCIeDownTrain(in Input, paths []model.PathMeasurement, already []mo
 		}
 		var abn []string
 		for _, e := range g.AffinitiveEndpoints(n.ID) {
-			if m, ok := pm[n.ID+"->"+e.ID]; ok && m.Status == model.PathAbnormal {
+			if m, ok := pm[pathKey(n.ID, e.ID)]; ok && m.Status == model.PathAbnormal {
 				abn = append(abn, e.ID)
 			}
 		}
@@ -89,7 +89,7 @@ func diagnosePCIeDownTrain(in Input, paths []model.PathMeasurement, already []mo
 			pcieEvidence(cfg), downTrainHalves(speed, width), gbpsString(pci.NegotiatedBPS(cfg)), gbpsString(lineRate))
 		out = append(out, model.RootCause{
 			Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link down-trained",
-			Links: []string{"pcie." + n.ID}, RNICs: []string{n.ID}, Endpoints: abn,
+			Links: []string{model.PCIeLinkID(n.ID)}, RNICs: []string{n.ID}, Endpoints: abn,
 			Confidence: downTrainConfidence(len(abn) > 0),
 			Evidence:   ev + symptomEvidence(len(abn)),
 		})
@@ -107,13 +107,13 @@ func diagnosePCIeDownTrain(in Input, paths []model.PathMeasurement, already []mo
 		}
 		abn := 0
 		if aff := affinitiveRNIC(g, e); aff != "" && !misconfig {
-			if m, ok := pm[aff+"->"+e.ID]; ok && m.Status == model.PathAbnormal {
+			if m, ok := pm[pathKey(aff, e.ID)]; ok && m.Status == model.PathAbnormal {
 				abn = 1
 			}
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link down-trained",
-			Links: []string{"pcie." + e.ID}, Endpoints: []string{e.ID},
+			Links: []string{model.PCIeLinkID(e.ID)}, Endpoints: []string{e.ID},
 			Confidence: downTrainConfidence(abn > 0),
 			Evidence:   fmt.Sprintf("PCIe %s trained below its width capability", pcieEvidence(cfg)) + symptomEvidence(abn),
 		})
@@ -137,13 +137,13 @@ func rnicPCIeUndersized(n model.RNIC, cfg model.PCIeConfig) (model.RootCause, bo
 	}
 	return model.RootCause{
 		Code: model.CauseRNICPCIeUndersized, Summary: "RNIC PCIe link narrower than its line rate by design",
-		Links: []string{"pcie." + n.ID}, RNICs: []string{n.ID}, Confidence: "low",
+		Links: []string{model.PCIeLinkID(n.ID)}, RNICs: []string{n.ID}, Confidence: model.ConfidenceLow,
 		Evidence: fmt.Sprintf("PCIe %s trained at its maximum; %s cannot carry the %s line rate; not a down-train",
 			pcieEvidence(cfg), gbpsString(pci.NegotiatedBPS(cfg)), gbpsString(lineRate)),
 	}, true
 }
 
-func downTrainConfidence(symptom bool) string {
+func downTrainConfidence(symptom bool) model.Confidence {
 	if symptom {
 		return "high"
 	}

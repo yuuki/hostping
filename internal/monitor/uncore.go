@@ -461,7 +461,7 @@ func memLinkDies(g topology.Graph, sysroot string) (map[string]memLink, map[stri
 	links := map[string]memLink{}
 	skipped := map[string]string{}
 	for _, l := range g.Links {
-		if l.Kind != "memory" {
+		if l.Kind != model.LinkKindMemory {
 			continue
 		}
 		if _, ok := utilCapacity(g, l.ID); !ok {

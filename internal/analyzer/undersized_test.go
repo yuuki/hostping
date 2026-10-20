@@ -101,7 +101,7 @@ func TestRNICDownTrainedUndersizedKeepsConfidence(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		ms   []model.PathMeasurement
-		want string
+		want model.Confidence
 	}{
 		{"abnormal paths", abnormalRNIC0(g), "high"},
 		{"config space only", gen5Measurements(g, 270*gbps, 273*gbps), "medium"},
@@ -159,7 +159,7 @@ func runWorld(t *testing.T, fault string, mode model.RunMode, rnic0 *model.PCIeC
 	if rnic0 != nil {
 		w.PCIe["rnic0"] = *rnic0
 	}
-	e := engine.New(config.Defaults(), g, engine.SimProber{World: w})
+	e := engine.New(config.Defaults(), g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{
 		Trigger: model.TriggerManual, Mode: mode, BusyRNICs: w.Busy, Util: w.LinkUtil, PCIe: w.PCIe,
 	})

@@ -23,7 +23,7 @@ func TestEngineSkipsInfiniBandPortWithoutLID(t *testing.T) {
 				if n.ID == "rnic1" {
 					return model.PathMeasurement{}, fmt.Errorf("%w: synthetic", sentinel)
 				}
-				return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+				return flatMeasurement(n, ep), nil
 			},
 		})
 		e.Logf = sink.logf
@@ -62,7 +62,7 @@ func TestEngineLogsLoopbackAddressingOncePerRNIC(t *testing.T) {
 	var sink logSink
 	e := New(config.Defaults(), g, stubProber{
 		loop: func(n model.RNIC, ep model.Endpoint) (model.PathMeasurement, error) {
-			m := model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}
+			m := flatMeasurement(n, ep)
 			if n.ID == "rnic0" {
 				m.Addressing = model.PortAddressing{Mode: mode, Port: 1, LID: 7}
 			}
@@ -80,9 +80,7 @@ func TestEngineLogsLoopbackAddressingOncePerRNIC(t *testing.T) {
 		return n
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-			t.Fatal(err)
-		}
+		runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	}
 	if got := count(); got != 1 {
 		t.Fatalf("addressing logged %d times over two runs, want 1: %q", got, sink.lines)
@@ -101,9 +99,7 @@ func TestEngineLogsLoopbackAddressingOncePerRNIC(t *testing.T) {
 		t.Fatalf("want %q in %q", want, sink.lines)
 	}
 	mode = model.AddrIBLIDGRH
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if got := count(); got != 2 {
 		t.Fatalf("a changed addressing must be logged again, got %d lines", got)
 	}
@@ -133,10 +129,7 @@ func TestEngineLeavesInfiniBandOutOfMutualByDefault(t *testing.T) {
 		})
 		e.Logf = sink.logf
 		for i := 0; i < 2; i++ {
-			rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-			if err != nil {
-				t.Fatal(err)
-			}
+			rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 			if len(rep.Mutual) != 0 {
 				t.Fatalf("scope %s: InfiniBand pairs measured: %+v", scope, rep.Mutual)
 			}
@@ -165,9 +158,7 @@ func TestEngineLeavesInfiniBandOutOfMutualByDefault(t *testing.T) {
 		},
 	})
 	e.Logf = func(string, ...any) {}
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if probed == 0 {
 		t.Fatal("--mutual-infiniband must pair InfiniBand RNICs sharing a subnet prefix")
 	}

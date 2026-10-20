@@ -22,7 +22,7 @@ import (
 
 // failingProber fails every loopback probe with an error the engine does not
 // skip, so the whole run fails.
-type failingProber struct{ engine.SimProber }
+type failingProber struct{ sim.Prober }
 
 func (failingProber) Loopback(context.Context, model.RNIC, model.Endpoint, uint32, uint32) (model.PathMeasurement, error) {
 	return model.PathMeasurement{}, errors.New("loopback: device wedged")
@@ -61,7 +61,7 @@ func newTestDaemon(t *testing.T, prober engine.Prober) *testDaemon {
 	cfg.IdleInterval = time.Hour
 	g := topology.Fig2()
 	if prober == nil {
-		prober = engine.SimProber{World: sim.New(g)}
+		prober = sim.Prober{World: sim.New(g)}
 	}
 	eng := engine.New(cfg, g, prober)
 	eng.Logf = func(string, ...any) {}

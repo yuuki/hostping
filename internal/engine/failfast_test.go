@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,46 +16,10 @@ import (
 var wcRetryExceeded = model.PortLoopbackError(
 	fmt.Errorf("%w: Wc: transport retry counter exceeded (12)", model.ErrProbe))
 
-// countProber counts loopbacks per RNIC and lets fail decide each one's
-// outcome from the RNIC and the RNIC's probe count so far (0 = first).
-type countProber struct {
-	fail  func(n model.RNIC, i int) error
-	calls map[string]int
-}
-
-func (p *countProber) Loopback(_ context.Context, n model.RNIC, ep model.Endpoint, _, _ uint32) (model.PathMeasurement, error) {
-	if p.calls == nil {
-		p.calls = map[string]int{}
-	}
-	i := p.calls[n.ID]
-	p.calls[n.ID] = i + 1
-	if p.fail != nil {
-		if err := p.fail(n, i); err != nil {
-			return model.PathMeasurement{}, err
-		}
-	}
-	return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
-}
-
-func (p *countProber) Mutual(_ context.Context, src, dst model.RNIC) (model.MutualMeasurement, error) {
-	return model.MutualMeasurement{Src: src.ID, Dst: dst.ID, Connected: true}, nil
-}
-
 func failFastGraph(linkLayer string) topology.Graph {
 	g := topology.Fig2()
 	g.RNICs[0].LinkLayer = linkLayer
 	return g
-}
-
-func runFailFast(t *testing.T, g topology.Graph, p *countProber) model.Report {
-	t.Helper()
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep
 }
 
 // skippedOf returns, per endpoint of rnic's probe paths, the skip reason the
@@ -88,21 +51,21 @@ func skippedOf(rep model.Report, g topology.Graph, rnic string) map[string]strin
 // names the first failure, and the other RNICs are probed as usual.
 func TestEngineInfiniBandPortFailureStopsTheRNIC(t *testing.T) {
 	g := failFastGraph(model.LinkLayerInfiniBand)
-	p := &countProber{fail: func(n model.RNIC, _ int) error {
-		if n.ID == "rnic0" {
+	p := countProber(func(rnic string, _ int) error {
+		if rnic == "rnic0" {
 			return wcRetryExceeded
 		}
 		return nil
-	}}
-	rep := runFailFast(t, g, p)
-	if got := p.calls["rnic0"]; got != 1 {
+	})
+	rep := runIdle(t, config.Defaults(), g, p)
+	if got := p.byRNIC("rnic0"); got != 1 {
 		t.Fatalf("rnic0 probed %d times, want 1", got)
 	}
 	paths := g.ProbePaths("rnic0", model.ModeIdle)
 	if len(paths) < 2 {
 		t.Fatalf("fixture needs several rnic0 paths, has %d", len(paths))
 	}
-	if got := p.calls["rnic1"]; got != len(g.ProbePaths("rnic1", model.ModeIdle)) {
+	if got := p.byRNIC("rnic1"); got != len(g.ProbePaths("rnic1", model.ModeIdle)) {
 		t.Fatalf("rnic1 probed %d times, want every path", got)
 	}
 	skipped := skippedOf(rep, g, "rnic0")
@@ -126,14 +89,11 @@ func TestEngineInfiniBandPortFailureStopsTheRNIC(t *testing.T) {
 	}
 
 	// The decision lasts one run: the next run probes the port again.
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 	for i := 0; i < 2; i++ {
-		if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-			t.Fatal(err)
-		}
+		runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	}
-	if got := p.calls["rnic0"]; got != 3 {
+	if got := p.byRNIC("rnic0"); got != 3 {
 		t.Fatalf("rnic0 probed %d times over three runs, want once per run", got)
 	}
 }
@@ -142,15 +102,15 @@ func TestEngineInfiniBandPortFailureStopsTheRNIC(t *testing.T) {
 // later failure is about that endpoint and the rest are still probed.
 func TestEngineInfiniBandFailureAfterSuccessKeepsProbing(t *testing.T) {
 	g := failFastGraph(model.LinkLayerInfiniBand)
-	p := &countProber{fail: func(n model.RNIC, i int) error {
-		if n.ID == "rnic0" && i > 0 {
+	p := countProber(func(rnic string, i int) error {
+		if rnic == "rnic0" && i > 0 {
 			return wcRetryExceeded
 		}
 		return nil
-	}}
-	rep := runFailFast(t, g, p)
+	})
+	rep := runIdle(t, config.Defaults(), g, p)
 	paths := g.ProbePaths("rnic0", model.ModeIdle)
-	if got := p.calls["rnic0"]; got != len(paths) {
+	if got := p.byRNIC("rnic0"); got != len(paths) {
 		t.Fatalf("rnic0 probed %d times, want all %d paths", got, len(paths))
 	}
 	for ep, reason := range skippedOf(rep, g, "rnic0") {
@@ -177,15 +137,15 @@ func TestEngineFailFastScope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := failFastGraph(tc.linkLayer)
-			p := &countProber{fail: func(n model.RNIC, _ int) error {
-				if n.ID == "rnic0" {
+			p := countProber(func(rnic string, _ int) error {
+				if rnic == "rnic0" {
 					return tc.err
 				}
 				return nil
-			}}
-			rep := runFailFast(t, g, p)
+			})
+			rep := runIdle(t, config.Defaults(), g, p)
 			paths := g.ProbePaths("rnic0", model.ModeIdle)
-			if got := p.calls["rnic0"]; got != len(paths) {
+			if got := p.byRNIC("rnic0"); got != len(paths) {
 				t.Fatalf("rnic0 probed %d times, want all %d paths", got, len(paths))
 			}
 			skipped := skippedOf(rep, g, "rnic0")

@@ -1,0 +1,136 @@
+{
+  "links": [
+    {
+      "id": "pcie.rnic0",
+      "kind": "pcie_rnic",
+      "device": "mlx5_0",
+      "socket": 1,
+      "root_port": "rp.0",
+      "capacity_bps": 252000000000,
+      "negotiated_bps": 126000000000,
+      "capacity_assumed": true,
+      "upstream": "sw.0"
+    },
+    {
+      "id": "",
+      "kind": "",
+      "socket": 0,
+      "capacity_bps": 0
+    }
+  ],
+  "nodes": [
+    {
+      "id": "gpu0",
+      "kind": "gpu",
+      "title": "GPU 0",
+      "socket": 1,
+      "numa": 2,
+      "pcie_bdf": "0000:17:00.0"
+    },
+    {
+      "id": "",
+      "kind": "",
+      "title": "",
+      "socket": 0,
+      "numa": -1
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "link": "none",
+      "source": "socket0",
+      "target": "numa0",
+      "kind": "package",
+      "capacity_bps": 1,
+      "negotiated_bps": 2,
+      "capacity_assumed": true
+    },
+    {
+      "id": "",
+      "link": "",
+      "source": "",
+      "target": "",
+      "kind": "",
+      "capacity_bps": 0,
+      "negotiated_bps": 0,
+      "capacity_assumed": false
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "gpu0",
+      "kind": "gpu",
+      "index": 3,
+      "socket": 1,
+      "root_port": "rp.0",
+      "numa": 2,
+      "pcie_bdf": "0000:17:00.0",
+      "switch": "sw.0"
+    },
+    {
+      "id": "",
+      "kind": "",
+      "index": 0,
+      "socket": 0,
+      "numa": 0
+    }
+  ],
+  "rnics": [
+    {
+      "id": "rnic0",
+      "device": "mlx5_0",
+      "netdev": "eth0",
+      "socket": 1,
+      "numa": 2,
+      "root_port": "rp.0",
+      "pcie_bdf": "0000:18:00.0",
+      "line_rate_bps": 400000000000,
+      "pcie_capacity_bps": 252000000000,
+      "gid_index": 3,
+      "link_layer": "Ethernet",
+      "fabric": "v4:10.0.1.0",
+      "switch": "sw.0"
+    },
+    {
+      "id": "",
+      "device": "",
+      "netdev": "",
+      "socket": 0,
+      "numa": 0,
+      "root_port": "",
+      "line_rate_bps": 0
+    }
+  ],
+  "excluded": [
+    {
+      "device": "mlx5_9",
+      "pcie_bdf": "0000:99:00.0",
+      "reason": "operator"
+    },
+    {
+      "device": "",
+      "reason": ""
+    }
+  ],
+  "paths": [
+    {
+      "rnic": "rnic0",
+      "endpoint": "gpu0",
+      "link_ids": [
+        "pcie.rnic0",
+        "sw.0",
+        "pcie.gpu0"
+      ],
+      "distance": 1,
+      "affinitive": true
+    },
+    {
+      "rnic": "",
+      "endpoint": "",
+      "link_ids": null,
+      "distance": 0,
+      "affinitive": false
+    }
+  ]
+}

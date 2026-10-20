@@ -43,7 +43,7 @@ func dead(src, dst string) model.MutualMeasurement {
 type causeKey struct {
 	code  string
 	rnics string
-	conf  string
+	conf  model.Confidence
 }
 
 func keys(cs []model.RootCause) []causeKey {

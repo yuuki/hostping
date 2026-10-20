@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"testing"
 
 	"github.com/yuuki/hostping/internal/config"
@@ -30,10 +29,7 @@ func TestEngineUsesFullMutualWindow(t *testing.T) {
 	e.Mutual = stubWindow{ready: true, ms: []model.MutualMeasurement{
 		{Src: a, Dst: b, Connected: true, Sent: 200, Recv: 100, Reliable: true},
 	}}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle, DropDelta: map[string]uint64{a: 3}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle, DropDelta: map[string]uint64{a: 3}})
 	if burst != 0 {
 		t.Fatalf("a full window must replace the burst, prober asked %d times", burst)
 	}
@@ -60,10 +56,7 @@ func TestEngineFallsBackToBurstBeforeWindowFills(t *testing.T) {
 		return model.MutualMeasurement{Src: src.ID, Dst: dst.ID, Connected: true, Sent: 64, Recv: 64}, nil
 	}})
 	e.Mutual = stubWindow{ready: false}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if want := len(g.MutualPairs(config.Defaults().MutualScope)); burst != want || len(rep.Mutual) != want {
 		t.Fatalf("want a burst over %d pairs, prober asked %d times, report %d", want, burst, len(rep.Mutual))
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/yuuki/hostping/internal/config"
@@ -13,34 +12,18 @@ import (
 	"github.com/yuuki/hostping/internal/topology"
 )
 
-// probeLog answers every loopback and records which endpoints were probed.
-type probeLog struct {
-	stubProber
-	mu     sync.Mutex
-	probed map[string]int
-}
-
-func newProbeLog() *probeLog { return &probeLog{probed: map[string]int{}} }
-
-func (p *probeLog) Loopback(ctx context.Context, n model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	p.mu.Lock()
-	p.probed[ep.ID]++
-	p.mu.Unlock()
-	return p.stubProber.Loopback(ctx, n, ep, small, large)
-}
-
 // A GPU whose compute mode is not Default is never touched, and says so the
 // way every other skip does: in the report, in the per-kind count behind
 // hostping.endpoint.skipped, and in the engine's log line. The other GPUs and
 // every memory path are probed and diagnosed as usual.
 func TestEngineSkipsNonDefaultComputeModeGPUs(t *testing.T) {
 	g := topology.Fig2()
-	p := newProbeLog()
+	p := &flatProber{}
 	var sink logSink
 	e := New(config.Defaults(), g, p)
 	e.Logf = sink.logf
 
-	rep, err := e.Run(context.Background(), RunRequest{
+	rep := runWith(t, e, RunRequest{
 		Mode: model.ModeIdle,
 		GPUComputeMode: map[string]string{
 			"gpu0": model.ComputeModeExclusiveProcess,
@@ -48,16 +31,13 @@ func TestEngineSkipsNonDefaultComputeModeGPUs(t *testing.T) {
 			"gpu2": model.ComputeModeDefault,
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, id := range []string{"gpu0", "gpu1"} {
-		if p.probed[id] != 0 {
-			t.Errorf("%s probed %d times, want 0", id, p.probed[id])
+		if n := p.byEndpoint(id); n != 0 {
+			t.Errorf("%s probed %d times, want 0", id, n)
 		}
 	}
 	for _, id := range []string{"gpu2", "gpu3", "mem0"} {
-		if p.probed[id] == 0 {
+		if p.byEndpoint(id) == 0 {
 			t.Errorf("%s was not probed", id)
 		}
 	}
@@ -120,18 +100,13 @@ func TestEngineProbesGPUsWithUnknownComputeMode(t *testing.T) {
 		"default": {"gpu0": model.ComputeModeDefault},
 	} {
 		t.Run(name, func(t *testing.T) {
-			p := newProbeLog()
-			e := New(config.Defaults(), topology.Fig2(), p)
-			e.Logf = func(string, ...any) {}
-			rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle, GPUComputeMode: modes})
-			if err != nil {
-				t.Fatal(err)
-			}
+			p := &flatProber{}
+			rep := runWith(t, New(config.Defaults(), topology.Fig2(), p), RunRequest{Mode: model.ModeIdle, GPUComputeMode: modes})
 			if len(rep.SkippedEndpoints) != 0 {
 				t.Fatalf("skips = %+v, want none", rep.SkippedEndpoints)
 			}
-			if p.probed["gpu0"] == 0 || p.probed["gpu1"] == 0 {
-				t.Fatalf("probed = %v, want gpu0 and gpu1 probed", p.probed)
+			if p.byEndpoint("gpu0") == 0 || p.byEndpoint("gpu1") == 0 {
+				t.Fatalf("probed = %v, want gpu0 and gpu1 probed", p.calls)
 			}
 		})
 	}
@@ -158,12 +133,8 @@ func TestEngineSimComputeModeFault(t *testing.T) {
 	if err := w.ApplyFault("compute_mode:gpu3=Prohibited"); err != nil {
 		t.Fatal(err)
 	}
-	e := New(config.Defaults(), g, SimProber{World: w})
-	e.Logf = func(string, ...any) {}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle, GPUComputeMode: w.ComputeMode})
-	if err != nil {
-		t.Fatal(err)
-	}
+	e := quietEngine(config.Defaults(), g, sim.Prober{World: w})
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle, GPUComputeMode: w.ComputeMode})
 	if len(rep.SkippedEndpoints) != 1 || rep.SkippedEndpoints[0].Endpoints[0] != "gpu3" ||
 		rep.SkippedEndpoints[0].Reason != "compute_mode: Prohibited" {
 		t.Fatalf("skips = %+v, want gpu3 compute_mode: Prohibited", rep.SkippedEndpoints)
@@ -185,11 +156,8 @@ func (p *releaseProber) ReleaseGPU() { p.released++ }
 // idle daemon holds none between runs.
 func TestEngineReleasesGPUAfterEveryRun(t *testing.T) {
 	p := &releaseProber{}
-	e := New(config.Defaults(), topology.Fig2(), p)
-	e.Logf = func(string, ...any) {}
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	e := quietEngine(config.Defaults(), topology.Fig2(), p)
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if p.released != 1 {
 		t.Fatalf("released %d times after one run, want 1", p.released)
 	}

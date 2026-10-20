@@ -41,8 +41,8 @@ const FileName = "state.json"
 // which of its links look unhealthy.
 const fileMode = 0o600
 
-// BootIDPath is where Linux exposes the identity of the running boot.
-const BootIDPath = "/proc/sys/kernel/random/boot_id"
+// bootIDPath is where Linux exposes the identity of the running boot.
+const bootIDPath = "/proc/sys/kernel/random/boot_id"
 
 // File is the content of the state file.
 type File struct {
@@ -116,7 +116,7 @@ func Fingerprint(g topology.Graph) string {
 
 // KernelBootID reads the running kernel's boot ID.
 func KernelBootID() (string, error) {
-	return readBootID(BootIDPath)
+	return readBootID(bootIDPath)
 }
 
 func readBootID(path string) (string, error) {

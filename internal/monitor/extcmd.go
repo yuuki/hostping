@@ -68,14 +68,10 @@ func (c *gpuUtilCache) runner() runner {
 	return runBounded
 }
 
-// get returns GPU utilization by normalized BDF, refreshing at most once per
-// every. A failed query is cached too, so a missing nvidia-smi is not probed
-// every second. The first call after process start always samples.
-func (c *gpuUtilCache) get(ctx context.Context, every time.Duration) map[string]float64 {
-	return c.sample(ctx, every).util
-}
-
-// sample is get with the compute modes read alongside the utilization.
+// sample returns the GPU utilization and compute modes by normalized BDF,
+// refreshing at most once per every. A failed query is cached too, so a
+// missing nvidia-smi is not probed every second. The first call after process
+// start always samples.
 func (c *gpuUtilCache) sample(ctx context.Context, every time.Duration) nvidiaSample {
 	c.mu.Lock()
 	defer c.mu.Unlock()

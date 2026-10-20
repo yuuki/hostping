@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/monitor"
 	"github.com/yuuki/hostping/internal/topology"
 )
@@ -13,10 +14,10 @@ import (
 // the operator's --mem-channel-capacity / --upi-capacity, which also makes
 // those links eligible for a utilization.
 func applyCapacities(g *topology.Graph, cfg config.Config) error {
-	if err := g.SetCapacity("memory", cfg.MemCapacity.All, cfg.MemCapacity.ByLink); err != nil {
+	if err := g.SetCapacity(model.LinkKindMemory, cfg.MemCapacity.All, cfg.MemCapacity.ByLink); err != nil {
 		return err
 	}
-	return g.SetCapacity("upi", cfg.UPICapacity.All, cfg.UPICapacity.ByLink)
+	return g.SetCapacity(model.LinkKindUPI, cfg.UPICapacity.All, cfg.UPICapacity.ByLink)
 }
 
 // liveSampler is the hardware sampler, with the uncore memory and

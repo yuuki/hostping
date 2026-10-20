@@ -435,21 +435,14 @@ func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, 
 			req.HostIdle = false
 		}
 	} else {
+		// liveRequest is a complete request (requestFromDecision fills every
+		// field, Trigger included); only the --sim inputs are added here.
 		live, err := liveRequest(ctx, mon, cfg)
 		if err != nil {
 			return err
 		}
-		req.Mode = live.Mode
-		req.BusyRNICs = live.BusyRNICs
-		req.HostIdle = live.HostIdle
-		req.DropDelta = live.DropDelta
-		req.Util = live.Util
-		req.GPUComputeMode = live.GPUComputeMode
-		req.CPULoad = live.CPULoad
-		req.Trigger = live.Trigger
-		if req.Trigger == "" {
-			req.Trigger = model.TriggerManual
-		}
+		live.PCIe, live.Hints = req.PCIe, req.Hints
+		req = live
 	}
 	// Sampled after the warmup polls and before the probes start, so the
 	// utilization is the host's load, not hostping's own traffic.
@@ -653,7 +646,7 @@ func pcieFrom(w *sim.World, g topology.Graph) map[string]model.PCIeConfig {
 		}
 	}
 	for _, l := range g.Links {
-		if l.Kind != "root_port" && l.Kind != "pcie_switch" {
+		if l.Kind != model.LinkKindRootPort && l.Kind != model.LinkKindPCIeSwitch {
 			continue
 		}
 		put(l.ID, bdfFromTopoID(l.ID))
@@ -683,12 +676,12 @@ func hintsFrom(w *sim.World) map[string]string {
 	h := map[string]string{}
 	for id, ok := range w.SlowStart {
 		if ok {
-			h[id] = "slow_start"
+			h[id] = model.HintSlowStart
 		}
 	}
 	for id, ok := range w.TxWindow {
 		if ok {
-			h[id] = "tx_window"
+			h[id] = model.HintTxWindow
 		}
 	}
 	return h

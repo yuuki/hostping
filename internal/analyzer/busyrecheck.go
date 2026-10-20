@@ -135,7 +135,7 @@ func applyBusyRecheck(paths []model.PathMeasurement, mode model.RunMode, busy ma
 		if m.Status != model.PathAbnormal || !busy[m.RNIC] {
 			continue
 		}
-		r, ok := rc[m.RNIC+"->"+m.Endpoint]
+		r, ok := rc[pathKey(m.RNIC, m.Endpoint)]
 		if !ok {
 			continue
 		}

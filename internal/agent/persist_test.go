@@ -57,7 +57,7 @@ func startDaemon(t *testing.T, cfg config.Config, boot string) daemonProcess {
 	t.Helper()
 	g := topology.Fig2()
 	polluted := true
-	eng := engine.New(cfg, g, pollutedProber{SimProber: engine.SimProber{World: sim.New(g)}, polluted: &polluted})
+	eng := engine.New(cfg, g, pollutedProber{Prober: sim.Prober{World: sim.New(g)}, polluted: &polluted})
 	eng.Logf = func(string, ...any) {}
 	mon := monitor.New(cfg, g, monitor.StaticSampler{GPU: idleGPUs(g, nil)})
 	logs := &logLines{}

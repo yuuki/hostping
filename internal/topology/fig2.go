@@ -2,12 +2,7 @@ package topology
 
 import "github.com/yuuki/hostping/internal/model"
 
-const (
-	lineRate200G = 200_000_000_000
-	pcieGen4x16  = 252_000_000_000
-	upiCap       = 300_000_000_000
-	memCap       = 400_000_000_000
-)
+const lineRate200G = 200_000_000_000
 
 // Fig2 returns the training-machine topology from NSDI'23 Fig.2:
 // two Xeon sockets connected by UPI; each socket has two CPU root ports,
@@ -38,28 +33,28 @@ func Fig2() Graph {
 		return model.Link{ID: id, Kind: kind, Device: dev, Socket: sock, RootPort: rp, CapacityBPS: cap}
 	}
 	links := []model.Link{
-		link("pcie.rnic0", "pcie_rnic", "rnic0", "rp.0", 0, pcieGen4x16),
-		link("pcie.rnic1", "pcie_rnic", "rnic1", "rp.1", 0, pcieGen4x16),
-		link("pcie.rnic2", "pcie_rnic", "rnic2", "rp.2", 1, pcieGen4x16),
-		link("pcie.rnic3", "pcie_rnic", "rnic3", "rp.3", 1, pcieGen4x16),
-		link("pcie.gpu0", "pcie_gpu", "gpu0", "rp.0", 0, pcieGen4x16),
-		link("pcie.gpu1", "pcie_gpu", "gpu1", "rp.0", 0, pcieGen4x16),
-		link("pcie.gpu2", "pcie_gpu", "gpu2", "rp.1", 0, pcieGen4x16),
-		link("pcie.gpu3", "pcie_gpu", "gpu3", "rp.1", 0, pcieGen4x16),
-		link("pcie.gpu4", "pcie_gpu", "gpu4", "rp.2", 1, pcieGen4x16),
-		link("pcie.gpu5", "pcie_gpu", "gpu5", "rp.2", 1, pcieGen4x16),
-		link("pcie.gpu6", "pcie_gpu", "gpu6", "rp.3", 1, pcieGen4x16),
-		link("pcie.gpu7", "pcie_gpu", "gpu7", "rp.3", 1, pcieGen4x16),
-		link("sw.0", "pcie_switch", "sw0", "rp.0", 0, pcieGen4x16),
-		link("sw.1", "pcie_switch", "sw1", "rp.1", 0, pcieGen4x16),
-		link("sw.2", "pcie_switch", "sw2", "rp.2", 1, pcieGen4x16),
-		link("sw.3", "pcie_switch", "sw3", "rp.3", 1, pcieGen4x16),
-		link("rp.0", "root_port", "rp0", "rp.0", 0, pcieGen4x16),
-		link("rp.1", "root_port", "rp1", "rp.1", 0, pcieGen4x16),
-		link("rp.2", "root_port", "rp2", "rp.2", 1, pcieGen4x16),
-		link("rp.3", "root_port", "rp3", "rp.3", 1, pcieGen4x16),
-		link("mem.0", "memory", "mem0", "", 0, memCap),
-		link("mem.1", "memory", "mem1", "", 1, memCap),
+		link("pcie.rnic0", model.LinkKindPCIeRNIC, "rnic0", "rp.0", 0, pcieGen4x16),
+		link("pcie.rnic1", model.LinkKindPCIeRNIC, "rnic1", "rp.1", 0, pcieGen4x16),
+		link("pcie.rnic2", model.LinkKindPCIeRNIC, "rnic2", "rp.2", 1, pcieGen4x16),
+		link("pcie.rnic3", model.LinkKindPCIeRNIC, "rnic3", "rp.3", 1, pcieGen4x16),
+		link("pcie.gpu0", model.LinkKindPCIeGPU, "gpu0", "rp.0", 0, pcieGen4x16),
+		link("pcie.gpu1", model.LinkKindPCIeGPU, "gpu1", "rp.0", 0, pcieGen4x16),
+		link("pcie.gpu2", model.LinkKindPCIeGPU, "gpu2", "rp.1", 0, pcieGen4x16),
+		link("pcie.gpu3", model.LinkKindPCIeGPU, "gpu3", "rp.1", 0, pcieGen4x16),
+		link("pcie.gpu4", model.LinkKindPCIeGPU, "gpu4", "rp.2", 1, pcieGen4x16),
+		link("pcie.gpu5", model.LinkKindPCIeGPU, "gpu5", "rp.2", 1, pcieGen4x16),
+		link("pcie.gpu6", model.LinkKindPCIeGPU, "gpu6", "rp.3", 1, pcieGen4x16),
+		link("pcie.gpu7", model.LinkKindPCIeGPU, "gpu7", "rp.3", 1, pcieGen4x16),
+		link("sw.0", model.LinkKindPCIeSwitch, "sw0", "rp.0", 0, pcieGen4x16),
+		link("sw.1", model.LinkKindPCIeSwitch, "sw1", "rp.1", 0, pcieGen4x16),
+		link("sw.2", model.LinkKindPCIeSwitch, "sw2", "rp.2", 1, pcieGen4x16),
+		link("sw.3", model.LinkKindPCIeSwitch, "sw3", "rp.3", 1, pcieGen4x16),
+		link("rp.0", model.LinkKindRootPort, "rp0", "rp.0", 0, pcieGen4x16),
+		link("rp.1", model.LinkKindRootPort, "rp1", "rp.1", 0, pcieGen4x16),
+		link("rp.2", model.LinkKindRootPort, "rp2", "rp.2", 1, pcieGen4x16),
+		link("rp.3", model.LinkKindRootPort, "rp3", "rp.3", 1, pcieGen4x16),
+		link("mem.0", model.LinkKindMemory, "mem0", "", 0, memCap),
+		link("mem.1", model.LinkKindMemory, "mem1", "", 1, memCap),
 		link("upi.0", model.LinkKindUPI, "upi0", "", 0, upiCap),
 	}
 
@@ -68,9 +63,9 @@ func Fig2() Graph {
 	for i := range links {
 		l := &links[i]
 		switch l.Kind {
-		case "pcie_rnic", "pcie_gpu":
+		case model.LinkKindPCIeRNIC, model.LinkKindPCIeGPU:
 			l.Upstream = "sw." + l.RootPort[len("rp."):]
-		case "pcie_switch":
+		case model.LinkKindPCIeSwitch:
 			l.Upstream = l.RootPort
 		}
 	}
@@ -107,13 +102,13 @@ func Fig2SNC() Graph {
 
 	var links []model.Link
 	for _, l := range g.Links {
-		if l.Kind == "memory" || l.Kind == model.LinkKindUPI {
+		if l.Kind == model.LinkKindMemory || l.Kind == model.LinkKindUPI {
 			continue
 		}
 		links = append(links, l)
 	}
 	for i := 0; i < 4; i++ {
-		links = append(links, model.Link{ID: "mem." + itoa(i), Kind: "memory", Device: "mem" + itoa(i), Socket: i / 2, CapacityBPS: memCap})
+		links = append(links, model.Link{ID: "mem." + itoa(i), Kind: model.LinkKindMemory, Device: "mem" + itoa(i), Socket: i / 2, CapacityBPS: memCap})
 	}
 	// A real host's mesh capacity is unknown; the simulator still needs a
 	// healthy bandwidth for it, so it gets the memory channel's.
@@ -146,22 +141,22 @@ func enumerateFig2(g Graph, upi string) []model.Path {
 	for _, n := range g.RNICs {
 		for _, e := range g.Endpoints {
 			p := model.Path{RNIC: n.ID, Endpoint: e.ID}
-			p.LinkIDs = append(p.LinkIDs, "pcie."+n.ID, sw[n.RootPort])
+			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(n.ID), sw[n.RootPort])
 			switch {
 			case e.Kind == model.EndpointGPU && e.RootPort == n.RootPort:
 				p.Distance = model.DistanceSameSwitch
 				p.Affinitive = true
-				p.LinkIDs = append(p.LinkIDs, "pcie."+e.ID)
+				p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
 			case e.Kind == model.EndpointGPU && e.Socket == n.Socket:
 				p.Distance = model.DistanceCrossRoot
 				p.LinkIDs = append(p.LinkIDs, n.RootPort)
 				if e.NUMA != n.NUMA {
 					p.LinkIDs = append(p.LinkIDs, meshID(n.NUMA, e.NUMA))
 				}
-				p.LinkIDs = append(p.LinkIDs, e.RootPort, sw[e.RootPort], "pcie."+e.ID)
+				p.LinkIDs = append(p.LinkIDs, e.RootPort, sw[e.RootPort], model.PCIeLinkID(e.ID))
 			case e.Kind == model.EndpointGPU:
 				p.Distance = model.DistanceCrossSocket
-				p.LinkIDs = append(p.LinkIDs, n.RootPort, upi, e.RootPort, sw[e.RootPort], "pcie."+e.ID)
+				p.LinkIDs = append(p.LinkIDs, n.RootPort, upi, e.RootPort, sw[e.RootPort], model.PCIeLinkID(e.ID))
 			case e.Kind == model.EndpointMemory && e.Socket == n.Socket && e.NUMA == n.NUMA:
 				p.Distance = model.DistanceLocalMem
 				p.Affinitive = true

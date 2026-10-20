@@ -24,14 +24,14 @@ func (s stubProber) Loopback(_ context.Context, n model.RNIC, ep model.Endpoint,
 	if s.loop != nil {
 		return s.loop(n, ep)
 	}
-	return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+	return flatMeasurement(n, ep), nil
 }
 
 func (s stubProber) Mutual(_ context.Context, src, dst model.RNIC) (model.MutualMeasurement, error) {
 	if s.mut != nil {
 		return s.mut(src, dst)
 	}
-	return model.MutualMeasurement{Src: src.ID, Dst: dst.ID, Connected: true}, nil
+	return connected(src, dst), nil
 }
 
 func TestEngineSkipsNoGDRAndNoDevice(t *testing.T) {
@@ -44,16 +44,13 @@ func TestEngineSkipsNoGDRAndNoDevice(t *testing.T) {
 			if n.ID == "rnic3" {
 				return model.PathMeasurement{}, model.ErrNoDevice
 			}
-			return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+			return flatMeasurement(n, ep), nil
 		},
 		mut: func(_, _ model.RNIC) (model.MutualMeasurement, error) {
 			return model.MutualMeasurement{}, model.ErrNoGID
 		},
 	})
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Paths) == 0 {
 		t.Fatal("memory paths should remain after GDR skip")
 	}
@@ -73,10 +70,7 @@ func TestEngineSkipsMutualSetupFailure(t *testing.T) {
 			return model.MutualMeasurement{}, model.ErrNoDevice
 		},
 	})
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) != 0 {
 		t.Fatalf("mutual setup failure must be skipped, got %+v", rep.Mutual)
 	}
@@ -118,10 +112,7 @@ func TestEngineIdle400GHealthyDRAMNeedsNoBaselineFlags(t *testing.T) {
 	}
 
 	e := New(config.Defaults(), g, stubProber{loop: loop})
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Causes) != 0 {
 		t.Fatalf("healthy 400G DRAM must not be diagnosed with no flags: %v", causeCodes(rep))
 	}
@@ -149,10 +140,7 @@ func TestEngineIdle400GHealthyDRAMNeedsNoBaselineFlags(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.BaselineSpecs = []string{"local_mem=394Gbps", "remote_mem=394Gbps"}
 	e = New(cfg, g, stubProber{loop: loop})
-	rep, err = e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep = runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if !hasCause(rep, model.CauseRNICPCIeFailure) {
 		t.Fatalf("an explicit 394Gbps floor must still diagnose #1 on 270G DRAM, got %v", causeCodes(rep))
 	}
@@ -160,10 +148,7 @@ func TestEngineIdle400GHealthyDRAMNeedsNoBaselineFlags(t *testing.T) {
 	cfg = config.Defaults()
 	cfg.BaselineSpecs = []string{"local_mem=270Gbps", "remote_mem=270Gbps"}
 	e = New(cfg, g, stubProber{loop: loop})
-	rep, err = e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep = runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Causes) != 0 {
 		t.Fatalf("user 270G baseline must not mark DRAM paths abnormal: %v", causeCodes(rep))
 	}
@@ -203,10 +188,7 @@ func TestEngineIdle400GHealthyDRAMNeedsNoBaselineFlags(t *testing.T) {
 	cfg = config.Defaults()
 	cfg.BaselineFile = p
 	e = New(cfg, g, stubProber{loop: loop})
-	rep, err = e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep = runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if !hasCause(rep, model.CauseRNICPCIeFailure) {
 		t.Fatalf("baseline-file must apply over the derived default: %v", causeCodes(rep))
 	}
@@ -232,23 +214,6 @@ func TestEngineBaselineFileErrorBeforeProbe(t *testing.T) {
 	}
 }
 
-func hasCause(rep model.Report, code string) bool {
-	for _, c := range rep.Causes {
-		if c.Code == code {
-			return true
-		}
-	}
-	return false
-}
-
-func causeCodes(rep model.Report) []string {
-	var out []string
-	for _, c := range rep.Causes {
-		out = append(out, c.Code)
-	}
-	return out
-}
-
 func TestEngineNoMeasurementsSurfacesMemorySkip(t *testing.T) {
 	g := topology.Fig2()
 	e := New(config.Defaults(), g, stubProber{
@@ -271,14 +236,6 @@ func TestEngineNoMeasurementsSurfacesMemorySkip(t *testing.T) {
 	}
 }
 
-// logSink captures the aggregated skip line the engine would otherwise write
-// through the standard logger.
-type logSink struct{ lines []string }
-
-func (s *logSink) logf(format string, args ...any) {
-	s.lines = append(s.lines, fmt.Sprintf(format, args...))
-}
-
 // gdrProber fails every GPU endpoint with the probe's own NoGDR detail string
 // and answers every memory endpoint, which is a GPU host whose CUDA libraries
 // are missing: the mesh shrinks to the memory paths and nothing else changes.
@@ -288,7 +245,7 @@ func gdrProber(detail string) stubProber {
 			if ep.Kind == model.EndpointGPU {
 				return model.PathMeasurement{}, fmt.Errorf("%w: %s", model.ErrNoGDR, detail)
 			}
-			return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+			return flatMeasurement(n, ep), nil
 		},
 	}
 }
@@ -302,10 +259,7 @@ func TestEnginePartialSkipIsReportedOnceWithReason(t *testing.T) {
 	e := New(config.Defaults(), g, gdrProber("NoGDR: no cuda"))
 	e.Logf = sink.logf
 
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Paths) == 0 {
 		t.Fatal("memory paths should remain after the GDR skip")
 	}
@@ -341,10 +295,7 @@ func TestEnginePartialSkipIsReportedOnceWithReason(t *testing.T) {
 	// A daemon polls every --metric-interval; a standing condition must not be
 	// logged again on every run.
 	for i := 0; i < 3; i++ {
-		rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-		if err != nil {
-			t.Fatal(err)
-		}
+		rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 		if len(rep.SkippedEndpoints) != 1 {
 			t.Fatalf("run %d dropped the skip from the report: %+v", i+2, rep.SkippedEndpoints)
 		}
@@ -366,17 +317,12 @@ func TestEngineLogsSkipReasonChangeAndRecovery(t *testing.T) {
 			if ep.Kind == model.EndpointGPU && gdr {
 				return model.PathMeasurement{}, fmt.Errorf("%w: %s", model.ErrNoGDR, detail)
 			}
-			return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+			return flatMeasurement(n, ep), nil
 		},
 	})
 	e.Logf = sink.logf
 
-	run := func() {
-		t.Helper()
-		if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	run := func() { runWith(t, e, RunRequest{Mode: model.ModeIdle}) }
 	run()
 	detail = "NoGDR: missing gpu"
 	run()
@@ -404,13 +350,8 @@ func TestEngineDoesNotRelogSkipWhenOnlyCountsChange(t *testing.T) {
 	e := New(config.Defaults(), g, gdrProber("NoGDR: no cuda"))
 	e.Logf = sink.logf
 
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{"rnic0": true}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
+	rep := runWith(t, e, RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{"rnic0": true}})
 	if len(rep.SkippedEndpoints) != 1 {
 		t.Fatalf("busy run lost the skip: %+v", rep.SkippedEndpoints)
 	}
@@ -474,10 +415,7 @@ func TestEngineReportsEmptyMutualPairSet(t *testing.T) {
 
 	// A daemon runs the engine every poll; the report must not repeat.
 	for i := 0; i < 3; i++ {
-		rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-		if err != nil {
-			t.Fatal(err)
-		}
+		rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 		if len(rep.Mutual) != 0 {
 			t.Fatalf("run %d: distinct fabrics must not pair: %+v", i, rep.Mutual)
 		}
@@ -498,13 +436,9 @@ func TestEngineReportsEmptyMutualPairSet(t *testing.T) {
 	// "Once" means until the condition changes, not once per process: a
 	// topology that pairs again clears it, and losing the pairs re-reports.
 	e.Graph = topology.Fig2()
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	e.Graph = rails
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(sink.lines) != 2 {
 		t.Fatalf("want a second report after the pair set came back and went, got %v", sink.lines)
 	}
@@ -522,12 +456,9 @@ func TestEngineHostScopeFindsIsolatedRNIC(t *testing.T) {
 	}
 
 	var sink logSink
-	e := New(config.Defaults(), g, SimProber{World: w})
+	e := New(config.Defaults(), g, sim.Prober{World: w})
 	e.Logf = sink.logf
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) != 0 || len(sink.lines) != 1 {
 		t.Fatalf("rail scope: want no pairs and one report, got %d pairs, %v", len(rep.Mutual), sink.lines)
 	}
@@ -537,12 +468,9 @@ func TestEngineHostScopeFindsIsolatedRNIC(t *testing.T) {
 
 	cfg := config.Defaults()
 	cfg.MutualScope = model.MutualScopeHost
-	e = New(cfg, g, SimProber{World: w})
+	e = New(cfg, g, sim.Prober{World: w})
 	e.Logf = sink.logf
-	rep, err = e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep = runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) != 6 {
 		t.Fatalf("host scope on 4 rails: want 6 pairs, got %d", len(rep.Mutual))
 	}
@@ -575,10 +503,7 @@ func TestEngineSilentWhenMutualPairsExist(t *testing.T) {
 	e := New(config.Defaults(), topology.Fig2(), stubProber{})
 	e.Logf = sink.logf
 
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) == 0 {
 		t.Fatal("Fig.2 must produce mutual measurements")
 	}
@@ -592,19 +517,15 @@ func TestEngineSilentWhenMutualPairsExist(t *testing.T) {
 // A path that runs out of readings repeats its last one, and a path with no
 // sequence reads flat. loopErr fails a path after that many readings.
 type seqProber struct {
+	probeRecorder
 	flat    uint64
 	bw      map[string][]uint64 // "rnic->endpoint" → readings, in probe order
 	loopErr map[string]error    // "rnic->endpoint" → error once bw is exhausted
-	calls   map[string]int
 }
 
 func (p *seqProber) Loopback(_ context.Context, n model.RNIC, ep model.Endpoint, _, _ uint32) (model.PathMeasurement, error) {
-	if p.calls == nil {
-		p.calls = map[string]int{}
-	}
 	key := n.ID + "->" + ep.ID
-	i := p.calls[key]
-	p.calls[key] = i + 1
+	i := p.record(n.ID, ep.ID)
 	seq := p.bw[key]
 	if i >= len(seq) {
 		if err := p.loopErr[key]; err != nil {
@@ -615,33 +536,17 @@ func (p *seqProber) Loopback(_ context.Context, n model.RNIC, ep model.Endpoint,
 	if len(seq) > 0 {
 		bw = seq[min(i, len(seq)-1)]
 	}
-	return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: bw, SmallLatNsP50: 1000}, nil
+	return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: bw, SmallLatNsP50: flatLatNs}, nil
 }
 
 func (p *seqProber) Mutual(_ context.Context, src, dst model.RNIC) (model.MutualMeasurement, error) {
-	return model.MutualMeasurement{Src: src.ID, Dst: dst.ID, Connected: true}, nil
+	return connected(src, dst), nil
 }
 
-func pathStatus(t *testing.T, rep model.Report, rnic, ep string) model.PathMeasurement {
-	t.Helper()
-	for _, p := range rep.Paths {
-		if p.RNIC == rnic && p.Endpoint == ep {
-			return p
-		}
-	}
-	t.Fatalf("%s->%s missing from the report", rnic, ep)
-	return model.PathMeasurement{}
-}
-
+// busyRun runs a fresh Fig.2 engine once in busy mode with rnic0 loaded.
 func busyRun(t *testing.T, cfg config.Config, p Prober) model.Report {
 	t.Helper()
-	e := New(cfg, topology.Fig2(), p)
-	e.Logf = func(string, ...any) {}
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{"rnic0": true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep
+	return runWith(t, New(cfg, topology.Fig2(), p), RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{"rnic0": true}})
 }
 
 // Busy mode judges a loaded RNIC's path against its siblings at the same
@@ -666,7 +571,7 @@ func TestEngineBusyMedianHoldsNoisySiblingUndecided(t *testing.T) {
 			t.Fatalf("sample noise on a healthy busy host reported abnormal: %+v", p)
 		}
 	}
-	got := pathStatus(t, rep, "rnic0", "gpu1")
+	got := pathOf(t, rep, "rnic0", "gpu1")
 	if got.UncertainReason != model.UncertainRNICBusy {
 		t.Fatalf("a path the loaded RNIC cannot decide must say so: %+v", got)
 	}
@@ -681,7 +586,7 @@ func TestEngineBusyMedianHoldsNoisySiblingUndecided(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.BusySamples = 1
 	rep = busyRun(t, cfg, noisy())
-	got = pathStatus(t, rep, "rnic0", "gpu1")
+	got = pathOf(t, rep, "rnic0", "gpu1")
 	if r := got.BusyRecheck; r == nil || r.Confirmed || got.Status != model.PathUncertain {
 		t.Fatalf("--busy-samples 1 is the single-reading comparison, want it flagged and cleared by the recheck: %+v", got)
 	}
@@ -697,10 +602,10 @@ func TestEngineBusyMedianStillFlagsDegradedSibling(t *testing.T) {
 			flat * 55 / 100, flat * 60 / 100, flat * 65 / 100,
 		}},
 	})
-	if got := pathStatus(t, rep, "rnic0", "gpu1"); got.Status != model.PathAbnormal {
+	if got := pathOf(t, rep, "rnic0", "gpu1"); got.Status != model.PathAbnormal {
 		t.Fatalf("a sibling degraded in every sample must stay abnormal: %+v", got)
 	}
-	if got := pathStatus(t, rep, "rnic0", "gpu0"); got.Status == model.PathAbnormal {
+	if got := pathOf(t, rep, "rnic0", "gpu0"); got.Status == model.PathAbnormal {
 		t.Fatalf("the reference sibling must not be flagged with it: %+v", got)
 	}
 }
@@ -733,11 +638,7 @@ func TestEngineRepeatsOnlyComparableBusyPaths(t *testing.T) {
 	// An idle run classifies against the baseline and never compares paths with
 	// each other, so it must keep probing each path exactly once.
 	idle := &seqProber{flat: 190_000_000_000}
-	e := New(cfg, topology.Fig2(), idle)
-	e.Logf = func(string, ...any) {}
-	if _, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle}); err != nil {
-		t.Fatal(err)
-	}
+	runIdle(t, cfg, topology.Fig2(), idle)
 	for key, got := range idle.calls {
 		if got != 1 {
 			t.Errorf("idle run probed %s %d times, want 1", key, got)
@@ -771,7 +672,7 @@ func TestEngineBusySkipAccountingWithRepeats(t *testing.T) {
 	if s.Probes != 1 {
 		t.Errorf("skipped probes = %d, want 1 (one path, counted once)", s.Probes)
 	}
-	if got := pathStatus(t, rep, "rnic0", "gpu1"); got.BandwidthBPS != 190_000_000_000 {
+	if got := pathOf(t, rep, "rnic0", "gpu1"); got.BandwidthBPS != 190_000_000_000 {
 		t.Errorf("a path that answered before failing must keep its readings: %+v", got)
 	}
 }

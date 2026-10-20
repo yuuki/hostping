@@ -1,0 +1,14 @@
+{
+  "cross_root": {
+    "bandwidth_bps": 125500000000,
+    "latency_ns": 2200,
+    "sub_classes": [
+      {
+        "name": "fast",
+        "bandwidth_bps": 197000000000,
+        "latency_ns": 1000,
+        "root_port_pairs": [["rp.0", "rp.1"]]
+      }
+    ]
+  }
+}

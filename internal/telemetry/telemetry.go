@@ -69,6 +69,11 @@ type Telemetry struct {
 	monIdle     metric.Int64Gauge
 }
 
+// serviceName is the OpenTelemetry service.name of both binaries. The
+// OTEL_SERVICE_NAME environment variable, read by resource.WithFromEnv,
+// still overrides it.
+const serviceName = "hostping"
+
 // Values of hostping.engine.run.failed's stage attribute.
 const (
 	// FailedEngine: the engine run returned an error.
@@ -164,9 +169,50 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 	for _, opt := range opts {
 		opt(&o)
 	}
+	provider, err := newProvider(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	fail := func(err error) (*Telemetry, error) {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = provider.Shutdown(sctx)
+		return nil, err
+	}
+	t, err := New(provider)
+	if err != nil {
+		return fail(err)
+	}
+	t.verbsOff = !cfg.MetricsVerbDurations
+	if cfg.IdleGateCommand != "" && !cfg.Once {
+		t.initIdleGateSeries()
+	}
+	if err := t.registerBuildInfo(build); err != nil {
+		return fail(err)
+	}
+	if err := t.registerTopologyInfo(o.rnics, o.endpoints); err != nil {
+		return fail(err)
+	}
+	if err := t.registerDiagramInfo(o.nodes, o.edges); err != nil {
+		return fail(err)
+	}
+	if cfg.PrometheusAddr != "" {
+		if err := t.serveMetrics(cfg, o.live); err != nil {
+			return fail(err)
+		}
+	}
+	// Installed last, so a failed start leaves the global provider alone.
+	otel.SetMeterProvider(provider)
+	return t, nil
+}
+
+// newProvider builds the meter provider with its readers: the Prometheus
+// exporter /metrics serves, and the OTLP exporter when --otlp-endpoint is set.
+func newProvider(ctx context.Context, cfg config.Config) (*sdkmetric.MeterProvider, error) {
 	res, err := resource.New(ctx,
 		resource.WithFromEnv(),
-		resource.WithAttributes(semconv.ServiceName(cfg.ServiceName)),
+		resource.WithAttributes(semconv.ServiceName(serviceName)),
 	)
 	if err != nil {
 		return nil, err
@@ -196,56 +242,32 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 		log.Printf("hostping otlp exporter endpoint=%s tls=%v (%s)", tr.endpoint, !tr.insecure, tr.reason)
 		popts = append(popts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(otlp, sdkmetric.WithInterval(10*time.Second))))
 	}
-	provider := sdkmetric.NewMeterProvider(popts...)
+	return sdkmetric.NewMeterProvider(popts...), nil
+}
 
-	fail := func(err error) (*Telemetry, error) {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_ = provider.Shutdown(sctx)
-		return nil, err
+// serveMetrics binds --metrics and serves /metrics and /healthz on it in the
+// background. The web config (TLS, basic auth) and the address are both
+// checked here rather than in the serving goroutine: a bad file or an address
+// that cannot be bound fails the start (and systemd restarts the unit)
+// instead of leaving a daemon running without its main output.
+func (t *Telemetry) serveMetrics(cfg config.Config, live *Liveness) error {
+	if err := web.Validate(cfg.MetricsWebConfig); err != nil {
+		return fmt.Errorf("--metrics-web-config %s: %w", cfg.MetricsWebConfig, err)
 	}
-	t, err := New(provider)
+	ln, err := net.Listen("tcp", cfg.PrometheusAddr)
 	if err != nil {
-		return fail(err)
+		return fmt.Errorf("metrics listener: %w", err)
 	}
-	t.verbsOff = !cfg.MetricsVerbDurations
-	if cfg.IdleGateCommand != "" && !cfg.Once {
-		t.initIdleGateSeries()
-	}
-	if err := t.registerBuildInfo(build); err != nil {
-		return fail(err)
-	}
-	if err := t.registerTopologyInfo(o.rnics, o.endpoints); err != nil {
-		return fail(err)
-	}
-	if err := t.registerDiagramInfo(o.nodes, o.edges); err != nil {
-		return fail(err)
-	}
-	if cfg.PrometheusAddr != "" {
-		// The web config (TLS, basic auth) and the address are both checked
-		// here rather than in the serving goroutine: a bad file or an address
-		// that cannot be bound fails the start (and systemd restarts the
-		// unit) instead of leaving a daemon running without its main output.
-		if err := web.Validate(cfg.MetricsWebConfig); err != nil {
-			return fail(fmt.Errorf("--metrics-web-config %s: %w", cfg.MetricsWebConfig, err))
+	t.ln = ln
+	t.http = newMetricsServer(live)
+	webConfig := cfg.MetricsWebConfig
+	go func() {
+		err := web.Serve(ln, t.http, &web.FlagConfig{WebConfigFile: &webConfig}, slog.Default())
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("hostping metrics server %s: %v", cfg.PrometheusAddr, err)
 		}
-		ln, err := net.Listen("tcp", cfg.PrometheusAddr)
-		if err != nil {
-			return fail(fmt.Errorf("metrics listener: %w", err))
-		}
-		t.ln = ln
-		t.http = newMetricsServer(o.live)
-		webConfig := cfg.MetricsWebConfig
-		go func() {
-			err := web.Serve(ln, t.http, &web.FlagConfig{WebConfigFile: &webConfig}, slog.Default())
-			if err != nil && err != http.ErrServerClosed {
-				log.Printf("hostping metrics server %s: %v", cfg.PrometheusAddr, err)
-			}
-		}()
-	}
-	// Installed last, so a failed start leaves the global provider alone.
-	otel.SetMeterProvider(provider)
-	return t, nil
+	}()
+	return nil
 }
 
 // Metrics server timeouts. A slow or stalled client cannot hold a connection
@@ -285,7 +307,7 @@ func newMetricsServer(live *Liveness) *http.Server {
 }
 
 // Addr is the metrics listener's bound address, or "" without one. With
-// --metrics :0 it carries the port the kernel picked.
+// --metrics :0 it carries the port the kernel picked. Only the tests call it.
 func (t *Telemetry) Addr() string {
 	if t == nil || t.ln == nil {
 		return ""
@@ -293,116 +315,99 @@ func (t *Telemetry) Addr() string {
 	return t.ln.Addr().String()
 }
 
+// instrument is one row of the instrument tables: the Telemetry field the
+// instrument is stored in, its name, and the unit and description it is
+// created with. An empty unit or description adds no option, so the
+// instrument is created exactly as if neither had been given.
+type instrument[T any] struct {
+	field *T
+	name  string
+	unit  string
+	desc  string
+}
+
+// newInstruments creates every row of rows with create, the meter method of
+// the rows' kind (metric.Meter.Float64Gauge for metric.Float64Gauge rows, and
+// so on), and stores each in its field. WithUnit and WithDescription both
+// yield a metric.InstrumentOption, which implements every kind's option
+// interface, so the assertion to O cannot fail.
+func newInstruments[T any, O any](rows []instrument[T], create func(string, ...O) (T, error)) error {
+	for _, r := range rows {
+		var opts []O
+		if r.unit != "" {
+			opts = append(opts, any(metric.WithUnit(r.unit)).(O))
+		}
+		if r.desc != "" {
+			opts = append(opts, any(metric.WithDescription(r.desc)).(O))
+		}
+		v, err := create(r.name, opts...)
+		if err != nil {
+			return err
+		}
+		*r.field = v
+	}
+	return nil
+}
+
+// initInstruments creates the report-driven instruments, then the status code
+// table and the liveness instruments.
 func (t *Telemetry) initInstruments() error {
-	var err error
-	// The probe produces exactly one summary value per path per run, so a
-	// histogram would only ever bucket p50s (its count is a run count, not a
-	// sample count). A gauge reports the last measured p50 honestly.
-	t.loopLat, err = t.meter.Float64Gauge("hostping.loopback.latency", metric.WithUnit("us"), metric.WithDescription("Intra-host loopback latency, small-message p50"))
-	if err != nil {
+	floatGauges := []instrument[metric.Float64Gauge]{
+		// The probe produces exactly one summary value per path per run, so a
+		// histogram would only ever bucket p50s (its count is a run count, not
+		// a sample count). A gauge reports the last measured p50 honestly.
+		{&t.loopLat, "hostping.loopback.latency", "us", "Intra-host loopback latency, small-message p50"},
+		{&t.loopBW, "hostping.loopback.bandwidth", "bit/s", "Intra-host loopback bandwidth from Eq.1"},
+		{&t.pause, "hostping.rnic.pause_duration_ratio", "", "Tx pause duration ratio (seconds paused per second)"},
+		{&t.thp, "hostping.rnic.throughput", "bit/s", ""},
+		{&t.cpuBusy, "hostping.cpu.busy", "", "CPU busy fraction of a NUMA node over the monitor poll interval, from /proc/stat"},
+		{&t.bus, "hostping.bus.utilization", "", "Intra-host bus utilization"},
+		// One summary value per RNIC pair per run, same as loopback latency.
+		{&t.mutualR, "hostping.mutual.rtt", "us", "Same-rail RNIC-to-RNIC RTT p50"},
+		{&t.mutualL, "hostping.mutual.loss_ratio", "", "Same-rail RNIC-to-RNIC loss ratio"},
+		{&t.mutualT, "hostping.mutual.timeout_ratio", "", "Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent"},
+		// Like loopback latency, one value per path per run: the probe calls
+		// each setup verb once, so a histogram would bucket runs rather than
+		// calls.
+		{&t.verbDur, "hostping.verb.duration", "us", "Execution time of a loopback probe's setup verbs (ToN'24 §VI-C)"},
+	}
+	intGauges := []instrument[metric.Int64Gauge]{
+		{&t.pathAbn, "hostping.path.abnormal", "", "1 if RNIC→endpoint path is abnormal"},
+		// hostping.path.abnormal is binary, so normal and uncertain are both 0
+		// and a path hostping never judged is indistinguishable from a healthy
+		// one. It keeps its meaning (alerts are built on the name); the full
+		// status, and why an uncertain path is uncertain, live in the code
+		// gauges below. Each is one series per path holding a code from
+		// statuscode.go, rewritten on every report, so a state change replaces
+		// the value instead of leaving a stale series behind.
+		{&t.pathStat, "hostping.path.status_code", "", "Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code"},
+		{&t.pathWhy, "hostping.path.uncertain_reason_code", "", "Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code"},
+		// The latency verdict is advisory and separate from path.status_code,
+		// which stays the bandwidth verdict Algorithm 1 reads.
+		{&t.pathLat, "hostping.path.latency_status_code", "", "Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code"},
+		{&t.latWhy, "hostping.path.latency_reason_code", "", "Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code"},
+		// latency_status_code is per run, so one healthy path reading high in
+		// a single run flips it. The streak lets a dashboard or alert wait for
+		// the persistence the analyzer itself requires before it names a
+		// cause.
+		{&t.latRuns, "hostping.path.latency_streak", "", "Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not"},
+		{&t.linkAbn, "hostping.link.abnormal_count", "", "Algorithm 1 abnormal_cnt per hop"},
+		{&t.linkStat, "hostping.link.status_code", "", "Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code"},
+		{&t.drops, "hostping.rnic.drop.delta", "", "Packet drop counter delta"},
+		{&t.skipped, "hostping.endpoint.skipped", "", "Endpoints whose loopback probes were skipped because registration failed or the GPU compute mode is not Default"},
+		{&t.idle, "hostping.host.idle", "", ""},
+	}
+	counters := []instrument[metric.Int64Counter]{
+		{&t.diag, "hostping.diagnosis.count", "", "Root-cause diagnoses emitted"},
+		{&t.runs, "hostping.engine.run.count", "", ""},
+	}
+	if err := newInstruments(floatGauges, t.meter.Float64Gauge); err != nil {
 		return err
 	}
-	t.loopBW, err = t.meter.Float64Gauge("hostping.loopback.bandwidth", metric.WithUnit("bit/s"), metric.WithDescription("Intra-host loopback bandwidth from Eq.1"))
-	if err != nil {
+	if err := newInstruments(intGauges, t.meter.Int64Gauge); err != nil {
 		return err
 	}
-	t.pathAbn, err = t.meter.Int64Gauge("hostping.path.abnormal", metric.WithDescription("1 if RNIC→endpoint path is abnormal"))
-	if err != nil {
-		return err
-	}
-	// hostping.path.abnormal is binary, so normal and uncertain are both 0 and
-	// a path hostping never judged is indistinguishable from a healthy one. It
-	// keeps its meaning (alerts are built on the name); the full status, and
-	// why an uncertain path is uncertain, live in the code gauges below. Each
-	// is one series per path holding a code from statuscode.go, rewritten on
-	// every report, so a state change replaces the value instead of leaving a
-	// stale series behind.
-	t.pathStat, err = t.meter.Int64Gauge("hostping.path.status_code", metric.WithDescription("Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code"))
-	if err != nil {
-		return err
-	}
-	t.pathWhy, err = t.meter.Int64Gauge("hostping.path.uncertain_reason_code", metric.WithDescription("Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code"))
-	if err != nil {
-		return err
-	}
-	// The latency verdict is advisory and separate from path.status_code,
-	// which stays the bandwidth verdict Algorithm 1 reads.
-	t.pathLat, err = t.meter.Int64Gauge("hostping.path.latency_status_code", metric.WithDescription("Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code"))
-	if err != nil {
-		return err
-	}
-	t.latWhy, err = t.meter.Int64Gauge("hostping.path.latency_reason_code", metric.WithDescription("Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code"))
-	if err != nil {
-		return err
-	}
-	// latency_status_code is per run, so one healthy path reading high in a
-	// single run flips it. The streak lets a dashboard or alert wait for the
-	// persistence the analyzer itself requires before it names a cause.
-	t.latRuns, err = t.meter.Int64Gauge("hostping.path.latency_streak", metric.WithDescription("Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not"))
-	if err != nil {
-		return err
-	}
-	t.linkAbn, err = t.meter.Int64Gauge("hostping.link.abnormal_count", metric.WithDescription("Algorithm 1 abnormal_cnt per hop"))
-	if err != nil {
-		return err
-	}
-	t.linkStat, err = t.meter.Int64Gauge("hostping.link.status_code", metric.WithDescription("Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code"))
-	if err != nil {
-		return err
-	}
-	t.pause, err = t.meter.Float64Gauge("hostping.rnic.pause_duration_ratio", metric.WithDescription("Tx pause duration ratio (seconds paused per second)"))
-	if err != nil {
-		return err
-	}
-	t.drops, err = t.meter.Int64Gauge("hostping.rnic.drop.delta", metric.WithDescription("Packet drop counter delta"))
-	if err != nil {
-		return err
-	}
-	t.thp, err = t.meter.Float64Gauge("hostping.rnic.throughput", metric.WithUnit("bit/s"))
-	if err != nil {
-		return err
-	}
-	t.cpuBusy, err = t.meter.Float64Gauge("hostping.cpu.busy", metric.WithDescription("CPU busy fraction of a NUMA node over the monitor poll interval, from /proc/stat"))
-	if err != nil {
-		return err
-	}
-	t.bus, err = t.meter.Float64Gauge("hostping.bus.utilization", metric.WithDescription("Intra-host bus utilization"))
-	if err != nil {
-		return err
-	}
-	// One summary value per RNIC pair per run, same as loopback latency.
-	t.mutualR, err = t.meter.Float64Gauge("hostping.mutual.rtt", metric.WithUnit("us"), metric.WithDescription("Same-rail RNIC-to-RNIC RTT p50"))
-	if err != nil {
-		return err
-	}
-	t.mutualL, err = t.meter.Float64Gauge("hostping.mutual.loss_ratio", metric.WithDescription("Same-rail RNIC-to-RNIC loss ratio"))
-	if err != nil {
-		return err
-	}
-	t.mutualT, err = t.meter.Float64Gauge("hostping.mutual.timeout_ratio", metric.WithDescription("Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent"))
-	if err != nil {
-		return err
-	}
-	t.skipped, err = t.meter.Int64Gauge("hostping.endpoint.skipped", metric.WithDescription("Endpoints whose loopback probes were skipped because registration failed or the GPU compute mode is not Default"))
-	if err != nil {
-		return err
-	}
-	// Like loopback latency, one value per path per run: the probe calls each
-	// setup verb once, so a histogram would bucket runs rather than calls.
-	t.verbDur, err = t.meter.Float64Gauge("hostping.verb.duration", metric.WithUnit("us"), metric.WithDescription("Execution time of a loopback probe's setup verbs (ToN'24 §VI-C)"))
-	if err != nil {
-		return err
-	}
-	t.diag, err = t.meter.Int64Counter("hostping.diagnosis.count", metric.WithDescription("Root-cause diagnoses emitted"))
-	if err != nil {
-		return err
-	}
-	t.runs, err = t.meter.Int64Counter("hostping.engine.run.count")
-	if err != nil {
-		return err
-	}
-	t.idle, err = t.meter.Int64Gauge("hostping.host.idle")
-	if err != nil {
+	if err := newInstruments(counters, t.meter.Int64Counter); err != nil {
 		return err
 	}
 	if err := t.registerStatusCodeInfo(); err != nil {
@@ -415,40 +420,30 @@ func (t *Telemetry) initInstruments() error {
 // from a stuck one, and writes the outcome counters' fixed series as 0. The
 // timestamps stay absent until their first event.
 func (t *Telemetry) initLivenessInstruments() error {
-	var err error
-	t.lastRun, err = t.meter.Float64Gauge("hostping.engine.last_run_timestamp", metric.WithUnit("s"), metric.WithDescription("Unix time the last engine run ended, whatever its outcome"))
-	if err != nil {
-		return err
+	timestamps := []instrument[metric.Float64Gauge]{
+		{&t.lastRun, "hostping.engine.last_run_timestamp", "s", "Unix time the last engine run ended, whatever its outcome"},
+		{&t.lastSuccess, "hostping.engine.last_success_timestamp", "s", "Unix time the last engine run whose report was confirmed and written ended"},
+		{&t.lastPoll, "hostping.monitor.last_poll_timestamp", "s", "Unix time of the last monitor poll that completed without error"},
 	}
-	t.lastSuccess, err = t.meter.Float64Gauge("hostping.engine.last_success_timestamp", metric.WithUnit("s"), metric.WithDescription("Unix time the last engine run whose report was confirmed and written ended"))
-	if err != nil {
-		return err
-	}
-	t.runFailed, err = t.meter.Int64Counter("hostping.engine.run.failed", metric.WithDescription("Engine runs that returned an error (stage=engine) or whose confirmed report could not be written (stage=report)"))
-	if err != nil {
-		return err
-	}
-	t.runDiscard, err = t.meter.Int64Counter("hostping.engine.run.discarded", metric.WithDescription("Idle-mode runs discarded because the clean poll after them found the host busy or unclassified"))
-	if err != nil {
-		return err
-	}
-	t.gateSkip, err = t.meter.Int64Counter("hostping.engine.idle_gate.skipped", metric.WithDescription("Idle runs the --idle-gate-command kept from starting: it exited 1 (reason=denied), timed out (reason=timeout), or exited with another non-zero status or could not run (reason=error)"))
-	if err != nil {
-		return err
-	}
-	t.pollErrors, err = t.meter.Int64Counter("hostping.monitor.poll.errors", metric.WithDescription("Monitor polls that returned an error"))
-	if err != nil {
-		return err
-	}
-	t.lastPoll, err = t.meter.Float64Gauge("hostping.monitor.last_poll_timestamp", metric.WithUnit("s"), metric.WithDescription("Unix time of the last monitor poll that completed without error"))
-	if err != nil {
-		return err
+	counters := []instrument[metric.Int64Counter]{
+		{&t.runFailed, "hostping.engine.run.failed", "", "Engine runs that returned an error (stage=engine) or whose confirmed report could not be written (stage=report)"},
+		{&t.runDiscard, "hostping.engine.run.discarded", "", "Idle-mode runs discarded because the clean poll after them found the host busy or unclassified"},
+		{&t.gateSkip, "hostping.engine.idle_gate.skipped", "", "Idle runs the --idle-gate-command kept from starting: it exited 1 (reason=denied), timed out (reason=timeout), or exited with another non-zero status or could not run (reason=error)"},
+		{&t.pollErrors, "hostping.monitor.poll.errors", "", "Monitor polls that returned an error"},
 	}
 	// hostping.host.idle is the last report's classification, so it keeps
 	// saying idle on a host that turned busy and has not been diagnosed since.
 	// A staleness alert needs the monitor's current view.
-	t.monIdle, err = t.meter.Int64Gauge("hostping.monitor.host_idle", metric.WithDescription("1 when the last clean monitor poll found the host idle, 0 when busy or unclassified"))
-	if err != nil {
+	gauges := []instrument[metric.Int64Gauge]{
+		{&t.monIdle, "hostping.monitor.host_idle", "", "1 when the last clean monitor poll found the host idle, 0 when busy or unclassified"},
+	}
+	if err := newInstruments(timestamps, t.meter.Float64Gauge); err != nil {
+		return err
+	}
+	if err := newInstruments(counters, t.meter.Int64Counter); err != nil {
+		return err
+	}
+	if err := newInstruments(gauges, t.meter.Int64Gauge); err != nil {
 		return err
 	}
 	ctx := context.Background()
@@ -552,16 +547,29 @@ func (t *Telemetry) initIdleGateSeries() {
 // It is observed on every collection, so it is on /metrics from the first
 // scrape, before any engine run has reported.
 func (t *Telemetry) registerBuildInfo(build buildinfo.Info) error {
-	attrs := metric.WithAttributes(
+	return t.constGauge("hostping.build.info", "Always 1; the attributes identify the running build", []attribute.Set{attribute.NewSet(
 		attribute.String("version", build.Version),
 		attribute.String("commit", build.Commit),
 		attribute.String("zig", build.Zig),
 		attribute.String("go", build.Go),
-	)
-	_, err := t.meter.Int64ObservableGauge("hostping.build.info",
-		metric.WithDescription("Always 1; the attributes identify the running build"),
+	)})
+}
+
+// constGauge registers name as an observable gauge that observes 1 under
+// each of sets on every collection: the shape of every *.info instrument. The
+// callback reads its own copy of sets' options, so the caller's slice is free
+// afterwards.
+func (t *Telemetry) constGauge(name, desc string, sets []attribute.Set) error {
+	opts := make([]metric.ObserveOption, len(sets))
+	for i, s := range sets {
+		opts[i] = metric.WithAttributeSet(s)
+	}
+	_, err := t.meter.Int64ObservableGauge(name,
+		metric.WithDescription(desc),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(1, attrs)
+			for _, a := range opts {
+				o.Observe(1, a)
+			}
 			return nil
 		}))
 	return err
@@ -622,34 +630,18 @@ func endpointInfoAttrs(e model.Endpoint) attribute.Set {
 // so they are on /metrics from the first scrape. RNICs dropped by
 // --exclude-rnic are not in rnics and get no series.
 func (t *Telemetry) registerTopologyInfo(rnics []model.RNIC, endpoints []model.Endpoint) error {
-	rnicAttrs := make([]metric.ObserveOption, len(rnics))
+	rnicSets := make([]attribute.Set, len(rnics))
 	for i, n := range rnics {
-		rnicAttrs[i] = metric.WithAttributeSet(rnicInfoAttrs(n))
+		rnicSets[i] = rnicInfoAttrs(n)
 	}
-	epAttrs := make([]metric.ObserveOption, len(endpoints))
+	epSets := make([]attribute.Set, len(endpoints))
 	for i, e := range endpoints {
-		epAttrs[i] = metric.WithAttributeSet(endpointInfoAttrs(e))
+		epSets[i] = endpointInfoAttrs(e)
 	}
-	_, err := t.meter.Int64ObservableGauge("hostping.rnic.info",
-		metric.WithDescription("Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement)"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for _, a := range rnicAttrs {
-				o.Observe(1, a)
-			}
-			return nil
-		}))
-	if err != nil {
+	if err := t.constGauge("hostping.rnic.info", "Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement)", rnicSets); err != nil {
 		return err
 	}
-	_, err = t.meter.Int64ObservableGauge("hostping.endpoint.info",
-		metric.WithDescription("Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement)"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for _, a := range epAttrs {
-				o.Observe(1, a)
-			}
-			return nil
-		}))
-	return err
+	return t.constGauge("hostping.endpoint.info", "Always 1; the attributes identify the loopback endpoint (kind, index, PCI BDF, root port, NUMA placement)", epSets)
 }
 
 // diagramNodeAttrs is the attribute set of one hostping.topology.node.info
@@ -697,34 +689,18 @@ func diagramEdgeAttrs(e model.TopologyEdge) attribute.Set {
 // topology diagram, for a dashboard's node graph. They are observed on every
 // collection, like the other info series.
 func (t *Telemetry) registerDiagramInfo(nodes []model.TopologyNode, edges []model.TopologyEdge) error {
-	nodeAttrs := make([]metric.ObserveOption, len(nodes))
+	nodeSets := make([]attribute.Set, len(nodes))
 	for i, n := range nodes {
-		nodeAttrs[i] = metric.WithAttributeSet(diagramNodeAttrs(n))
+		nodeSets[i] = diagramNodeAttrs(n)
 	}
-	edgeAttrs := make([]metric.ObserveOption, len(edges))
+	edgeSets := make([]attribute.Set, len(edges))
 	for i, e := range edges {
-		edgeAttrs[i] = metric.WithAttributeSet(diagramEdgeAttrs(e))
+		edgeSets[i] = diagramEdgeAttrs(e)
 	}
-	_, err := t.meter.Int64ObservableGauge("hostping.topology.node.info",
-		metric.WithDescription("Always 1; one series per node of the host topology diagram (CPU package, NUMA node, memory, root port, PCIe switch, RNIC, GPU)"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for _, a := range nodeAttrs {
-				o.Observe(1, a)
-			}
-			return nil
-		}))
-	if err != nil {
+	if err := t.constGauge("hostping.topology.node.info", "Always 1; one series per node of the host topology diagram (CPU package, NUMA node, memory, root port, PCIe switch, RNIC, GPU)", nodeSets); err != nil {
 		return err
 	}
-	_, err = t.meter.Int64ObservableGauge("hostping.topology.edge.info",
-		metric.WithDescription("Always 1; one series per edge of the host topology diagram, source upstream of target; link names the link of hostping.link.status_code"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for _, a := range edgeAttrs {
-				o.Observe(1, a)
-			}
-			return nil
-		}))
-	return err
+	return t.constGauge("hostping.topology.edge.info", "Always 1; one series per edge of the host topology diagram, source upstream of target; link names the link of hostping.link.status_code", edgeSets)
 }
 
 // RecordReport writes one report to the instruments. It holds no lock: every
@@ -777,7 +753,7 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 	}
 	t.recordMutual(ctx, rep.Mutual)
 	for _, c := range rep.Causes {
-		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", c.Confidence)))
+		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", string(c.Confidence))))
 	}
 }
 

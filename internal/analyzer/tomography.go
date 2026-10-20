@@ -308,7 +308,7 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 		if !ok {
 			continue
 		}
-		key := m.RNIC + "->" + m.Endpoint
+		key := pathKey(m.RNIC, m.Endpoint)
 		measOf[key] = m
 		switch m.Status {
 		case model.PathNormal:
@@ -459,9 +459,9 @@ func pathJudgesAbnormal(g topology.Graph, guarded map[string]bool, rnicID, linkI
 		return true
 	}
 	switch l.Kind {
-	case "pcie_rnic":
-		return l.Device == n.ID || l.ID == "pcie."+n.ID
-	case "pcie_gpu", "pcie_switch", "root_port":
+	case model.LinkKindPCIeRNIC:
+		return l.Device == n.ID || l.ID == model.PCIeLinkID(n.ID)
+	case model.LinkKindPCIeGPU, model.LinkKindPCIeSwitch, model.LinkKindRootPort:
 		if l.RootPort == "" || !guarded[l.RootPort] {
 			return true
 		}
@@ -479,10 +479,14 @@ func linkMap(states []model.LinkState) map[string]model.LinkState {
 	return m
 }
 
+// pathKey is the "rnic->endpoint" key of one path, as pathMap, latencyKey and
+// PathRef.String spell it.
+func pathKey(rnic, ep string) string { return rnic + "->" + ep }
+
 func pathMap(ms []model.PathMeasurement) map[string]model.PathMeasurement {
 	m := make(map[string]model.PathMeasurement, len(ms))
 	for _, x := range ms {
-		m[x.RNIC+"->"+x.Endpoint] = x
+		m[pathKey(x.RNIC, x.Endpoint)] = x
 	}
 	return m
 }

@@ -1,0 +1,85 @@
+{
+  "trigger": "",
+  "mode": "",
+  "host": "",
+  "started": "0001-01-01T00:00:00Z",
+  "elapsed_ns": 0,
+  "paths": [
+    {
+      "rnic": "",
+      "endpoint": "",
+      "small_lat_ns_p50": 0,
+      "small_lat_ns_p99": 0,
+      "large_lat_ns_p50": 0,
+      "bandwidth_bps": 0,
+      "status": "uncertain",
+      "latency_status": "unknown"
+    }
+  ],
+  "skipped_endpoints": [
+    {
+      "kind": "",
+      "reason": "",
+      "endpoints": null,
+      "probes": 0
+    }
+  ],
+  "links": [
+    {
+      "id": "",
+      "status": "uncertain",
+      "abnormal_count": 0
+    }
+  ],
+  "causes": [
+    {
+      "code": "",
+      "summary": "",
+      "confidence": "",
+      "evidence": ""
+    }
+  ],
+  "mutual": [
+    {
+      "src": "",
+      "dst": "",
+      "connected": false,
+      "rtt_ns_p50": 0,
+      "rtt_ns_p99": 0,
+      "loss_ratio": 0,
+      "sent": 0,
+      "recv": 0
+    }
+  ],
+  "host_idle": false,
+  "baselines": [
+    {
+      "line_rate_bps": 0,
+      "derived_from_bps": 0,
+      "entries": [
+        {
+          "distance": "",
+          "bandwidth_bps": 0,
+          "latency_ns": 0,
+          "bandwidth_source": "",
+          "latency_source": "",
+          "sub_classes": [
+            {
+              "name": "",
+              "bandwidth_bps": 0,
+              "latency_ns": 0,
+              "root_port_pairs": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cpu_load": [
+    {
+      "numa": 0,
+      "socket": 0,
+      "busy": 0
+    }
+  ]
+}

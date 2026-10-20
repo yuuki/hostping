@@ -119,9 +119,9 @@ func diagnoseSlowMR(in Input) ([]model.RootCause, map[string]int) {
 		}
 		// One slow reading could be a stall on that probe; a GPU that is slow
 		// from every RNIC that reached it is slow itself.
-		conf := "low"
+		conf := model.ConfidenceLow
 		if len(readings[id]) > 1 && allSlowMR(readings[id], ref) {
-			conf = "medium"
+			conf = model.ConfidenceMedium
 		}
 		out = append(out, model.RootCause{
 			Code:       model.CauseGPUMRRegistrationSlow,
