@@ -133,124 +133,180 @@ func (w *World) ApplyFault(spec string) error {
 			continue
 		}
 		kind, arg, _ := strings.Cut(part, ":")
-		switch kind {
-		case "rnic_pcie":
-			// Full Gen4 speed, down-trained to four lanes: ~63 Gb/s, which the
-			// speed string alone cannot tell from a healthy x16 link.
-			id := model.PCIeLinkID(arg)
-			w.LinkBW[id] = 67_000_000_000
-			c := w.PCIe[arg]
-			c.Width = 4
-			w.PCIe[arg] = c
-		case "gpu_pcie":
-			w.LinkBW[model.PCIeLinkID(arg)] = 67_000_000_000
-			c := w.PCIe[arg]
-			c.Width = 4
-			w.PCIe[arg] = c
-		case "mem":
-			w.LinkBW[memLink(arg)] = 80_000_000_000
-		case "mem_flap":
-			w.LinkBW[memLink(arg)] = 80_000_000_000
-		case "upi":
-			for _, l := range w.Graph.LinksByKind(model.LinkKindUPI) {
-				w.LinkBW[l.ID] = 70_000_000_000
-			}
-		case "mesh":
-			id := arg
-			if !strings.HasPrefix(id, "mesh.") {
-				id = "mesh." + id
-			}
-			if l, ok := w.Graph.Link(id); !ok || l.Kind != model.LinkKindSNCMesh {
-				return fmt.Errorf("mesh: %q is not an snc_mesh link of topology %s (try --topology fig2-snc --fault mesh:0-1)", arg, w.Graph.Name)
-			}
-			w.LinkBW[id] = 70_000_000_000
-		case "rp":
-			w.LinkBW[arg] = 70_000_000_000
-		case "acs":
-			w.ACS = true
-			for k, c := range w.PCIe {
-				c.ACSEnabled = true
-				w.PCIe[k] = c
-			}
-		case "ats":
-			w.ATSOff[arg] = true
-			c := w.PCIe[arg]
-			c.ATSEnabled = false
-			w.PCIe[arg] = c
-		case "slow_start":
-			w.SlowStart[arg] = true
-			w.RNICCap[arg] = 90_000_000_000
-		case "tx_window":
-			w.TxWindow[arg] = true
-			w.RNICCap[arg] = 90_000_000_000
-		case "overload_upi":
-			for _, l := range w.Graph.LinksByKind(model.LinkKindUPI) {
-				w.LinkBW[l.ID] = 80_000_000_000
-				w.LinkUtil[l.ID] = 0.95
-			}
-		case "overload_mem":
-			w.LinkBW[memLink(arg)] = 80_000_000_000
-			w.LinkUtil[memLink(arg)] = 0.95
-		case "busy":
-			for _, id := range strings.Split(arg, ",") {
-				id = strings.TrimSpace(id)
-				if id != "" {
-					w.Busy[id] = true
-				}
-			}
-		case "connect_fail":
-			w.ConnectFail[arg] = true
-		case "drops":
-			w.DropPPM[arg] = 50_000
-		case "slow_mr":
-			w.SlowMR[arg] = simSlowMRFactor
-		case "flap":
-			// A quarter of the probes over the RNIC go unanswered: above
-			// ToN'24 Timeout_th, far from total. The simulated probe is not
-			// RC, so the same lost probes also read as loss.
-			w.DropPPM[arg] = 250_000
-		case "tor":
-			// The ToR switch every RNIC hangs off: no pair connects.
-			for _, n := range w.Graph.RNICs {
-				w.ConnectFail[n.ID] = true
-			}
-		case "lat":
-			w.LinkLatNs[arg] += simExtraLatNs
-		case "isolate":
-			for _, id := range strings.Split(arg, ",") {
-				id = strings.TrimSpace(id)
-				if id != "" {
-					w.Isolated[id] = true
-				}
-			}
-		case "compute_mode":
-			// Not a link fault: the GPU is healthy, but its compute mode
-			// tells the engine to leave it alone, so its paths are skipped.
-			id, mode, ok := strings.Cut(arg, "=")
-			if !ok {
-				mode = model.ComputeModeExclusiveProcess
-			}
-			if !gpuEndpoint(w, id) {
-				return fmt.Errorf("compute_mode: %q is not a GPU endpoint", id)
-			}
-			if mode != model.ComputeModeDefault && !model.ComputeModeBlocksProbe(mode) {
-				return fmt.Errorf("compute_mode: unknown mode %q", mode)
-			}
-			w.ComputeMode[id] = mode
-		case "fast_rp":
-			// Not a fault either: the platform routes P2P between these two
-			// root ports at full rate.
-			a, b, ok := strings.Cut(arg, ",")
-			a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-			if !ok || a == b || !rootPortLink(w, a) || !rootPortLink(w, b) {
-				return fmt.Errorf("fast_rp: want two distinct root-port link IDs (fast_rp:rp.0,rp.1), got %q", arg)
-			}
-			w.FastPairs[model.NewRootPortPair(a, b)] = true
-		default:
+		apply, ok := faults[kind]
+		if !ok {
 			return fmt.Errorf("unknown fault %q", kind)
+		}
+		if err := apply(w, arg); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// faults maps each fault kind ApplyFault accepts to what it does to the
+// world. Two kinds may share a body and stay distinct names: mem_flap is mem
+// as the monitor sees it, gpu_pcie is rnic_pcie on a GPU link.
+var faults = map[string]func(w *World, arg string) error{
+	"rnic_pcie": downtrain,
+	"gpu_pcie":  downtrain,
+	"mem":       memSlow,
+	"mem_flap":  memSlow,
+	"upi": func(w *World, _ string) error {
+		for _, l := range w.Graph.LinksByKind(model.LinkKindUPI) {
+			w.LinkBW[l.ID] = 70_000_000_000
+		}
+		return nil
+	},
+	"mesh": func(w *World, arg string) error {
+		id := arg
+		if !strings.HasPrefix(id, "mesh.") {
+			id = "mesh." + id
+		}
+		if l, ok := w.Graph.Link(id); !ok || l.Kind != model.LinkKindSNCMesh {
+			return fmt.Errorf("mesh: %q is not an snc_mesh link of topology %s (try --topology fig2-snc --fault mesh:0-1)", arg, w.Graph.Name)
+		}
+		w.LinkBW[id] = 70_000_000_000
+		return nil
+	},
+	"rp": func(w *World, arg string) error {
+		w.LinkBW[arg] = 70_000_000_000
+		return nil
+	},
+	"acs": func(w *World, _ string) error {
+		w.ACS = true
+		for k, c := range w.PCIe {
+			c.ACSEnabled = true
+			w.PCIe[k] = c
+		}
+		return nil
+	},
+	"ats": func(w *World, arg string) error {
+		w.ATSOff[arg] = true
+		c := w.PCIe[arg]
+		c.ATSEnabled = false
+		w.PCIe[arg] = c
+		return nil
+	},
+	"slow_start": func(w *World, arg string) error { return rnicCap(w, w.SlowStart, arg) },
+	"tx_window":  func(w *World, arg string) error { return rnicCap(w, w.TxWindow, arg) },
+	"overload_upi": func(w *World, _ string) error {
+		for _, l := range w.Graph.LinksByKind(model.LinkKindUPI) {
+			w.LinkBW[l.ID] = 80_000_000_000
+			w.LinkUtil[l.ID] = 0.95
+		}
+		return nil
+	},
+	"overload_mem": func(w *World, arg string) error {
+		w.LinkBW[memLink(arg)] = 80_000_000_000
+		w.LinkUtil[memLink(arg)] = 0.95
+		return nil
+	},
+	"busy": func(w *World, arg string) error { return setAll(w.Busy, arg) },
+	"connect_fail": func(w *World, arg string) error {
+		w.ConnectFail[arg] = true
+		return nil
+	},
+	"drops": func(w *World, arg string) error {
+		w.DropPPM[arg] = 50_000
+		return nil
+	},
+	"slow_mr": func(w *World, arg string) error {
+		w.SlowMR[arg] = simSlowMRFactor
+		return nil
+	},
+	"flap": func(w *World, arg string) error {
+		// A quarter of the probes over the RNIC go unanswered: above
+		// ToN'24 Timeout_th, far from total. The simulated probe is not
+		// RC, so the same lost probes also read as loss.
+		w.DropPPM[arg] = 250_000
+		return nil
+	},
+	"tor": func(w *World, _ string) error {
+		// The ToR switch every RNIC hangs off: no pair connects.
+		for _, n := range w.Graph.RNICs {
+			w.ConnectFail[n.ID] = true
+		}
+		return nil
+	},
+	"lat": func(w *World, arg string) error {
+		w.LinkLatNs[arg] += simExtraLatNs
+		return nil
+	},
+	"isolate": func(w *World, arg string) error { return setAll(w.Isolated, arg) },
+	"compute_mode": func(w *World, arg string) error {
+		// Not a link fault: the GPU is healthy, but its compute mode
+		// tells the engine to leave it alone, so its paths are skipped.
+		id, mode, ok := strings.Cut(arg, "=")
+		if !ok {
+			mode = model.ComputeModeExclusiveProcess
+		}
+		if !gpuEndpoint(w, id) {
+			return fmt.Errorf("compute_mode: %q is not a GPU endpoint", id)
+		}
+		if mode != model.ComputeModeDefault && !model.ComputeModeBlocksProbe(mode) {
+			return fmt.Errorf("compute_mode: unknown mode %q", mode)
+		}
+		w.ComputeMode[id] = mode
+		return nil
+	},
+	"fast_rp": func(w *World, arg string) error {
+		// Not a fault either: the platform routes P2P between these two
+		// root ports at full rate.
+		a, b, ok := strings.Cut(arg, ",")
+		a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+		if !ok || a == b || !rootPortLink(w, a) || !rootPortLink(w, b) {
+			return fmt.Errorf("fast_rp: want two distinct root-port link IDs (fast_rp:rp.0,rp.1), got %q", arg)
+		}
+		w.FastPairs[model.NewRootPortPair(a, b)] = true
+		return nil
+	},
+}
+
+// downtrain is the rnic_pcie / gpu_pcie fault: full Gen4 speed, down-trained
+// to four lanes: ~63 Gb/s, which the speed string alone cannot tell from a
+// healthy x16 link.
+func downtrain(w *World, id string) error {
+	w.LinkBW[model.PCIeLinkID(id)] = 67_000_000_000
+	c := w.PCIe[id]
+	c.Width = 4
+	w.PCIe[id] = c
+	return nil
+}
+
+// memSlow is the mem / mem_flap fault: a memory channel at a fraction of
+// its bandwidth.
+func memSlow(w *World, arg string) error {
+	w.LinkBW[memLink(arg)] = 80_000_000_000
+	return nil
+}
+
+// rnicCap is the slow_start / tx_window fault: mark the RNIC in flag and
+// cap all its paths equally.
+func rnicCap(w *World, flag map[string]bool, id string) error {
+	flag[id] = true
+	w.RNICCap[id] = 90_000_000_000
+	return nil
+}
+
+// setAll marks every id of a comma-separated list in m, ignoring blanks.
+func setAll(m map[string]bool, arg string) error {
+	for _, id := range idList(arg) {
+		m[id] = true
+	}
+	return nil
+}
+
+// idList splits a comma-separated id list, trimming spaces and dropping
+// empty items.
+func idList(arg string) []string {
+	var ids []string
+	for _, id := range strings.Split(arg, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func memLink(arg string) string {
