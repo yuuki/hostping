@@ -51,24 +51,20 @@ type BWRecheckPlan struct {
 // distance, the learned sub-class, and the baseline value itself, so a path
 // on an RNIC that derives another Fig.4 table is never read as a reference.
 type bwClass struct {
-	dist  model.Distance
-	class string
-	base  uint64
+	dist model.Distance
+	// subClass is the learned sub-class (pathClass.subClass), "" for the
+	// distance itself.
+	subClass string
+	base     uint64
 }
 
 // bwGroupKey names the group of RNIC rnic's paths of distance d and learned
-// sub-class class ("" for the distance itself).
-func bwGroupKey(rnic string, d model.Distance, class string) string {
-	if class == "" {
+// sub-class subClass ("" for the distance itself).
+func bwGroupKey(rnic string, d model.Distance, subClass string) string {
+	if subClass == "" {
 		return rnic + "/" + d.String()
 	}
-	return rnic + "/" + class
-}
-
-// idleJudged reports whether m's RNIC is judged against the idle baseline in
-// this run: every RNIC of an idle run, and the unloaded ones of a busy run.
-func idleJudged(m model.PathMeasurement, mode model.RunMode, busy map[string]bool) bool {
-	return mode != model.ModeBusy || !busy[m.RNIC]
+	return rnic + "/" + subClass
 }
 
 // PlanBWRecheck returns the groups to recheck: the paths ClassifyPaths, on the
@@ -88,26 +84,27 @@ func idleJudged(m model.PathMeasurement, mode model.RunMode, busy map[string]boo
 //
 // At most BWRecheckMaxGroups groups are planned.
 func PlanBWRecheck(g topology.Graph, ms []model.PathMeasurement, mode model.RunMode, busy map[string]bool, cfg config.Config, bases baseline.Overlay) []BWRecheckPlan {
-	judged := ClassifyPaths(g, ms, mode, busy, cfg, bases)
+	r := newRun(g, mode, busy, cfg, bases)
+	classes := r.pathClasses(ms)
+	judged := r.classifyPaths(ms, classes)
 	var order []string
 	members := map[string][]int{}
 	classOf := map[string]bwClass{}
 	refs := map[bwClass][]int{}
 	for i, m := range judged {
-		if !idleJudged(m, mode, busy) {
+		if !r.idleJudged(m.RNIC) {
 			continue
 		}
-		p, ok := g.Path(m.RNIC, m.Endpoint)
+		pc, ok := pathClassOf(classes, m)
 		if !ok {
 			continue
 		}
-		base, class := pathBaseline(g, bases, p)
-		c := bwClass{dist: p.Distance, class: class, base: base.BandwidthBPS}
+		c := pc.bwKey()
 		if m.Status != model.PathAbnormal {
 			refs[c] = append(refs[c], i)
 			continue
 		}
-		k := bwGroupKey(m.RNIC, p.Distance, class)
+		k := pc.bwGroup()
 		if _, ok := members[k]; !ok {
 			order = append(order, k)
 			classOf[k] = c
@@ -202,28 +199,27 @@ func JudgeBWRecheck(path, refs []uint64, base uint64, th float64) model.Bandwidt
 // representative's re-read median (normal, or uncertain where a baseline
 // alone does not prove health), and a host shift is uncertain with
 // host_shift. Nothing else changes.
-func applyBWRecheck(g topology.Graph, paths []model.PathMeasurement, mode model.RunMode, busy map[string]bool, bases baseline.Overlay, th float64, rc map[string]model.BandwidthRecheck) []model.PathMeasurement {
+func (r run) applyBWRecheck(paths []model.PathMeasurement, classes map[string]pathClass, rc map[string]model.BandwidthRecheck) []model.PathMeasurement {
 	if len(rc) == 0 {
 		return paths
 	}
 	for i := range paths {
 		m := &paths[i]
-		if m.Status != model.PathAbnormal || !idleJudged(*m, mode, busy) {
+		if m.Status != model.PathAbnormal || !r.idleJudged(m.RNIC) {
 			continue
 		}
-		p, ok := g.Path(m.RNIC, m.Endpoint)
+		c, ok := pathClassOf(classes, *m)
 		if !ok {
 			continue
 		}
-		_, class := pathBaseline(g, bases, p)
-		r, ok := rc[bwGroupKey(m.RNIC, p.Distance, class)]
+		b, ok := rc[c.bwGroup()]
 		if !ok {
 			continue
 		}
-		m.BWRecheck = &r
-		switch r.Outcome {
+		m.BWRecheck = &b
+		switch b.Outcome {
 		case model.BWRecheckCleared:
-			m.Status, m.UncertainReason = metBaseline(g, mustRNIC(g, m.RNIC), p, r.PathBPS, th)
+			m.Status, m.UncertainReason = r.metBaseline(c, b.PathBPS)
 		case model.BWRecheckHostShift:
 			markUncertain(m, model.UncertainHostShift)
 		}

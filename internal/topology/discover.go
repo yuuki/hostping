@@ -11,6 +11,7 @@ import (
 
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/pci"
+	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 // Nominal link capacities. Fig.2 carries them on every hop; discovery gives
@@ -152,7 +153,9 @@ func discoverRNICs(sysroot string, socks sockets, exclude []string) ([]model.RNI
 		if skipIBDevice(sysroot, dev) {
 			continue
 		}
-		numa := readInt(filepath.Join(sysroot, "class/infiniband", dev, "device", "numa_node"), 0)
+		// A numa_node of -1 (no affinity) is modeled on node 0, as every
+		// discovered device always was; pci.ReadLink reports the -1.
+		numa := sysfs.ReadIntNonNegative(filepath.Join(sysroot, "class/infiniband", dev, "device", "numa_node"), 0)
 		ch, err := walkPCI(sysroot, bdf)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("RNIC %s: %w", dev, err)
@@ -223,22 +226,16 @@ func discoverMemory(sysroot string, socks sockets) []model.Endpoint {
 }
 
 func discoverNUMANodes(sysroot string, socks sockets) []model.Endpoint {
-	ents, err := os.ReadDir(filepath.Join(sysroot, "devices/system/node"))
+	nodes, err := sysfs.Nodes(sysroot)
 	if err != nil {
 		return nil
 	}
 	var out []model.Endpoint
-	for _, e := range ents {
-		if !strings.HasPrefix(e.Name(), "node") {
+	for _, nd := range nodes {
+		if memoryOnlyNUMA(sysroot, nd) {
 			continue
 		}
-		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "node"))
-		if err != nil {
-			continue
-		}
-		if memoryOnlyNUMA(sysroot, e.Name()) {
-			continue
-		}
+		n := nd.ID
 		out = append(out, model.Endpoint{
 			ID: fmt.Sprintf("mem%d", n), Kind: model.EndpointMemory, Index: n, Socket: socks.of(n), NUMA: n,
 		})
@@ -248,13 +245,15 @@ func discoverNUMANodes(sysroot string, socks sockets) []model.Endpoint {
 }
 
 // memoryOnlyNUMA reports GPU/HBM nodes: cpulist exists and is empty.
-// Missing cpulist (test fixtures, odd sysfs) is treated as a CPU node.
-func memoryOnlyNUMA(sysroot, node string) bool {
-	p := filepath.Join(sysroot, "devices/system/node", node, "cpulist")
-	if _, err := os.Stat(p); err != nil {
+// Missing cpulist (test fixtures, odd sysfs) is treated as a CPU node, which
+// is why the file is stat'ed rather than judged by n.ReadErr alone: a cpulist
+// that exists but cannot be read reads as empty, as it always did, while one
+// that is absent does not.
+func memoryOnlyNUMA(sysroot string, n sysfs.Node) bool {
+	if _, err := os.Stat(filepath.Join(sysroot, "devices/system/node", n.Name, "cpulist")); err != nil {
 		return false
 	}
-	return strings.TrimSpace(readFile(p)) == ""
+	return n.ReadErr != nil || (n.ParseErr == nil && len(n.CPUs) == 0)
 }
 
 func discoverEDAC(sysroot string, socks sockets) []model.Endpoint {
@@ -272,9 +271,9 @@ func discoverEDAC(sysroot string, socks sockets) []model.Endpoint {
 	var out []model.Endpoint
 	idx := 0
 	for _, name := range names {
-		node := readInt(filepath.Join(sysroot, "devices/system/edac/mc", name, "csrow0", "node"), -1)
+		node := sysfs.ReadIntNonNegative(filepath.Join(sysroot, "devices/system/edac/mc", name, "csrow0", "node"), -1)
 		if node < 0 {
-			node = readInt(filepath.Join(sysroot, "devices/system/edac/mc", name, "node"), -1)
+			node = sysfs.ReadIntNonNegative(filepath.Join(sysroot, "devices/system/edac/mc", name, "node"), -1)
 		}
 		if node < 0 {
 			continue
@@ -301,11 +300,11 @@ func discoverGPUs(sysroot string, socks sockets) ([]model.Endpoint, map[string]p
 	var out []model.Endpoint
 	chains := map[string]pciChain{}
 	for _, bdf := range bdfs {
-		class := strings.TrimSpace(readFile(filepath.Join(sysroot, "bus/pci/devices", bdf, "class")))
+		class := strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "bus/pci/devices", bdf, "class")))
 		if class != "0x030200" && class != "0x030000" {
 			continue
 		}
-		vendor := strings.TrimSpace(readFile(filepath.Join(sysroot, "bus/pci/devices", bdf, "vendor")))
+		vendor := strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "bus/pci/devices", bdf, "vendor")))
 		if vendor != "0x10de" && vendor != "0x1002" {
 			continue
 		}
@@ -314,7 +313,8 @@ func discoverGPUs(sysroot string, socks sockets) ([]model.Endpoint, map[string]p
 			// Omit rather than pretend this GPU shares an RNIC root port.
 			continue
 		}
-		numa := readInt(filepath.Join(sysroot, "bus/pci/devices", bdf, "numa_node"), 0)
+		// As for RNICs: numa_node -1 is modeled on node 0.
+		numa := sysfs.ReadIntNonNegative(filepath.Join(sysroot, "bus/pci/devices", bdf, "numa_node"), 0)
 		ep := model.Endpoint{
 			ID: fmt.Sprintf("gpu%d", idx), Kind: model.EndpointGPU, Index: idx,
 			Socket: socks.of(numa), RootPort: ch.RootPort, Switch: ch.deviceSwitch(), NUMA: numa, PCIeBDF: bdf,
@@ -611,7 +611,7 @@ func fabricKey(sysroot, ibdev string) string {
 	var rocev2 []string
 	var rocev2Idx []int
 	for i := 0; i < 16; i++ {
-		raw := strings.TrimSpace(readFile(filepath.Join(base, "gids", strconv.Itoa(i))))
+		raw := strings.TrimSpace(sysfs.ReadString(filepath.Join(base, "gids", strconv.Itoa(i))))
 		if raw == "" || gidAllZero(raw) {
 			continue
 		}
@@ -623,7 +623,7 @@ func fabricKey(sysroot, ibdev string) string {
 	}
 	for k, g := range rocev2 {
 		if ip := rocev4(gidHex(g)); ip != nil {
-			netdev := strings.TrimSpace(readFile(filepath.Join(base, "gid_attrs", "ndevs", strconv.Itoa(rocev2Idx[k]))))
+			netdev := strings.TrimSpace(sysfs.ReadString(filepath.Join(base, "gid_attrs", "ndevs", strconv.Itoa(rocev2Idx[k]))))
 			if netdev == "" {
 				netdev = firstNetdev(sysroot, ibdev)
 			}
@@ -699,6 +699,18 @@ func v4RailKey(ibdev, netdev string, ip net.IP) string {
 	return "v4:" + network.String() + "/" + strconv.Itoa(ones)
 }
 
+// firstActiveIBPort is the first ACTIVE port of ibdev, by port number, or
+// the lowest-numbered port when none is ACTIVE; "" when the ports directory
+// cannot be read, which fabricKey and rnicLinkLayer turn into "unknown".
+//
+// The monitor has its own firstActiveIBPort (monitor/sysfs.go) that is NOT
+// this one: it tries the fixed port names "1".."4" without listing the
+// directory, falls back to "1", and never returns "". The two agree on every
+// device with ports 1..4; they differ for a port numbered 5 or more, a
+// non-numeric port name, and an unreadable ports directory. Discovery's
+// result ends up in the graph (rate, link layer, rail key), the monitor's in
+// the counters, and the two have been kept separate on purpose: unifying them
+// would move the rail key or the counter source of such a device.
 func firstActiveIBPort(sysroot, ibdev string) string {
 	ents, err := os.ReadDir(filepath.Join(sysroot, "class/infiniband", ibdev, "ports"))
 	if err != nil {
@@ -717,8 +729,7 @@ func firstActiveIBPort(sysroot, ibdev string) string {
 		return names[i] < names[j]
 	})
 	for _, name := range names {
-		st := strings.ToUpper(readFile(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", name, "state")))
-		if strings.Contains(st, "ACTIVE") || strings.HasPrefix(strings.TrimSpace(st), "4:") {
+		if sysfs.PortActive(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", name)) {
 			return name
 		}
 	}
@@ -729,7 +740,7 @@ func firstActiveIBPort(sysroot, ibdev string) string {
 }
 
 func gidRoCEv2(portDir string, idx int) bool {
-	raw := strings.ToLower(readFile(filepath.Join(portDir, "gid_attrs", "types", strconv.Itoa(idx))))
+	raw := strings.ToLower(sysfs.ReadString(filepath.Join(portDir, "gid_attrs", "types", strconv.Itoa(idx))))
 	return strings.Contains(raw, "roce v2")
 }
 
@@ -793,7 +804,7 @@ func readRate(sysroot, ibdev string) uint64 {
 	if port == "" {
 		port = "1"
 	}
-	v := strings.TrimSpace(readFile(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", port, "rate")))
+	v := strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", port, "rate")))
 	fields := strings.Fields(v)
 	if len(fields) == 0 {
 		return 0
@@ -803,21 +814,4 @@ func readRate(sysroot, ibdev string) uint64 {
 		return 0
 	}
 	return uint64(f * 1e9)
-}
-
-func readInt(path string, def int) int {
-	s := strings.TrimSpace(readFile(path))
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return def
-	}
-	return n
-}
-
-func readFile(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }

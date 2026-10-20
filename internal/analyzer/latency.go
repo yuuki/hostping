@@ -101,6 +101,13 @@ const LatencyRuns = 3
 // Busy-mode runs judge nothing: service traffic inflates a loaded RNIC's Tproc,
 // and a busy run's probe set is too sparse for a sibling median anyway.
 func ClassifyLatency(g topology.Graph, ms []model.PathMeasurement, mode model.RunMode, cfg config.Config, bases baseline.Overlay) []model.PathMeasurement {
+	r := newRun(g, mode, nil, cfg, bases)
+	return r.classifyLatency(ms, r.pathClasses(ms))
+}
+
+// classifyLatency is ClassifyLatency with the measurements' classes resolved
+// (pathClasses).
+func (r run) classifyLatency(ms []model.PathMeasurement, classes map[string]pathClass) []model.PathMeasurement {
 	out := make([]model.PathMeasurement, len(ms))
 	copy(out, ms)
 
@@ -109,11 +116,11 @@ func ClassifyLatency(g topology.Graph, ms []model.PathMeasurement, mode model.Ru
 	for i := range out {
 		m := &out[i]
 		m.LatencyStatus, m.LatencyReason, m.LatencyRefNs, m.LatencyRecheck, m.LatencyLocality, m.LatencyStreak, m.LatencyRecheckSkipped = model.LatencyUnknown, model.LatencyReasonNone, 0, nil, nil, 0, ""
-		if mode == model.ModeBusy {
+		if r.mode == model.ModeBusy {
 			m.LatencyReason = model.LatencyBusy
 			continue
 		}
-		c, user, why := latencyClassOf(g, *m, bases)
+		c, user, why := latencyClassOf(classes, *m)
 		if why != model.LatencyReasonNone {
 			m.LatencyReason = why
 			continue
@@ -142,9 +149,9 @@ func ClassifyLatency(g topology.Graph, ms []model.PathMeasurement, mode model.Ru
 			}
 			m.LatencyRefNs, m.LatencyReason = ref, reason
 			m.LatencyStatus = model.LatencyNormal
-			abn := latencyHigh(m.SmallLatNsP50, ref, cfg.AbnormalTh)
+			abn := latencyHigh(m.SmallLatNsP50, ref, r.cfg.AbnormalTh)
 			if reason == model.LatencyBySiblings {
-				abn = siblingLatencyHigh(m.SmallLatNsP50, ref, cfg)
+				abn = siblingLatencyHigh(m.SmallLatNsP50, ref, r.cfg)
 			}
 			if abn {
 				m.LatencyStatus = model.LatencyAbnormal
@@ -159,28 +166,25 @@ func ClassifyLatency(g topology.Graph, ms []model.PathMeasurement, mode model.Ru
 // reference when set, and a path's siblings are the class's other paths.
 type latClass struct {
 	dist model.Distance
-	sub  string
+	// subClass is the learned sub-class (pathClass.subClass), "" for the
+	// distance itself.
+	subClass string
 	// section is the baseline-file "tables" section the RNIC takes its
-	// values from, "" for the top level. A section exists because its
-	// table reads differently, so its paths are not siblings of the rest.
+	// values from (pathClass.section), "" for the top level.
 	section string
 }
 
 // latencyClassOf returns m's latency class and the user latency set for it (0
 // when none), or, when m cannot be judged at all, the reason why.
-func latencyClassOf(g topology.Graph, m model.PathMeasurement, bases baseline.Overlay) (latClass, uint64, model.LatencyReason) {
-	p, ok := g.Path(m.RNIC, m.Endpoint)
+func latencyClassOf(classes map[string]pathClass, m model.PathMeasurement) (latClass, uint64, model.LatencyReason) {
+	c, ok := pathClassOf(classes, m)
 	if !ok {
 		return latClass{}, 0, model.LatencyNoPath
 	}
 	if m.SmallLatNsP50 == 0 {
 		return latClass{}, 0, model.LatencyNoReading
 	}
-	pair, _ := g.RootPortPair(p)
-	n := mustRNIC(g, m.RNIC)
-	ov, sec := bases.Of(baseline.RNICTable(n))
-	user, sub := ov[p.Distance].ForPair(pair)
-	return latClass{dist: p.Distance, sub: sub, section: sec}, user.LatencyNs, model.LatencyReasonNone
+	return c.latKey(), c.userLatencyNs, model.LatencyReasonNone
 }
 
 // siblingLatencyHigh is the sibling verdict: lat exceeds the sibling

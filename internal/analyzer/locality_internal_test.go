@@ -48,14 +48,16 @@ func judgeFourNodes(t *testing.T, g topology.Graph, slow ...string) map[string]m
 		ms = append(ms, m)
 	}
 	cfg := config.Defaults()
-	judged := ClassifyLatency(g, ms, model.ModeIdle, cfg, baseline.Overlay{})
+	r := newRun(g, model.ModeIdle, nil, cfg, baseline.Overlay{})
+	classes := r.pathClasses(ms)
+	judged := r.classifyLatency(ms, classes)
 	for _, m := range judged {
 		if m.SmallLatNsP50 == 2000 && m.LatencyStatus != model.LatencyAbnormal {
 			t.Fatalf("precondition: sweep judged %s->%s %s/%s, want abnormal", m.RNIC, m.Endpoint, m.LatencyStatus, m.LatencyReason)
 		}
 	}
 	out := map[string]model.PathMeasurement{}
-	for _, m := range applyLocalityShift(g, judged, baseline.Overlay{}, cfg) {
+	for _, m := range r.applyLocalityShift(judged, classes) {
 		out[m.RNIC+"->"+m.Endpoint] = m
 	}
 	return out

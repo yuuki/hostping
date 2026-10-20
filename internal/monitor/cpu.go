@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
@@ -133,10 +134,10 @@ func readProcStat(path string) (map[int]CPUTicks, error) {
 }
 
 // nodeCPUs maps every NUMA node under sysroot to its CPUs; nil when sysfs has
-// no NUMA nodes.
+// no NUMA nodes. A node whose cpulist cannot be read has no CPUs (its load
+// is zero, never an error); one whose cpulist is malformed is an error.
 func nodeCPUs(sysroot string) (map[int][]int, error) {
-	dir := filepath.Join(sysroot, "devices/system/node")
-	ents, err := os.ReadDir(dir)
+	nodes, err := sysfs.Nodes(sysroot)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -144,22 +145,14 @@ func nodeCPUs(sysroot string) (map[int][]int, error) {
 		return nil, err
 	}
 	var out map[int][]int
-	for _, e := range ents {
-		if !strings.HasPrefix(e.Name(), "node") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "node"))
-		if err != nil {
-			continue
-		}
-		cpus, err := topology.ParseCPUList(readTrim(filepath.Join(dir, e.Name(), "cpulist")))
-		if err != nil {
-			return nil, fmt.Errorf("%s cpulist: %w", e.Name(), err)
+	for _, n := range nodes {
+		if n.ParseErr != nil {
+			return nil, fmt.Errorf("%s cpulist: %w", n.Name, n.ParseErr)
 		}
 		if out == nil {
 			out = map[int][]int{}
 		}
-		out[n] = cpus
+		out[n.ID] = n.CPUs
 	}
 	return out, nil
 }

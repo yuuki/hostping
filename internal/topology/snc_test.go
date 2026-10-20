@@ -2,6 +2,7 @@ package topology
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -272,5 +273,25 @@ func TestNUMAPackagesUnreadable(t *testing.T) {
 	}
 	if len(*logs) != 1 {
 		t.Fatalf("want one fallback log line, got %v", *logs)
+	}
+}
+
+// Unlike the monitor's CPU load, which treats a node without a readable
+// cpulist as a node without CPUs, the package map fails on it: the socket
+// model of the whole graph must not be guessed.
+func TestNUMAPackagesMissingCPUList(t *testing.T) {
+	root := t.TempDir()
+	mkNUMANodes(t, root, []int{0, 1}, map[int]int{0: 0, 1: 1})
+	if err := os.MkdirAll(filepath.Join(root, "devices/system/node/node2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := numaPackages(root)
+	if err == nil || !strings.Contains(err.Error(), "node2 cpulist") {
+		t.Fatalf("err = %v, want one naming node2 cpulist", err)
+	}
+	mustWrite(t, filepath.Join(root, "devices/system/node/node2/cpulist"), "0-\n")
+	_, err = numaPackages(root)
+	if err == nil || !strings.Contains(err.Error(), "node2: cpu list") {
+		t.Fatalf("err = %v, want the parse error of node2", err)
 	}
 }

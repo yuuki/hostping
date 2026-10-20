@@ -14,6 +14,17 @@ const c = @import("hostping_h");
 pub const NAME_LEN = 64;
 pub const ERR_LEN = 256;
 
+/// The rc every hostping_* call returns: HOSTPING_OK and HOSTPING_ERR_* in
+/// hostping.h. capi.zig returns them directly or through errclass.verbsRC.
+pub const OK = 0;
+pub const ERR = 1;
+pub const ERR_NO_DEVICE = 2;
+pub const ERR_VERBS = 3;
+pub const ERR_TIMEOUT = 4;
+pub const ERR_CONNECT = 5;
+pub const ERR_NO_GDR = 6;
+pub const ERR_PORT = 7;
+
 pub const LoopbackReq = extern struct {
     device: [NAME_LEN]u8,
     endpoint: [NAME_LEN]u8,
@@ -171,16 +182,23 @@ comptime {
     verifyConst("HOSTPING_NAME_LEN", NAME_LEN, c.HOSTPING_NAME_LEN);
     verifyConst("HOSTPING_ERR_LEN", ERR_LEN, c.HOSTPING_ERR_LEN);
 
-    // The rc values capi.zig returns come from errclass.verbsRC and from the
-    // literals in hostping_mutual; both must be the header's HOSTPING_ERR_*.
-    verifyConst("HOSTPING_OK", 0, c.HOSTPING_OK);
-    verifyConst("HOSTPING_ERR", 1, c.HOSTPING_ERR);
-    verifyConst("HOSTPING_ERR_NO_DEVICE", errclass.verbsRC(error.NoDevice), c.HOSTPING_ERR_NO_DEVICE);
-    verifyConst("HOSTPING_ERR_VERBS", errclass.verbsRC(error.Pd), c.HOSTPING_ERR_VERBS);
-    verifyConst("HOSTPING_ERR_TIMEOUT", errclass.verbsRC(error.Timeout), c.HOSTPING_ERR_TIMEOUT);
-    verifyConst("HOSTPING_ERR_CONNECT", errclass.verbsRC(error.Connect), c.HOSTPING_ERR_CONNECT);
-    verifyConst("HOSTPING_ERR_NO_GDR", errclass.verbsRC(error.NoGDR), c.HOSTPING_ERR_NO_GDR);
-    verifyConst("HOSTPING_ERR_PORT", errclass.verbsRC(error.Gid), c.HOSTPING_ERR_PORT);
+    // The rc values capi.zig returns are the OK/ERR_* constants above, used
+    // directly or through errclass.verbsRC; they must be the header's.
+    verifyConst("HOSTPING_OK", OK, c.HOSTPING_OK);
+    verifyConst("HOSTPING_ERR", ERR, c.HOSTPING_ERR);
+    verifyConst("HOSTPING_ERR_NO_DEVICE", ERR_NO_DEVICE, c.HOSTPING_ERR_NO_DEVICE);
+    verifyConst("HOSTPING_ERR_VERBS", ERR_VERBS, c.HOSTPING_ERR_VERBS);
+    verifyConst("HOSTPING_ERR_TIMEOUT", ERR_TIMEOUT, c.HOSTPING_ERR_TIMEOUT);
+    verifyConst("HOSTPING_ERR_CONNECT", ERR_CONNECT, c.HOSTPING_ERR_CONNECT);
+    verifyConst("HOSTPING_ERR_NO_GDR", ERR_NO_GDR, c.HOSTPING_ERR_NO_GDR);
+    verifyConst("HOSTPING_ERR_PORT", ERR_PORT, c.HOSTPING_ERR_PORT);
+    // verbsRC maps each error class to the code the header documents for it.
+    verifyConst("verbsRC(NoDevice)", errclass.verbsRC(error.NoDevice), c.HOSTPING_ERR_NO_DEVICE);
+    verifyConst("verbsRC(Pd)", errclass.verbsRC(error.Pd), c.HOSTPING_ERR_VERBS);
+    verifyConst("verbsRC(Timeout)", errclass.verbsRC(error.Timeout), c.HOSTPING_ERR_TIMEOUT);
+    verifyConst("verbsRC(Connect)", errclass.verbsRC(error.Connect), c.HOSTPING_ERR_CONNECT);
+    verifyConst("verbsRC(NoGDR)", errclass.verbsRC(error.NoGDR), c.HOSTPING_ERR_NO_GDR);
+    verifyConst("verbsRC(Gid)", errclass.verbsRC(error.Gid), c.HOSTPING_ERR_PORT);
 }
 
 test "C header and Zig structs agree on layout" {

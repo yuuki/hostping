@@ -1,4 +1,5 @@
 const std = @import("std");
+const abi = @import("abi.zig");
 
 /// Connectivity-class errors mean the RoCE path between the two endpoints did
 /// not come up, or came up but carried no completion. Everything else (missing
@@ -12,16 +13,16 @@ pub fn isConnectivity(err: anyerror) bool {
     };
 }
 
-/// verbsRC maps a probe error to the HOSTPING_ERR_* code in include/hostping.h.
-/// Connectivity-class errors always map to HOSTPING_ERR_TIMEOUT (4) or
-/// HOSTPING_ERR_CONNECT (5); nothing else does.
+/// verbsRC maps a probe error to the HOSTPING_ERR_* code in include/hostping.h
+/// (abi.ERR_*). Connectivity-class errors always map to ERR_TIMEOUT or
+/// ERR_CONNECT; nothing else does.
 pub fn verbsRC(err: anyerror) i32 {
     return switch (err) {
-        error.NoDevice => 2,
-        error.Timeout => 4,
-        error.NoGDR => 6,
-        error.Gid, error.NoLid, error.PortDown, error.Port, error.Device => 7,
-        else => if (isConnectivity(err)) 5 else 3,
+        error.NoDevice => abi.ERR_NO_DEVICE,
+        error.Timeout => abi.ERR_TIMEOUT,
+        error.NoGDR => abi.ERR_NO_GDR,
+        error.Gid, error.NoLid, error.PortDown, error.Port, error.Device => abi.ERR_PORT,
+        else => if (isConnectivity(err)) abi.ERR_CONNECT else abi.ERR_VERBS,
     };
 }
 

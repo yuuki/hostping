@@ -105,15 +105,17 @@ func PlanLatencyRecheck(g topology.Graph, ms []model.PathMeasurement, mode model
 	if mode == model.ModeBusy {
 		return LatencyRecheckSelection{}
 	}
-	judged := ClassifyLatency(g, ms, mode, cfg, bases)
-	shifted := localityShifts(g, judged, bases, cfg)
+	r := newRun(g, mode, nil, cfg, bases)
+	classes := r.pathClasses(ms)
+	judged := r.classifyLatency(ms, classes)
+	shifted := r.localityShifts(judged, classes)
 	byClass := map[latClass][]int{}
 	classOf := map[int]latClass{}
 	for i, m := range judged {
 		if m.LatencyStatus == model.LatencyUnknown || m.LatencyReason != model.LatencyBySiblings {
 			continue
 		}
-		c, _, _ := latencyClassOf(g, m, bases)
+		c, _, _ := latencyClassOf(classes, m)
 		byClass[c] = append(byClass[c], i)
 		classOf[i] = c
 	}

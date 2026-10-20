@@ -21,6 +21,13 @@ import (
 // Uncertain is reached several ways, and they are not interchangeable to whoever
 // reads the report, so each one records its model.PathUncertainReason.
 func ClassifyPaths(g topology.Graph, ms []model.PathMeasurement, mode model.RunMode, busy map[string]bool, cfg config.Config, bases baseline.Overlay) []model.PathMeasurement {
+	r := newRun(g, mode, busy, cfg, bases)
+	return r.classifyPaths(ms, r.pathClasses(ms))
+}
+
+// classifyPaths is ClassifyPaths with the measurements' classes resolved
+// (pathClasses).
+func (r run) classifyPaths(ms []model.PathMeasurement, classes map[string]pathClass) []model.PathMeasurement {
 	out := make([]model.PathMeasurement, len(ms))
 	copy(out, ms)
 
@@ -31,7 +38,7 @@ func ClassifyPaths(g topology.Graph, ms []model.PathMeasurement, mode model.RunM
 	// from them.
 	busyPeers := map[busyRefKey][]busyPeer{}
 	for i, m := range out {
-		k, ok := busyClassOf(g, bases, m)
+		k, ok := busyClassOf(classes, m)
 		if !ok {
 			continue
 		}
@@ -46,26 +53,24 @@ func ClassifyPaths(g topology.Graph, ms []model.PathMeasurement, mode model.RunM
 		m.BaselineClass = ""
 		m.BusyRecheck = nil
 		m.BWRecheck = nil
-		p, ok := g.Path(m.RNIC, m.Endpoint)
+		c, ok := pathClassOf(classes, *m)
 		if !ok {
 			markUncertain(m, model.UncertainNoPath)
 			continue
 		}
-		n := mustRNIC(g, m.RNIC)
-		base, class := pathBaseline(g, bases, p)
-		m.BaselineClass = class
+		m.BaselineClass = c.subClass
 
-		if mode == model.ModeBusy && busy[m.RNIC] {
-			if !g.BusyProbed(p) {
+		if !r.idleJudged(m.RNIC) {
+			if !c.busyProbed {
 				markUncertain(m, model.UncertainRNICBusy)
 				continue
 			}
-			ref := busyRef(busyPeers[busyRefKey{rnic: m.RNIC, dist: p.Distance, class: class}], i)
+			ref := busyRef(busyPeers[c.busyKey()], i)
 			if ref == 0 {
 				markUncertain(m, model.UncertainRNICBusy)
 				continue
 			}
-			if degraded(m.BandwidthBPS, ref, cfg.AbnormalTh) {
+			if degraded(m.BandwidthBPS, ref, r.cfg.AbnormalTh) {
 				m.Status = model.PathAbnormal
 			} else {
 				// Loaded RNIC cannot declare a path healthy vs the idle baseline.
@@ -74,23 +79,24 @@ func ClassifyPaths(g topology.Graph, ms []model.PathMeasurement, mode model.RunM
 			continue
 		}
 
-		if degraded(m.BandwidthBPS, base.BandwidthBPS, cfg.AbnormalTh) {
+		if degraded(m.BandwidthBPS, c.base.BandwidthBPS, r.cfg.AbnormalTh) {
 			m.Status = model.PathAbnormal
 			continue
 		}
-		m.Status, m.UncertainReason = metBaseline(g, n, p, m.BandwidthBPS, cfg.AbnormalTh)
+		m.Status, m.UncertainReason = r.metBaseline(c, m.BandwidthBPS)
 	}
 	return out
 }
 
-// metBaseline is the idle verdict on path p of RNIC n when it read bw and met
-// its distance baseline: normal when an affinitive path also reaches its
+// metBaseline is the idle verdict on the path of class c when it read bw and
+// met its distance baseline: normal when an affinitive path also reaches its
 // ceiling, or for memory, which meeting the baseline proves usable for
 // Algorithm 1; otherwise uncertain, with the reason why the baseline alone
 // was not evidence of health.
-func metBaseline(g topology.Graph, n model.RNIC, p model.Path, bw uint64, th float64) (model.PathStatus, model.PathUncertainReason) {
+func (r run) metBaseline(c pathClass, bw uint64) (model.PathStatus, model.PathUncertainReason) {
+	g, p, th := r.g, c.path, r.cfg.AbnormalTh
 	e, _ := g.Endpoint(p.Endpoint)
-	ceil := affinitiveCeiling(g, n, p)
+	ceil := affinitiveCeiling(g, c.rnic, p)
 	if ceil > 0 && !degraded(bw, ceil, th) {
 		return model.PathNormal, model.UncertainNone
 	}
@@ -143,35 +149,20 @@ func metBaseline(g topology.Graph, n model.RNIC, p model.Path, bw uint64, th flo
 type busyRefKey struct {
 	rnic string
 	dist model.Distance
-	// class is the learned sub-class name, "" for the distance itself.
-	class string
+	// subClass is the learned sub-class (pathClass.subClass), "" for the
+	// distance itself.
+	subClass string
 }
 
 // busyClassOf is the busyRefKey class of m's path, and false when the path is
 // not routed or not in the reduced busy probe set, so no busy sibling
 // comparison draws on it.
-func busyClassOf(g topology.Graph, bases baseline.Overlay, m model.PathMeasurement) (busyRefKey, bool) {
-	p, ok := g.Path(m.RNIC, m.Endpoint)
-	if !ok || !g.BusyProbed(p) {
+func busyClassOf(classes map[string]pathClass, m model.PathMeasurement) (busyRefKey, bool) {
+	c, ok := pathClassOf(classes, m)
+	if !ok || !c.busyProbed {
 		return busyRefKey{}, false
 	}
-	_, class := pathBaseline(g, bases, p)
-	return busyRefKey{rnic: m.RNIC, dist: p.Distance, class: class}, true
-}
-
-// pathBaseline is the idle baseline p is judged against — the Fig.4 default
-// scaled to its RNIC with the operator's overrides applied, narrowed to the
-// learned sub-class that lists p's root-port pair — and the full name of
-// that sub-class ("cross_root/fast"), or "" when the distance's own value
-// applies.
-func pathBaseline(g topology.Graph, bases baseline.Overlay, p model.Path) (baseline.PathBaseline, string) {
-	n := mustRNIC(g, p.RNIC)
-	pair, _ := g.RootPortPair(p)
-	b, sub := baseline.ForPath(bases.Effective(n), p.Distance).ForPair(pair)
-	if sub == "" {
-		return b, ""
-	}
-	return b, baseline.ClassName(p.Distance, sub)
+	return c.busyKey(), true
 }
 
 // busyPeer is one busy-probed reading in a busyRefKey class, with the index of

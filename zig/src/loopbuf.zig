@@ -15,8 +15,6 @@ pub const Plan = struct {
     src_off: usize,
     /// Byte offset of the destination region inside its allocation.
     dst_off: usize,
-    /// Both regions live in one device allocation registered once.
-    shared: bool,
 };
 
 pub const host_align: usize = 4096;
@@ -32,15 +30,14 @@ pub fn plan(large_size: u32, gpu: bool) Plan {
     const bytes = @max(@as(usize, large_size), host_align);
     if (!gpu) {
         const len = alignUp(bytes, host_align);
-        return .{ .region_len = len, .alloc_len = len, .src_off = 0, .dst_off = 0, .shared = false };
+        return .{ .region_len = len, .alloc_len = len, .src_off = 0, .dst_off = 0 };
     }
     const len = alignUp(bytes, gpu_align);
-    return .{ .region_len = len, .alloc_len = 2 * len, .src_off = 0, .dst_off = len, .shared = true };
+    return .{ .region_len = len, .alloc_len = 2 * len, .src_off = 0, .dst_off = len };
 }
 
 test "host plan keeps two separate page-aligned buffers" {
     const p = plan(128 * 1024, false);
-    try std.testing.expect(!p.shared);
     try std.testing.expectEqual(@as(usize, 128 * 1024), p.region_len);
     try std.testing.expectEqual(p.region_len, p.alloc_len);
     try std.testing.expectEqual(@as(usize, 0), p.src_off);
@@ -55,7 +52,6 @@ test "host plan rounds small sizes up to one page" {
 
 test "gpu plan puts source and destination in one device allocation" {
     const p = plan(128 * 1024, true);
-    try std.testing.expect(p.shared);
     try std.testing.expectEqual(@as(usize, 128 * 1024), p.region_len);
     try std.testing.expectEqual(@as(usize, 256 * 1024), p.alloc_len);
     try std.testing.expectEqual(@as(usize, 0), p.src_off);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const detail = @import("detail.zig");
 
 /// Which library actually owns the device allocation. `cuda` is the CUDA
 /// runtime (`libcudart.so.*`, shipped with the CUDA Toolkit); `cuda_drv` is
@@ -37,7 +38,7 @@ pub const Backend = struct {
     dma_buf_fd: *const fn (ptr: usize, len: usize) ?i32,
 };
 
-var detail_buf: [96]u8 = @splat(0);
+var detail_buf: detail.Detail = .{};
 var test_backend_store: [8]Backend = undefined;
 var test_backends: ?[]const Backend = null;
 
@@ -131,13 +132,11 @@ var cu_init_ok = false;
 var live_backend_buf: [3]Backend = undefined;
 
 pub fn lastDetail() []const u8 {
-    return std.mem.sliceTo(&detail_buf, 0);
+    return detail_buf.get();
 }
 
 fn storeDetail(msg: []const u8) void {
-    @memset(&detail_buf, 0);
-    const n = @min(msg.len, detail_buf.len - 1);
-    @memcpy(detail_buf[0..n], msg[0..n]);
+    detail_buf.set("{s}", .{msg});
 }
 
 pub fn installBackendsForTest(b: []const Backend) void {
@@ -221,16 +220,18 @@ pub fn bdfEql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, na, nb);
 }
 
+/// alloc's failure detail (lastDetail) is the reason only, "no cuda" or
+/// "missing gpu"; capi.zig's setVerbsErr prefixes it with "NoGDR: ".
 pub fn alloc(bdf: []const u8, len: usize) error{NoGDR}!DeviceMem {
     storeDetail("");
     if (len == 0) {
-        storeDetail("NoGDR: alloc");
+        storeDetail("alloc");
         return error.NoGDR;
     }
 
     const list = test_backends orelse liveBackends();
     if (list.len == 0) {
-        storeDetail("NoGDR: no cuda");
+        storeDetail("no cuda");
         return error.NoGDR;
     }
 
@@ -246,7 +247,7 @@ pub fn alloc(bdf: []const u8, len: usize) error{NoGDR}!DeviceMem {
             const id = backend.pci_bus_id(dev, &bus_buf) catch continue;
             if (!bdfEql(id, bdf)) continue;
             const ptr = backend.malloc(dev, len) catch {
-                storeDetail(if (backend.kind == .cuda_drv) "NoGDR: cuda drv alloc" else "NoGDR: alloc");
+                storeDetail(if (backend.kind == .cuda_drv) "cuda drv alloc" else "alloc");
                 return error.NoGDR;
             };
             return DeviceMem{
@@ -264,9 +265,9 @@ pub fn alloc(bdf: []const u8, len: usize) error{NoGDR}!DeviceMem {
         // but could not enumerate devices. That is a different fault from
         // having no CUDA library on the host at all, and the two want
         // different fixes, so they get different reasons.
-        storeDetail(if (saw_cuda_drv) "NoGDR: cuda drv init" else "NoGDR: no cuda");
+        storeDetail(if (saw_cuda_drv) "cuda drv init" else "no cuda");
     } else {
-        storeDetail("NoGDR: missing gpu");
+        storeDetail("missing gpu");
     }
     return error.NoGDR;
 }
@@ -860,7 +861,7 @@ test "alloc with no backend is NoGDR: no cuda" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: no cuda", lastDetail());
+    try std.testing.expectEqualStrings("no cuda", lastDetail());
 }
 
 test "alloc with no matching BDF is NoGDR: missing gpu" {
@@ -894,7 +895,7 @@ test "alloc with no matching BDF is NoGDR: missing gpu" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: missing gpu", lastDetail());
+    try std.testing.expectEqualStrings("missing gpu", lastDetail());
 }
 
 test "alloc matches BDF and records pointer" {
@@ -1088,7 +1089,7 @@ test "alloc malloc failure is NoGDR: alloc" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: alloc", lastDetail());
+    try std.testing.expectEqualStrings("alloc", lastDetail());
 }
 
 test "GPU loopback allocates and exports source and destination as one range" {
@@ -1256,7 +1257,7 @@ test "alloc with neither CUDA backend is NoGDR: no cuda" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: no cuda", lastDetail());
+    try std.testing.expectEqualStrings("no cuda", lastDetail());
 }
 
 test "a driver backend that cannot enumerate is NoGDR: cuda drv init" {
@@ -1265,7 +1266,7 @@ test "a driver backend that cannot enumerate is NoGDR: cuda drv init" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: cuda drv init", lastDetail());
+    try std.testing.expectEqualStrings("cuda drv init", lastDetail());
 }
 
 test "driver backend allocation failure is NoGDR: cuda drv alloc" {
@@ -1297,7 +1298,7 @@ test "driver backend allocation failure is NoGDR: cuda drv alloc" {
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("NoGDR: cuda drv alloc", lastDetail());
+    try std.testing.expectEqualStrings("cuda drv alloc", lastDetail());
 }
 
 test "prepareForReg treats driver-allocated memory as CUDA" {

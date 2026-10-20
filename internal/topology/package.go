@@ -6,40 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 // logf is where discovery reports a fallback; tests replace it.
 var logf = log.Printf
 
-// ParseCPUList parses a kernel CPU list such as "0,56" or "0-3,8".
-func ParseCPUList(s string) ([]int, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, nil
-	}
-	var out []int
-	for _, r := range strings.Split(s, ",") {
-		lo, hi, isRange := strings.Cut(r, "-")
-		l, err := strconv.Atoi(lo)
-		if err != nil {
-			return nil, fmt.Errorf("cpu list %q", s)
-		}
-		h := l
-		if isRange {
-			if h, err = strconv.Atoi(hi); err != nil || h < l {
-				return nil, fmt.Errorf("cpu list %q", s)
-			}
-		}
-		for c := l; c <= h; c++ {
-			out = append(out, c)
-		}
-	}
-	return out, nil
-}
+// ParseCPUList parses a kernel CPU list such as "0,56" or "0-3,8". It is
+// sysfs.ParseCPUList, kept here for the callers that reach it through
+// topology.
+func ParseCPUList(s string) ([]int, error) { return sysfs.ParseCPUList(s) }
 
 // numaPackages maps every NUMA node that has CPUs to the physical package of
 // those CPUs (/sys/devices/system/node/nodeN/cpulist, then
@@ -49,43 +27,36 @@ func ParseCPUList(s string) ([]int, error) {
 // of a CPU node cannot be read or is not unique.
 func numaPackages(sysroot string) (map[int]int, error) {
 	dir := filepath.Join(sysroot, "devices/system/node")
-	ents, err := os.ReadDir(dir)
+	nodes, err := sysfs.Nodes(sysroot)
 	if err != nil {
 		return nil, fmt.Errorf("NUMA nodes: %w", err)
 	}
 	out := map[int]int{}
-	for _, e := range ents {
-		name := e.Name()
-		if !strings.HasPrefix(name, "node") {
-			continue
+	for _, nd := range nodes {
+		// Unlike the monitor's CPU load (nodeCPUs), a node whose cpulist
+		// cannot be read is an error here, not a node without CPUs: the
+		// package map decides the socket model of the whole graph.
+		if nd.ReadErr != nil {
+			return nil, fmt.Errorf("%s cpulist: %w", nd.Name, nd.ReadErr)
 		}
-		n, err := strconv.Atoi(strings.TrimPrefix(name, "node"))
-		if err != nil {
-			continue
+		if nd.ParseErr != nil {
+			return nil, fmt.Errorf("%s: %w", nd.Name, nd.ParseErr)
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, name, "cpulist"))
-		if err != nil {
-			return nil, fmt.Errorf("%s cpulist: %w", name, err)
-		}
-		cpus, err := ParseCPUList(string(raw))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		if len(cpus) == 0 {
+		if len(nd.CPUs) == 0 {
 			continue // memory-only node
 		}
 		pkg := -1
-		for _, c := range cpus {
-			p := readInt(filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", c), "topology/physical_package_id"), -1)
+		for _, c := range nd.CPUs {
+			p := sysfs.PackageID(sysroot, c)
 			if p < 0 {
-				return nil, fmt.Errorf("%s: cpu%d has no physical_package_id", name, c)
+				return nil, fmt.Errorf("%s: cpu%d has no physical_package_id", nd.Name, c)
 			}
 			if pkg >= 0 && p != pkg {
-				return nil, fmt.Errorf("%s: CPUs span packages %d and %d", name, pkg, p)
+				return nil, fmt.Errorf("%s: CPUs span packages %d and %d", nd.Name, pkg, p)
 			}
 			pkg = p
 		}
-		out[n] = pkg
+		out[nd.ID] = pkg
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no NUMA node with CPUs under %s", dir)

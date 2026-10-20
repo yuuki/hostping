@@ -13,6 +13,10 @@ const LoopbackRes = abi.LoopbackRes;
 const MutualReq = abi.MutualReq;
 const MutualRes = abi.MutualRes;
 
+/// Argument errors hostping_mutual and hostping_ud_open report themselves.
+const err_msg_size_buf = std.fmt.comptimePrint("msg_size exceeds the {d}-byte mutual buffer", .{verbs.mutual_buf_bytes});
+const err_msg_size_mtu = "msg_size exceeds the port MTU (a UD probe is one packet)";
+
 fn zstr(buf: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, buf, 0)) |i| return buf[0..i];
     return buf;
@@ -24,6 +28,8 @@ fn setErr(dst: []u8, msg: []const u8) void {
     @memcpy(dst[0..n], msg[0..n]);
 }
 
+/// setVerbsErr writes "{error}: {detail}" (verbs.lastQpDetail), or just the
+/// error name when the probe left no detail or the error carries none.
 fn setVerbsErr(dst: []u8, err: anyerror) void {
     switch (err) {
         error.NoDevice, error.Gid, error.Connect => {
@@ -37,11 +43,7 @@ fn setVerbsErr(dst: []u8, err: anyerror) void {
         setErr(dst, @errorName(err));
         return;
     }
-    if (err == error.NoGDR) {
-        setErr(dst, detail);
-        return;
-    }
-    var buf: [256]u8 = undefined;
+    var buf: [abi.ERR_LEN]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}: {s}", .{ @errorName(err), detail }) catch @errorName(err);
     setErr(dst, msg);
 }
@@ -76,8 +78,8 @@ export fn hostping_loopback(req: *const LoopbackReq, res: *LoopbackRes) i32 {
         res.gpu_alloc_ns = if (req.gpu_index >= 0) req.sim_gpu_alloc_ns else 0;
         res.mr_reg_ns = req.sim_mr_reg_ns;
         res.qp_setup_ns = req.sim_qp_setup_ns;
-        res.rc = 0;
-        return 0;
+        res.rc = abi.OK;
+        return abi.OK;
     }
 
     const device = zstr(&req.device);
@@ -99,8 +101,8 @@ export fn hostping_loopback(req: *const LoopbackReq, res: *LoopbackRes) i32 {
     res.addr_mode = @backingInt(out.mode);
     res.port_num = out.port;
     res.lid = out.lid;
-    res.rc = 0;
-    return 0;
+    res.rc = abi.OK;
+    return abi.OK;
 }
 
 export fn hostping_gpu_release() void {
@@ -113,18 +115,18 @@ export fn hostping_mutual(req: *const MutualReq, res: *MutualRes) i32 {
     // complete in error, which reads as a connectivity failure, so reject it
     // here as a bad argument instead.
     if (req.msg_size > verbs.mutual_buf_bytes) {
-        res.rc = 1;
-        setErr(&res.err, "msg_size exceeds the 4096-byte mutual buffer");
-        return 1;
+        res.rc = abi.ERR;
+        setErr(&res.err, err_msg_size_buf);
+        return abi.ERR;
     }
     if (req.sim != 0) {
         if (req.sim_connect_fail != 0) {
-            res.rc = 5;
+            res.rc = abi.ERR_CONNECT;
             res.connected = 0;
             res.reliable = 0;
             res.loss_ratio = 1;
             setErr(&res.err, "simulated connect failure");
-            return 5;
+            return abi.ERR_CONNECT;
         }
         res.connected = 1;
         res.reliable = 0; // simulated loss is synthetic, not an RC timeout
@@ -136,8 +138,8 @@ export fn hostping_mutual(req: *const MutualReq, res: *MutualRes) i32 {
         res.drops = lost;
         res.recvd = iters - @min(iters, lost);
         if (res.sent > 0) res.loss_ratio = @as(f64, @floatFromInt(res.drops)) / @as(f64, @floatFromInt(res.sent));
-        res.rc = 0;
-        return 0;
+        res.rc = abi.OK;
+        return abi.OK;
     }
     const src = zstr(&req.src_device);
     const dst = zstr(&req.dst_device);
@@ -146,16 +148,16 @@ export fn hostping_mutual(req: *const MutualReq, res: *MutualRes) i32 {
         abi.MUTUAL_RC => &verbs.mutualVerbsRc,
         abi.MUTUAL_UD => &verbs.mutualVerbsUd,
         else => {
-            res.rc = 1;
+            res.rc = abi.ERR;
             setErr(&res.err, "unknown mutual transport");
-            return 1;
+            return abi.ERR;
         },
     };
     const out = run(src, dst, req.msg_size, req.iters, timeout) catch |err| {
         if (err == error.MsgSize) {
-            res.rc = 1;
-            setErr(&res.err, "msg_size exceeds the port MTU (a UD probe is one packet)");
-            return 1;
+            res.rc = abi.ERR;
+            setErr(&res.err, err_msg_size_mtu);
+            return abi.ERR;
         }
         res.rc = errclass.verbsRC(err);
         // Only a connectivity-class failure is evidence that the two RNICs
@@ -178,8 +180,8 @@ export fn hostping_mutual(req: *const MutualReq, res: *MutualRes) i32 {
     // Ethernet drop: drops come from the RNIC counters. Leave loss_ratio at 0.
     res.drops = 0;
     res.loss_ratio = 0;
-    res.rc = 0;
-    return 0;
+    res.rc = abi.OK;
+    return abi.OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,18 +199,18 @@ export fn hostping_ud_open(device: [*:0]const u8, msg_size: u32, out: *?*verbs.U
     @memset(e, 0);
     out.* = null;
     if (msg_size > verbs.mutual_buf_bytes) {
-        setErr(e, "msg_size exceeds the 4096-byte mutual buffer");
-        return 1;
+        setErr(e, err_msg_size_buf);
+        return abi.ERR;
     }
     out.* = verbs.udOpen(std.mem.span(device), msg_size) catch |x| {
         if (x == error.MsgSize) {
-            setErr(e, "msg_size exceeds the port MTU (a UD probe is one packet)");
-            return 1;
+            setErr(e, err_msg_size_mtu);
+            return abi.ERR;
         }
         setVerbsErr(e, x);
         return errclass.verbsRC(x);
     };
-    return 0;
+    return abi.OK;
 }
 
 export fn hostping_ud_close(ep: ?*verbs.UdEp) void {
@@ -221,25 +223,25 @@ export fn hostping_ud_send(eps: [*]const ?*verbs.UdEp, n: u32, src: u32, dst: u3
     t_ns.* = 0;
     const all = udEps(eps, n) catch {
         setErr(e, "too many endpoints");
-        return 1;
+        return abi.ERR;
     };
     if (src >= all.len or dst >= all.len or src == dst) {
         setErr(e, "endpoint index out of range");
-        return 1;
+        return abi.ERR;
     }
     const s = all[src] orelse {
         setErr(e, "NoDevice: source endpoint not open");
-        return 2;
+        return abi.ERR_NO_DEVICE;
     };
     const d = all[dst] orelse {
         setErr(e, "NoDevice: destination endpoint not open");
-        return 2;
+        return abi.ERR_NO_DEVICE;
     };
     t_ns.* = verbs.udSend(s, d, udtag.request(seq, src)) catch |x| {
         setVerbsErr(e, x);
         return errclass.verbsRC(x);
     };
-    return 0;
+    return abi.OK;
 }
 
 export fn hostping_ud_wait(eps: [*]const ?*verbs.UdEp, n: u32, spin_ns: u64, block_ms: u32, out: [*]UdReply, max: u32, nout: *u32, err: [*]u8) i32 {
@@ -248,7 +250,7 @@ export fn hostping_ud_wait(eps: [*]const ?*verbs.UdEp, n: u32, spin_ns: u64, blo
     nout.* = 0;
     const all = udEps(eps, n) catch {
         setErr(e, "too many endpoints");
-        return 1;
+        return abi.ERR;
     };
     var buf: [64]udtag.Arrival = undefined;
     const lim = @min(@as(usize, max), buf.len);
@@ -260,7 +262,7 @@ export fn hostping_ud_wait(eps: [*]const ?*verbs.UdEp, n: u32, spin_ns: u64, blo
         out[i] = .{ .ep = a.ep, .seq = a.seq, .t_ns = a.t_ns };
     }
     nout.* = @intCast(k);
-    return 0;
+    return abi.OK;
 }
 
 test {

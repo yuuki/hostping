@@ -1,41 +1,17 @@
 const std = @import("std");
 const sysio = @import("sysio.zig");
+const detail = @import("detail.zig");
 const gdr = @import("gdr.zig");
 const loopbuf = @import("loopbuf.zig");
 const memwarm = @import("memwarm.zig");
 const udtag = @import("udtag.zig");
 const portaddr = @import("portaddr.zig");
+const sim = @import("sim.zig");
+const types = @import("verbs_types.zig");
 const c = @import("verbs_c");
 
-pub const LoopResult = struct {
-    small_p50: u64,
-    small_p99: u64,
-    large_p50: u64,
-    bw: u64,
-    completions: u32,
-    /// ToN'24 §VI-C verb execution times of this probe's setup, in ns.
-    /// gpu_alloc_ns is 0 for a memory endpoint.
-    gpu_alloc_ns: u64 = 0,
-    mr_reg_ns: u64 = 0,
-    qp_setup_ns: u64 = 0,
-    /// Time the --mem-warmup fill ran before the timed iterations; 0 when
-    /// off or for a GPU endpoint.
-    mem_warmup_ns: u64 = 0,
-    /// How the probe addressed its port, the port it used and, for an
-    /// InfiniBand port, its LID (0 on RoCE).
-    mode: portaddr.Mode = .none,
-    port: u8 = 0,
-    lid: u16 = 0,
-};
-
-pub const MutualResult = struct {
-    rtt_p50: u64,
-    rtt_p99: u64,
-    sent: u32,
-    recvd: u32,
-    connected: i32,
-    reliable: i32,
-};
+const LoopResult = types.LoopResult;
+const MutualResult = types.MutualResult;
 
 fn timespecNs() !u64 {
     var ts: c.struct_timespec = undefined;
@@ -58,9 +34,13 @@ fn openDevice(name: []const u8) ?*c.ibv_context {
     return null;
 }
 
+/// gidRaw is the 16 bytes of a GID, the view every test below reads.
+fn gidRaw(g: *const c.ibv_gid) *const [16]u8 {
+    return @ptrCast(g);
+}
+
 fn gidZero(g: c.ibv_gid) bool {
-    const raw: *const [16]u8 = @ptrCast(&g);
-    return std.mem.allEqual(u8, raw, 0);
+    return std.mem.allEqual(u8, gidRaw(&g), 0);
 }
 
 /// One port's address as a probe uses it. On RoCE, `gid` at `index` is a
@@ -80,17 +60,13 @@ const PortGid = struct {
     }
 };
 
-fn gidRaw(g: c.ibv_gid) *const [16]u8 {
-    return @ptrCast(&g);
-}
-
 fn gidIPv4Mapped(g: c.ibv_gid) bool {
-    const raw = gidRaw(g);
+    const raw = gidRaw(&g);
     return std.mem.allEqual(u8, raw[0..10], 0) and raw[10] == 0xff and raw[11] == 0xff;
 }
 
 fn gidLinkLocal(g: c.ibv_gid) bool {
-    const raw = gidRaw(g);
+    const raw = gidRaw(&g);
     return raw[0] == 0xfe and raw[1] == 0x80;
 }
 
@@ -259,16 +235,16 @@ fn ibPortAddr(ctx: *c.ibv_context, port: u8, lid: u16, max_rd: u8) !PortGid {
 }
 
 fn storeSkipDetail(s: portaddr.Skip, ports: []const portaddr.Port) void {
-    @memset(&qp_err_detail, 0);
+    qp_err_detail.clear();
     for (ports) |p| {
         if (!p.link_layer.isInfiniBand()) continue;
         switch (s) {
             .ib_no_lid => if (p.active) {
-                _ = std.fmt.bufPrint(&qp_err_detail, "infiniband port {d} has lid 0", .{p.num}) catch {};
+                qp_err_detail.set("infiniband port {d} has lid 0", .{p.num});
                 return;
             },
             .ib_port_not_active => {
-                _ = std.fmt.bufPrint(&qp_err_detail, "infiniband port {d} not active", .{p.num}) catch {};
+                qp_err_detail.set("infiniband port {d} not active", .{p.num});
                 return;
             },
             .no_rocev2_gid => return,
@@ -369,24 +345,15 @@ fn freeAligned(buf: []align(4096) u8) void {
     c.free(buf.ptr);
 }
 
-var qp_err_detail: [96]u8 = @splat(0);
+/// The reason behind the last probe error (detail.zig), read through
+/// lastQpDetail. Each probe entry point clears it first.
+var qp_err_detail: detail.Detail = .{};
 
 pub fn lastQpDetail() []const u8 {
-    return std.mem.sliceTo(&qp_err_detail, 0);
-}
-
-fn clearQpDetail() void {
-    @memset(&qp_err_detail, 0);
-}
-
-fn storeDetail(msg: []const u8) void {
-    @memset(&qp_err_detail, 0);
-    const n = @min(msg.len, qp_err_detail.len - 1);
-    @memcpy(qp_err_detail[0..n], msg[0..n]);
+    return qp_err_detail.get();
 }
 
 fn storeLibcErrno() void {
-    @memset(&qp_err_detail, 0);
     const n = std.c._errno().*;
     const tag: []const u8 = switch (n) {
         22 => "EINVAL",
@@ -395,9 +362,9 @@ fn storeLibcErrno() void {
         else => "",
     };
     if (tag.len > 0) {
-        _ = std.fmt.bufPrint(&qp_err_detail, "errno={d} ({s})", .{ n, tag }) catch {};
+        qp_err_detail.set("errno={d} ({s})", .{ n, tag });
     } else {
-        _ = std.fmt.bufPrint(&qp_err_detail, "errno={d}", .{n}) catch {};
+        qp_err_detail.set("errno={d}", .{n});
     }
 }
 
@@ -418,9 +385,8 @@ pub fn lastPortFault() bool {
 /// exceeded (12)". setVerbsErr prefixes it with "Wc: ".
 fn storeWcStatus(status: c_uint) void {
     last_wc_status = @intCast(status);
-    @memset(&qp_err_detail, 0);
     const name = std.mem.span(c.ibv_wc_status_str(status));
-    _ = std.fmt.bufPrint(&qp_err_detail, "{s} ({d})", .{ name, status }) catch {};
+    qp_err_detail.set("{s} ({d})", .{ name, status });
 }
 
 comptime {
@@ -469,9 +435,8 @@ fn modifyQp(qp: [*c]c.ibv_qp, attr: *c.ibv_qp_attr, flags: c_int, err: anyerror)
 }
 
 fn copyGid(dst: *c.ibv_gid, src: c.ibv_gid) void {
-    const from: *const [16]u8 = @ptrCast(&src);
     const to: *[16]u8 = @ptrCast(dst);
-    to.* = from.*;
+    to.* = gidRaw(&src).*;
 }
 
 fn createRcQp(pd: *c.ibv_pd, cq: *c.ibv_cq) !*c.ibv_qp {
@@ -539,19 +504,6 @@ fn qpRtr(qp: [*c]c.ibv_qp, dest_qpn: u32, local: PortGid, remote: PortGid, hop_l
     try modifyQp(qp, &attr, flags, error.Rtr);
 }
 
-fn appendAttempts(n: usize, what: []const u8) void {
-    var old_buf: [96]u8 = undefined;
-    const old = lastQpDetail();
-    const on = @min(old.len, old_buf.len);
-    @memcpy(old_buf[0..on], old[0..on]);
-    @memset(&qp_err_detail, 0);
-    if (on == 0) {
-        _ = std.fmt.bufPrint(&qp_err_detail, "after {d} {s}", .{ n, what }) catch {};
-        return;
-    }
-    _ = std.fmt.bufPrint(&qp_err_detail, "{s}; after {d} {s}", .{ old_buf[0..on], n, what }) catch {};
-}
-
 fn qpRts(qp: [*c]c.ibv_qp, max_rd: u8) !void {
     var attr: c.ibv_qp_attr = std.mem.zeroes(c.ibv_qp_attr);
     attr.qp_state = c.IBV_QPS_RTS;
@@ -559,7 +511,7 @@ fn qpRts(qp: [*c]c.ibv_qp, max_rd: u8) !void {
     attr.retry_cnt = 7;
     attr.rnr_retry = 7;
     attr.sq_psn = 0;
-    attr.max_rd_atomic = if (max_rd == 0) 1 else max_rd;
+    attr.max_rd_atomic = max_rd;
     const flags: c_int = c.IBV_QP_STATE | c.IBV_QP_TIMEOUT | c.IBV_QP_RETRY_CNT | c.IBV_QP_RNR_RETRY |
         c.IBV_QP_SQ_PSN | c.IBV_QP_MAX_QP_RD_ATOMIC;
     try modifyQp(qp, &attr, flags, error.Rts);
@@ -704,7 +656,7 @@ fn gpuRegions(pd: *c.ibv_pd, mem: gdr.DeviceMem, bp: loopbuf.Plan, access: c_int
 }
 
 pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []const u8, small_size: u32, large_size: u32, iters: u32, timeout_ms: u32, mem_warmup_ns: u64) !LoopResult {
-    clearQpDetail();
+    qp_err_detail.clear();
     last_port_fault = false;
 
     // NSDI'23 §4.1.1 registers both regions in the endpoint, so a GPU
@@ -721,12 +673,12 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     var gpu_alloc_ns: u64 = 0;
     if (gpu_index >= 0) {
         if (gpu_bdf.len == 0) {
-            storeDetail("NoGDR: missing gpu");
+            qp_err_detail.set("{s}", .{"missing gpu"});
             return error.NoGDR;
         }
         const t_alloc = try timespecNs();
         gpu_mem = gdr.alloc(gpu_bdf, bp.alloc_len) catch {
-            storeDetail(gdr.lastDetail());
+            qp_err_detail.set("{s}", .{gdr.lastDetail()});
             return error.NoGDR;
         };
         gpu_alloc_ns = (timespecNs() catch t_alloc) - t_alloc;
@@ -785,7 +737,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     const qp_d = try createRcQp(pd, cq);
     defer _ = c.ibv_destroy_qp(qp_d);
     var at = connectPair(qp_s, qp_d, tries[0..nk], 0) orelse {
-        appendAttempts(nk, what);
+        qp_err_detail.append("after {d} {s}", .{ nk, what });
         return error.Rtr;
     };
     var qp_setup_ns = (try timespecNs()) - t_qp;
@@ -817,8 +769,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
             if (err == error.Wc and tries[at].pg.isInfiniBand() and at + 1 < nk and
                 portaddr.retryOtherMode(last_wc_status))
             {
-                var saved: [96]u8 = undefined;
-                @memcpy(&saved, &qp_err_detail);
+                const saved = qp_err_detail.save();
                 drainCq(cq);
                 const t_re = try timespecNs();
                 if (connectPair(qp_s, qp_d, tries[0..nk], at + 1)) |next| {
@@ -828,7 +779,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
                 }
                 // The other mode could not even connect: report the WRITE
                 // failure, not the refused RTR.
-                @memcpy(&qp_err_detail, &saved);
+                qp_err_detail.restore(saved);
             }
             last_port_fault = portaddr.portFault(tries[at].pg.isInfiniBand(), err == error.Wc, last_wc_status);
             return err;
@@ -837,7 +788,6 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     }
     const pg = tries[at].pg;
     if (pg.isInfiniBand()) cacheMode(device, pg.port, pg.mode);
-    const sim = @import("sim.zig");
     return .{
         .small_p50 = sim.percentile(smalls[0..n], 50),
         .small_p99 = sim.percentile(smalls[0..n], 99),
@@ -880,7 +830,7 @@ fn registerGpuMr(pd: *c.ibv_pd, mem: gdr.DeviceMem, access: c_int) !*c.ibv_mr {
     if (c.ibv_reg_mr(pd, addr, mem.len, access)) |mr| {
         return mr;
     }
-    storeDetail("NoGDR: reg_mr");
+    qp_err_detail.set("{s}", .{"reg_mr"});
     return error.NoGDR;
 }
 
@@ -894,47 +844,38 @@ fn registerGpuMr(pd: *c.ibv_pd, mem: gdr.DeviceMem, access: c_int) !*c.ibv_mr {
 
 /// mutualVerbsRc is the RC mutual probe.
 pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, timeout_ms: u32) !MutualResult {
-    clearQpDetail();
+    qp_err_detail.clear();
     if (std.mem.eql(u8, src, dst)) return error.Connect;
 
+    // Every resource is released by defer, so the error and success paths
+    // tear down in the same order: the reverse of this one.
     const ctx_a = openDevice(src) orelse return error.NoDevice;
-    errdefer _ = c.ibv_close_device(ctx_a);
+    defer _ = c.ibv_close_device(ctx_a);
     const ctx_b = openDevice(dst) orelse return error.NoDevice;
-    errdefer _ = c.ibv_close_device(ctx_b);
+    defer _ = c.ibv_close_device(ctx_b);
 
     const pg_a = try pickPortAddr(ctx_a);
     const pg_b = try pickPortAddr(ctx_b);
     // A RoCE port cannot reach an InfiniBand one; that is a pairing error,
     // not a measured connectivity failure.
     if (pg_a.isInfiniBand() != pg_b.isInfiniBand()) {
-        storeDetail("link layers differ (RoCE and InfiniBand)");
+        qp_err_detail.set("{s}", .{"link layers differ (RoCE and InfiniBand)"});
         return error.Port;
     }
 
     const pd_a = c.ibv_alloc_pd(ctx_a) orelse return error.Pd;
-    errdefer _ = c.ibv_dealloc_pd(pd_a);
+    defer _ = c.ibv_dealloc_pd(pd_a);
     const pd_b = c.ibv_alloc_pd(ctx_b) orelse return error.Pd;
-    errdefer _ = c.ibv_dealloc_pd(pd_b);
+    defer _ = c.ibv_dealloc_pd(pd_b);
     const cq_a = c.ibv_create_cq(ctx_a, 128, null, null, 0) orelse return error.Cq;
-    errdefer _ = c.ibv_destroy_cq(cq_a);
+    defer _ = c.ibv_destroy_cq(cq_a);
     const cq_b = c.ibv_create_cq(ctx_b, 128, null, null, 0) orelse return error.Cq;
-    errdefer _ = c.ibv_destroy_cq(cq_b);
+    defer _ = c.ibv_destroy_cq(cq_b);
 
-    var ia: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
-    ia.send_cq = cq_a;
-    ia.recv_cq = cq_a;
-    ia.qp_type = c.IBV_QPT_RC;
-    ia.cap.max_send_wr = 64;
-    ia.cap.max_recv_wr = 64;
-    ia.cap.max_send_sge = 1;
-    ia.cap.max_recv_sge = 1;
-    var ib = ia;
-    ib.send_cq = cq_b;
-    ib.recv_cq = cq_b;
-    const qp_a = c.ibv_create_qp(pd_a, &ia) orelse return error.Qp;
-    errdefer _ = c.ibv_destroy_qp(qp_a);
-    const qp_b = c.ibv_create_qp(pd_b, &ib) orelse return error.Qp;
-    errdefer _ = c.ibv_destroy_qp(qp_b);
+    const qp_a = try createRcQp(pd_a, cq_a);
+    defer _ = c.ibv_destroy_qp(qp_a);
+    const qp_b = try createRcQp(pd_b, cq_b);
+    defer _ = c.ibv_destroy_qp(qp_b);
 
     try qpInit(qp_a, pg_a.port);
     try qpInit(qp_b, pg_b.port);
@@ -943,16 +884,16 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
     try qpRts(qp_a, pg_a.max_rd);
     try qpRts(qp_b, pg_b.max_rd);
 
-    // verbs.mutual_buf_bytes; hostping_mutual rejects a larger msg first.
-    const bytes_aligned = @as(usize, 4096);
+    // hostping_mutual rejects a msg longer than this first.
+    const bytes_aligned: usize = types.mutual_buf_bytes;
     const ba = try allocAligned(bytes_aligned, -1);
-    errdefer freeAligned(ba);
+    defer freeAligned(ba);
     const bb = try allocAligned(bytes_aligned, -1);
-    errdefer freeAligned(bb);
+    defer freeAligned(bb);
     const mra = c.ibv_reg_mr(pd_a, ba.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
-    errdefer _ = c.ibv_dereg_mr(mra);
+    defer _ = c.ibv_dereg_mr(mra);
     const mrb = c.ibv_reg_mr(pd_b, bb.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
-    errdefer _ = c.ibv_dereg_mr(mrb);
+    defer _ = c.ibv_dereg_mr(mrb);
 
     const n: usize = if (iters == 0) 8 else @min(iters, 512);
     var rtts: [512]u64 = undefined;
@@ -966,9 +907,8 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
     }
 
     const connected: i32 = if (recvd > 0) 1 else 0;
-    const sim = @import("sim.zig");
     const slice = rtts[0..recvd];
-    const result: MutualResult = .{
+    return .{
         .rtt_p50 = sim.percentile(slice, 50),
         .rtt_p99 = sim.percentile(slice, 99),
         .sent = @intCast(n),
@@ -976,20 +916,6 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
         .connected = connected,
         .reliable = 1,
     };
-
-    _ = c.ibv_dereg_mr(mrb);
-    _ = c.ibv_dereg_mr(mra);
-    freeAligned(bb);
-    freeAligned(ba);
-    _ = c.ibv_destroy_qp(qp_b);
-    _ = c.ibv_destroy_qp(qp_a);
-    _ = c.ibv_destroy_cq(cq_b);
-    _ = c.ibv_destroy_cq(cq_a);
-    _ = c.ibv_dealloc_pd(pd_b);
-    _ = c.ibv_dealloc_pd(pd_a);
-    _ = c.ibv_close_device(ctx_b);
-    _ = c.ibv_close_device(ctx_a);
-    return result;
 }
 
 fn pingOnce(qp_s: [*c]c.ibv_qp, cq_s: [*c]c.ibv_cq, mr_s: [*c]c.ibv_mr, qp_r: [*c]c.ibv_qp, cq_r: [*c]c.ibv_cq, mr_r: [*c]c.ibv_mr, len: u32, timeout_ms: u32) !u64 {
@@ -1143,7 +1069,7 @@ fn udReset(ep: *UdEp) !void {
 }
 
 pub fn udOpen(device: []const u8, msg: u32) !*UdEp {
-    clearQpDetail();
+    qp_err_detail.clear();
     const ctx = openDevice(device) orelse return error.NoDevice;
     errdefer _ = c.ibv_close_device(ctx);
     const pg = try pickPortAddr(ctx);
@@ -1225,11 +1151,10 @@ pub fn udClose(ep: *UdEp) void {
 /// InfiniBand one are never a pair: that is a setup error.
 fn udAh(src: *UdEp, dst: *const UdEp) !*c.ibv_ah {
     if (src.pg.isInfiniBand() != dst.pg.isInfiniBand()) {
-        storeDetail("link layers differ (RoCE and InfiniBand)");
+        qp_err_detail.set("{s}", .{"link layers differ (RoCE and InfiniBand)"});
         return error.Port;
     }
-    const dgid_ptr: *const [16]u8 = @ptrCast(&dst.pg.gid);
-    const dgid = dgid_ptr.*;
+    const dgid = gidRaw(&dst.pg.gid).*;
     var i: usize = 0;
     while (i < src.nah) : (i += 1) {
         if (src.ahs[i].lid == dst.pg.lid and std.mem.eql(u8, &src.ahs[i].gid, &dgid)) return src.ahs[i].ah;
@@ -1398,7 +1323,7 @@ pub fn udWait(eps: []const ?*UdEp, spin_ns: u64, block_ms: u32, out: []udtag.Arr
 /// timeout_ms. It counts replies; a lost request or reply is one timed-out
 /// probe and does not disturb the next.
 pub fn mutualVerbsUd(src: []const u8, dst: []const u8, msg: u32, iters: u32, timeout_ms: u32) !MutualResult {
-    clearQpDetail();
+    qp_err_detail.clear();
     if (std.mem.eql(u8, src, dst)) return error.Connect;
 
     const a = try udOpen(src, msg);
@@ -1444,7 +1369,6 @@ pub fn mutualVerbsUd(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
         }
     }
 
-    const sim = @import("sim.zig");
     const slice = rtts[0..recvd];
     return .{
         .rtt_p50 = sim.percentile(slice, 50),

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 var bdfRe = regexp.MustCompile(`(?i)^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$`)
@@ -44,7 +46,7 @@ const (
 
 // PCIeType is the PCI Express device/port type, or PCIeTypeUnknown.
 func PCIeType(sysroot, bdf string) int {
-	s := strings.ToLower(strings.TrimSpace(readFile(filepath.Join(sysroot, "bus/pci/devices", bdf, "pcie_type"))))
+	s := strings.ToLower(strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "bus/pci/devices", bdf, "pcie_type"))))
 	if s == "" {
 		return PCIeTypeUnknown
 	}
@@ -68,7 +70,7 @@ func PCIeType(sysroot, bdf string) int {
 }
 
 func Class(sysroot, bdf string) string {
-	return strings.ToLower(strings.TrimSpace(readFile(filepath.Join(sysroot, "bus/pci/devices", bdf, "class"))))
+	return strings.ToLower(strings.TrimSpace(sysfs.ReadString(filepath.Join(sysroot, "bus/pci/devices", bdf, "class"))))
 }
 
 func IsPCIBridge(class string) bool {
@@ -144,12 +146,4 @@ func ReadConfig(sysroot, bdf string) (Caps, error) {
 		return Caps{}, err
 	}
 	return ParseConfig(b), nil
-}
-
-func readFile(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }

@@ -1,35 +1,19 @@
-const std = @import("std");
+//! The verbs implementation off Linux, where there is no libibverbs: every
+//! probe fails with NoDevice, a GPU endpoint with NoGDR. verbs.zig checks
+//! its signatures against the same list as verbs_linux.zig's at compile
+//! time, and root_test.zig analyses its bodies, so a Linux build catches a
+//! stub that drifted.
+const detail = @import("detail.zig");
+const udtag = @import("udtag.zig");
+const types = @import("verbs_types.zig");
 
-pub const LoopResult = struct {
-    small_p50: u64,
-    small_p99: u64,
-    large_p50: u64,
-    bw: u64,
-    completions: u32,
-    gpu_alloc_ns: u64 = 0,
-    mr_reg_ns: u64 = 0,
-    qp_setup_ns: u64 = 0,
-    /// Time the --mem-warmup fill ran before the timed iterations; 0 when
-    /// off or for a GPU endpoint.
-    mem_warmup_ns: u64 = 0,
-    mode: @import("portaddr.zig").Mode = .none,
-    port: u8 = 0,
-    lid: u16 = 0,
-};
+const LoopResult = types.LoopResult;
+const MutualResult = types.MutualResult;
 
-pub const MutualResult = struct {
-    rtt_p50: u64,
-    rtt_p99: u64,
-    sent: u32,
-    recvd: u32,
-    connected: i32,
-    reliable: i32,
-};
-
-var stub_detail: [32]u8 = @splat(0);
+var stub_detail: detail.Detail = .{};
 
 pub fn lastQpDetail() []const u8 {
-    return std.mem.sliceTo(&stub_detail, 0);
+    return stub_detail.get();
 }
 
 pub fn lastPortFault() bool {
@@ -37,11 +21,10 @@ pub fn lastPortFault() bool {
 }
 
 pub fn loopbackVerbs(_: []const u8, _: i32, gpu_index: i32, gpu_bdf: []const u8, _: u32, _: u32, _: u32, _: u32, _: u64) !LoopResult {
-    @memset(&stub_detail, 0);
+    stub_detail.clear();
     if (gpu_index >= 0) {
-        const msg: []const u8 = if (gpu_bdf.len == 0) "NoGDR: missing gpu" else "NoGDR: no cuda";
-        const n = @min(msg.len, stub_detail.len - 1);
-        @memcpy(stub_detail[0..n], msg[0..n]);
+        const msg: []const u8 = if (gpu_bdf.len == 0) "missing gpu" else "no cuda";
+        stub_detail.set("{s}", .{msg});
         return error.NoGDR;
     }
     return error.NoDevice;
@@ -54,8 +37,6 @@ pub fn mutualVerbsRc(_: []const u8, _: []const u8, _: u32, _: u32, _: u32) !Mutu
 pub fn mutualVerbsUd(_: []const u8, _: []const u8, _: u32, _: u32, _: u32) !MutualResult {
     return error.NoDevice;
 }
-
-const udtag = @import("udtag.zig");
 
 /// The UD mutual probe needs libibverbs; off Linux there is no endpoint.
 pub const UdEp = opaque {};
