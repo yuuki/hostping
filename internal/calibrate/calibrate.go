@@ -263,10 +263,24 @@ func tableGroups(g topology.Graph, reports []model.Report) []tableGroup {
 // of them when keep is nil). table is the section key the warnings name, ""
 // for the top level.
 func summarizeGroup(g topology.Graph, reports []model.Report, opt Options, keep func(string) bool, table string) ([]DistanceResult, []Outlier, []Bimodal) {
+	all := accumulate(g, reports, opt, keep)
 	var dists []DistanceResult
 	var outliersAll []Outlier
 	var bims []Bimodal
-	accs := map[model.Distance]*acc{}
+	for _, d := range model.Distances() {
+		r, outs, bim := reduce(g, d, all[d], opt, table)
+		dists = append(dists, r)
+		outliersAll = append(outliersAll, outs...)
+		bims = append(bims, bim...)
+	}
+	return dists, outliersAll, bims
+}
+
+// accumulate collects each distance's usable idle readings over the paths
+// of the RNICs keep accepts (all of them when keep is nil): every path's
+// readings across runs, and every run's readings of the distance.
+func accumulate(g topology.Graph, reports []model.Report, opt Options, keep func(string) bool) accs {
+	all := accs{}
 	for _, rep := range reports {
 		if rep.Mode != model.ModeIdle {
 			continue
@@ -280,69 +294,73 @@ func summarizeGroup(g topology.Graph, reports []model.Report, opt Options, keep 
 			if !ok {
 				continue
 			}
-			a := accs[d]
-			if a == nil {
-				a = &acc{paths: map[pathKey][]uint64{}}
-				accs[d] = a
-			}
-			k := pathKey{m.RNIC, m.Endpoint}
-			a.paths[k] = append(a.paths[k], m.BandwidthBPS)
-			rd := reading{key: k, bw: m.BandwidthBPS}
-			if opt.Latency {
-				rd.lat = m.SmallLatNsP50
-			}
-			run[d] = append(run[d], rd)
+			run[d] = append(run[d], all.at(d).add(m, opt.Latency))
 		}
 		for d, v := range run {
-			accs[d].runs = append(accs[d].runs, v)
+			all[d].runs = append(all[d].runs, v)
 		}
 	}
-	for _, d := range model.Distances() {
-		r := DistanceResult{Distance: d}
-		a := accs[d]
-		if a == nil {
-			dists = append(dists, r)
-			continue
-		}
-		r.set(a.level(nil))
-		parent := a.paths
-		var outs []Outlier
-		b, ok := bimodal(d, a.paths, r.BandwidthBPS, opt.AbnormalTh)
-		if ok {
-			fast := map[pathKey]bool{}
-			for _, p := range b.Fast {
-				fast[pathKey{p.RNIC, p.Endpoint}] = true
-			}
-			b.FastPairs, b.MixedPairs, b.Unpaired = pairSplit(g, b)
-			if len(b.MixedPairs) == 0 && len(b.Unpaired) == 0 && len(b.FastPairs) > 0 {
-				r.set(a.level(func(k pathKey) bool { return !fast[k] }))
-				hi := a.level(func(k pathKey) bool { return fast[k] })
-				sc := SubClassResult{
-					Name:         fastSubClass,
-					BandwidthBPS: hi.bw, LatencyNs: hi.lat,
-					Paths: hi.paths, Runs: hi.runs,
-					BW: hi.bwSpread, Lat: hi.latSpread,
-					RootPortPairs: b.FastPairs,
-				}
-				r.SubClasses = []SubClassResult{sc}
-				b.SubClass, b.SubClassBPS, b.BaselineBPS = sc.Name, sc.BandwidthBPS, r.BandwidthBPS
-				parent = filterPaths(a.paths, func(k pathKey) bool { return !fast[k] })
-				outs = outliers(d, sc.Name, filterPaths(a.paths, func(k pathKey) bool { return fast[k] }), sc.BandwidthBPS, opt.AbnormalTh)
-			}
-			b.Table = table
-			bims = append(bims, b)
-		}
-		outs = append(outs, outliers(d, "", parent, r.BandwidthBPS, opt.AbnormalTh)...)
-		slices.SortFunc(outs, func(x, y Outlier) int {
-			return comparePath(PathRef{x.RNIC, x.Endpoint}, PathRef{y.RNIC, y.Endpoint})
-		})
-		for i := range outs {
-			outs[i].Table = table
-		}
-		outliersAll = append(outliersAll, outs...)
-		dists = append(dists, r)
+	return all
+}
+
+// reduce is the baseline of one distance from its readings (unmeasured when
+// a is nil), with the paths that would diagnose abnormal against it and, when
+// its paths read at two levels, the bimodal note (one element), all under
+// table.
+func reduce(g topology.Graph, d model.Distance, a *acc, opt Options, table string) (DistanceResult, []Outlier, []Bimodal) {
+	r := DistanceResult{Distance: d}
+	if a == nil {
+		return r, nil, nil
 	}
-	return dists, outliersAll, bims
+	r.set(a.level(nil))
+	parent := a.paths
+	var outs []Outlier
+	var bims []Bimodal
+	if b, ok := bimodal(d, a.paths, r.BandwidthBPS, opt.AbnormalTh); ok {
+		parent, outs = learnSubClass(g, a, &r, &b, opt.AbnormalTh)
+		b.Table = table
+		bims = append(bims, b)
+	}
+	outs = append(outs, outliers(d, "", parent, r.BandwidthBPS, opt.AbnormalTh)...)
+	slices.SortFunc(outs, func(x, y Outlier) int {
+		return comparePath(PathRef{x.RNIC, x.Endpoint}, PathRef{y.RNIC, y.Endpoint})
+	})
+	for i := range outs {
+		outs[i].Table = table
+	}
+	return r, outs, bims
+}
+
+// learnSubClass maps b's clusters onto root-port pairs and, when the split
+// follows them, learns the fast cluster as the sub-class "fast": r is
+// restated over the slow cluster, the sub-class over the fast one, and b
+// records both. It returns the paths r's baseline now covers, and the fast
+// paths that would diagnose abnormal against the sub-class. When the split
+// does not follow root-port pairs, r keeps the statistic over every path and
+// nothing is learned.
+func learnSubClass(g topology.Graph, a *acc, r *DistanceResult, b *Bimodal, th float64) (map[pathKey][]uint64, []Outlier) {
+	fast := map[pathKey]bool{}
+	for _, p := range b.Fast {
+		fast[pathKey{p.RNIC, p.Endpoint}] = true
+	}
+	b.FastPairs, b.MixedPairs, b.Unpaired = pairSplit(g, *b)
+	if len(b.MixedPairs) > 0 || len(b.Unpaired) > 0 || len(b.FastPairs) == 0 {
+		return a.paths, nil
+	}
+	isFast := func(k pathKey) bool { return fast[k] }
+	isSlow := func(k pathKey) bool { return !fast[k] }
+	r.set(a.level(isSlow))
+	hi := a.level(isFast)
+	sc := SubClassResult{
+		Name:         fastSubClass,
+		BandwidthBPS: hi.bw, LatencyNs: hi.lat,
+		Paths: hi.paths, Runs: hi.runs,
+		BW: hi.bwSpread, Lat: hi.latSpread,
+		RootPortPairs: b.FastPairs,
+	}
+	r.SubClasses = []SubClassResult{sc}
+	b.SubClass, b.SubClassBPS, b.BaselineBPS = sc.Name, sc.BandwidthBPS, r.BandwidthBPS
+	return filterPaths(a.paths, isSlow), outliers(r.Distance, sc.Name, filterPaths(a.paths, isFast), sc.BandwidthBPS, th)
 }
 
 // reading is one path's idle reading in one run; lat is 0 unless
@@ -359,6 +377,31 @@ type acc struct {
 	runs [][]reading
 	// paths is every reading of each path across runs.
 	paths map[pathKey][]uint64
+}
+
+// accs is the acc of each measured distance.
+type accs map[model.Distance]*acc
+
+// at is the acc of d, created on first use.
+func (all accs) at(d model.Distance) *acc {
+	a := all[d]
+	if a == nil {
+		a = &acc{paths: map[pathKey][]uint64{}}
+		all[d] = a
+	}
+	return a
+}
+
+// add records m's reading of its path and returns it; lat is 0 unless
+// latency is set.
+func (a *acc) add(m model.PathMeasurement, latency bool) reading {
+	k := pathKey{m.RNIC, m.Endpoint}
+	a.paths[k] = append(a.paths[k], m.BandwidthBPS)
+	rd := reading{key: k, bw: m.BandwidthBPS}
+	if latency {
+		rd.lat = m.SmallLatNsP50
+	}
+	return rd
 }
 
 // level is the calibrated statistic over a set of a distance's paths.
@@ -514,38 +557,67 @@ func below(v, ref uint64, th float64) bool {
 // level, and a section per other Fig.4 table. Distances with no measured
 // path are absent, so they keep their Fig.4 default.
 func (r Result) Baselines() baseline.Overlay {
-	ov := baseline.Overlay{Distances: distanceBaselines(r.Distances)}
-	for _, s := range r.Sections {
-		m := distanceBaselines(s.Distances)
+	return overlayOf(r.Distances, r.Sections)
+}
+
+func (d DistanceResult) entry() (model.Distance, baseline.PathBaseline, bool) {
+	if d.BandwidthBPS == 0 {
+		return d.Distance, baseline.PathBaseline{}, false
+	}
+	b := baseline.PathBaseline{BandwidthBPS: d.BandwidthBPS, LatencyNs: d.LatencyNs}
+	for _, sc := range d.SubClasses {
+		b.SubClasses = append(b.SubClasses, subClassEntry(sc.Name, sc.BandwidthBPS, sc.LatencyNs, sc.RootPortPairs))
+	}
+	return d.Distance, b, true
+}
+
+func (s Section) keyed() (string, []DistanceResult) { return s.Key, s.Distances }
+
+// fileRow is a calibrated or merged row of one distance.
+type fileRow interface {
+	// entry is the row's distance and its file entry; ok is false when the
+	// row leaves the distance at its Fig.4 default.
+	entry() (d model.Distance, b baseline.PathBaseline, ok bool)
+}
+
+// keyedRows is a "tables" section: its key and its rows.
+type keyedRows[R fileRow] interface {
+	keyed() (string, []R)
+}
+
+// overlayOf is the rows as a --baseline-file overlay: top as the top level,
+// and a "tables" section per section with at least one entry.
+func overlayOf[R fileRow, S keyedRows[R]](top []R, sections []S) baseline.Overlay {
+	ov := baseline.Overlay{Distances: rowBaselines(top)}
+	for _, s := range sections {
+		k, rows := s.keyed()
+		m := rowBaselines(rows)
 		if len(m) == 0 {
 			continue
 		}
 		if ov.Tables == nil {
 			ov.Tables = map[string]map[model.Distance]baseline.PathBaseline{}
 		}
-		ov.Tables[s.Key] = m
+		ov.Tables[k] = m
 	}
 	return ov
 }
 
-func distanceBaselines(dists []DistanceResult) map[model.Distance]baseline.PathBaseline {
+// rowBaselines is the file entries of the rows that have one, by distance.
+func rowBaselines[R fileRow](rows []R) map[model.Distance]baseline.PathBaseline {
 	out := map[model.Distance]baseline.PathBaseline{}
-	for _, d := range dists {
-		if d.BandwidthBPS == 0 {
-			continue
+	for _, r := range rows {
+		if d, b, ok := r.entry(); ok {
+			out[d] = b
 		}
-		b := baseline.PathBaseline{BandwidthBPS: d.BandwidthBPS, LatencyNs: d.LatencyNs}
-		for _, sc := range d.SubClasses {
-			b.SubClasses = append(b.SubClasses, baseline.SubClass{
-				Name:          sc.Name,
-				BandwidthBPS:  sc.BandwidthBPS,
-				LatencyNs:     sc.LatencyNs,
-				RootPortPairs: slices.Clone(sc.RootPortPairs),
-			})
-		}
-		out[d.Distance] = b
 	}
 	return out
+}
+
+// subClassEntry is a learned sub-class as its file entry, with its own copy
+// of the pairs.
+func subClassEntry(name string, bw, lat uint64, pairs []model.RootPortPair) baseline.SubClass {
+	return baseline.SubClass{Name: name, BandwidthBPS: bw, LatencyNs: lat, RootPortPairs: slices.Clone(pairs)}
 }
 
 // fileEntry is the subset of the --baseline-file entry calibrate writes.
@@ -570,14 +642,14 @@ type fileSubClass struct {
 func MarshalFile(ov baseline.Overlay) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString("{")
-	n, err := writeDistances(&buf, ov.Distances, "  ")
+	n, err := marshalDistances(&buf, ov.Distances, "  ")
 	if err != nil {
 		return nil, err
 	}
 	secs := 0
 	for _, k := range ov.SectionKeys() {
 		var sec bytes.Buffer
-		m, err := writeDistances(&sec, ov.Tables[k], "      ")
+		m, err := marshalDistances(&sec, ov.Tables[k], "      ")
 		if err != nil {
 			return nil, err
 		}
@@ -605,9 +677,9 @@ func MarshalFile(ov baseline.Overlay) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeDistances writes b's entries, one per line at indent, comma
+// marshalDistances writes b's entries, one per line at indent, comma
 // separated, and returns how many it wrote.
-func writeDistances(buf *bytes.Buffer, b map[model.Distance]baseline.PathBaseline, indent string) (int, error) {
+func marshalDistances(buf *bytes.Buffer, b map[model.Distance]baseline.PathBaseline, indent string) (int, error) {
 	n := 0
 	for _, d := range model.Distances() {
 		v, ok := b[d]

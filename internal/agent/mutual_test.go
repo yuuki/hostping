@@ -26,7 +26,7 @@ func TestSimMutualLoopFlap(t *testing.T) {
 	cfg.MutualTimeout = 5 * time.Millisecond
 	cfg.MutualWindow = 400 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	l, done := startMutualLoop(ctx, cfg, g, w)
+	l, done := startMutualLoop(ctx, cfg, g, w, nolog)
 	if l == nil {
 		cancel()
 		t.Fatal("Fig.2 has pairs: the loop must start")
@@ -70,7 +70,7 @@ func TestSimMutualLoopFlap(t *testing.T) {
 // The schedule is opt-in: by default the daemon keeps the per-run burst.
 func TestMutualLoopOffByDefault(t *testing.T) {
 	cfg := config.Defaults()
-	if l, _ := startMutualLoop(context.Background(), cfg, topology.Fig2(), sim.New(topology.Fig2())); l != nil {
+	if l, _ := startMutualLoop(context.Background(), cfg, topology.Fig2(), sim.New(topology.Fig2()), nolog); l != nil {
 		t.Fatal("--mutual-interval 0 must not start the loop")
 	}
 }

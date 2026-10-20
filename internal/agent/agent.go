@@ -98,9 +98,11 @@ type rig struct {
 	sampler monitor.Sampler
 	mon     *monitor.Monitor
 	close   func()
+	// logf receives the operator log lines (log.Printf in the binaries).
+	logf func(format string, args ...any)
 }
 
-func newRig(cfg config.Config) (*rig, error) {
+func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	if err := cfg.ValidateMutual(); err != nil {
 		return nil, err
 	}
@@ -116,7 +118,7 @@ func newRig(cfg config.Config) (*rig, error) {
 	}
 	if lines := baseline.DescribeSources(ov); lines != "" {
 		for _, line := range strings.Split(lines, "\n") {
-			log.Printf("hostping: %s", line)
+			logf("hostping: %s", line)
 		}
 	}
 	g, err := LoadGraph(cfg)
@@ -124,16 +126,16 @@ func newRig(cfg config.Config) (*rig, error) {
 		return nil, err
 	}
 	if line := baseline.DescribeTables(ov, g.RNICs); line != "" {
-		log.Printf("hostping: %s", line)
+		logf("hostping: %s", line)
 	}
 	if line := baseline.DescribeUnmatched(ov, g.RootPortPairs()); line != "" {
-		log.Printf("hostping: %s", line)
+		logf("hostping: %s", line)
 	}
 	prober, world, err := NewProber(cfg, g)
 	if err != nil {
 		return nil, err
 	}
-	rt := &rig{g: g, eng: engine.New(cfg, g, prober), world: world, close: func() {}}
+	rt := &rig{g: g, eng: engine.New(cfg, g, prober), world: world, close: func() {}, logf: logf}
 	// A one-shot run keeps no streaks, so its latency verdicts cannot persist
 	// across runs; the paired recheck stands in (analyzer.Input.OneShot).
 	rt.eng.OneShot = cfg.Once
@@ -153,12 +155,12 @@ func Run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	rt, err := newRig(cfg)
+	rt, err := newRig(cfg, log.Printf)
 	if err != nil {
 		return err
 	}
 	defer rt.close()
-	g, eng, world, sampler, mon := rt.g, rt.eng, rt.world, rt.sampler, rt.mon
+	g := rt.g
 	// Before any exporter binds: an unusable --state-dir fails the start.
 	ps, err := newPersister(cfg, g, state.KernelBootID, time.Now, log.Printf)
 	if err != nil {
@@ -183,19 +185,19 @@ func Run(cfg config.Config) error {
 	defer stop()
 
 	if cfg.Once {
-		return runOnce(ctx, eng, tel, world, mon, sampler, cfg, rp)
+		return runOnce(ctx, rt, tel, cfg, rp)
 	}
 
 	log.Printf("hostping agent version=%s commit=%s topology=%s rnics=%d endpoints=%d sim=%v metrics=%s", build.Version, build.Commit, g.Name, len(g.RNICs), len(g.Endpoints), cfg.Sim, cfg.PrometheusAddr)
-	loop, loopDone := startMutualLoop(ctx, cfg, g, world)
+	loop, loopDone := startMutualLoop(ctx, cfg, g, rt.world, log.Printf)
 	if loop != nil {
 		defer func() { <-loopDone }() // runs after stop(): the loop sees ctx end and closes its endpoints
-		eng.Mutual = loop
-		mon.MutualAlarm = loop.Alarm
+		rt.eng.Mutual = loop
+		rt.mon.MutualAlarm = loop.Alarm
 	}
-	ps.restore(eng, mon)
-	d := &daemon{g: g, eng: eng, world: world, sampler: sampler, mon: mon, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, log.Printf)}
-	defer ps.shutdown(eng, &d.pending)
+	ps.restore(rt.eng, rt.mon)
+	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, log.Printf)}
+	defer ps.shutdown(rt.eng, &d.pending)
 	t := time.NewTicker(cfg.MetricInterval)
 	defer t.Stop()
 	for {
@@ -210,13 +212,9 @@ func Run(cfg config.Config) error {
 	}
 }
 
-// daemon is the state of the daemon's poll loop.
+// daemon is the state of the daemon's poll loop over the rig it runs on.
 type daemon struct {
-	g       topology.Graph
-	eng     *engine.Engine
-	world   *sim.World
-	sampler monitor.Sampler
-	mon     *monitor.Monitor
+	*rig
 	loop    *mutual.Loop
 	tel     *telemetry.Telemetry
 	live    *telemetry.Liveness
@@ -239,7 +237,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 		}
 		d.live.Polled()
 		d.tel.RecordPoll(ctx, time.Now(), err)
-		log.Printf("monitor: %v", err)
+		d.logf("monitor: %v", err)
 		return true
 	}
 	d.live.Polled()
@@ -262,7 +260,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 	case holdDiscarded:
 		d.ps.idleResolved(d.eng, rep, false)
 		d.tel.RecordDiscarded(ctx, discardReason(dec))
-		log.Printf("hostping: discarded idle-mode run (trigger=%s paths=%d): the host became busy during it, so its idle verdicts are unreliable: %s", rep.Trigger, len(rep.Paths), why)
+		d.logf("hostping: discarded idle-mode run (trigger=%s paths=%d): the host became busy during it, so its idle verdicts are unreliable: %s", rep.Trigger, len(rep.Paths), why)
 	}
 	if !dec.Run {
 		return true
@@ -308,7 +306,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 		}
 		d.tel.RecordRunEnd(ctx, end)
 		d.tel.RecordRunFailed(ctx, telemetry.FailedEngine)
-		log.Printf("engine: %v", err)
+		d.logf("engine: %v", err)
 		return true
 	}
 	d.tel.RecordRunEnd(ctx, end)
@@ -332,7 +330,7 @@ func (d *daemon) report(ctx context.Context, rep model.Report) {
 		d.tel.RecordRunFailed(ctx, telemetry.FailedReport)
 		return
 	}
-	d.tel.RecordSuccess(ctx, rep.Started.Add(rep.Elapsed))
+	d.tel.RecordSuccess(ctx, runEnd(rep))
 }
 
 // mutualMinProbes is the fewest probes a pair needs in the window before its
@@ -348,7 +346,7 @@ const mutualMinProbes = 10
 // the schedule is off, there is nothing to pair, or no endpoint opens. The
 // returned channel is closed once the loop has stopped and closed its
 // endpoints.
-func startMutualLoop(ctx context.Context, cfg config.Config, g topology.Graph, world *sim.World) (*mutual.Loop, <-chan struct{}) {
+func startMutualLoop(ctx context.Context, cfg config.Config, g topology.Graph, world *sim.World, logf func(string, ...any)) (*mutual.Loop, <-chan struct{}) {
 	if cfg.MutualInterval <= 0 {
 		return nil, nil
 	}
@@ -364,12 +362,12 @@ func startMutualLoop(ctx context.Context, cfg config.Config, g topology.Graph, w
 	} else {
 		ud, errs, err := zigprobe.OpenUD(rnics, cfg.MutualMsgBytes)
 		if err != nil {
-			log.Printf("hostping: mutual probe schedule unavailable, probing pairs per engine run instead: %v", err)
+			logf("hostping: mutual probe schedule unavailable, probing pairs per engine run instead: %v", err)
 			return nil, nil
 		}
 		for i, e := range errs {
 			if e != nil {
-				log.Printf("hostping: mutual probe endpoint %s unavailable (retried every 30s): %v", rnics[i].ID, e)
+				logf("hostping: mutual probe endpoint %s unavailable (retried every 30s): %v", rnics[i].ID, e)
 			}
 		}
 		tr = ud
@@ -382,13 +380,13 @@ func startMutualLoop(ctx context.Context, cfg config.Config, g topology.Graph, w
 		LossIsDrop: world != nil,
 		TimeoutTh:  cfg.TimeoutTh,
 		MinProbes:  mutualMinProbes,
-	}, rnics, pairs, tr, nil, nil, log.Printf)
+	}, rnics, pairs, tr, nil, nil, logf)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		l.Run(ctx)
 	}()
-	log.Printf("hostping: mutual probe every %v per RNIC (timeout %v, window %v, rnics=%d pairs=%d)",
+	logf("hostping: mutual probe every %v per RNIC (timeout %v, window %v, rnics=%d pairs=%d)",
 		cfg.MutualInterval, cfg.MutualTimeout, cfg.MutualWindow, len(rnics), len(pairs))
 	return l, done
 }
@@ -419,10 +417,11 @@ func startTelemetry(cfg config.Config, opts ...telemetry.Option) (*telemetry.Tel
 	return telemetry.Start(context.Background(), cfg, BuildInfo(), opts...)
 }
 
-func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, world *sim.World, mon *monitor.Monitor, sampler monitor.Sampler, cfg config.Config, rp *reporter) error {
+func runOnce(ctx context.Context, rt *rig, tel *telemetry.Telemetry, cfg config.Config, rp *reporter) error {
+	world := rt.world
 	req := engine.RunRequest{
 		Trigger:  model.TriggerManual,
-		PCIe:     pcieFrom(world, eng.Graph),
+		PCIe:     pcieFrom(world, rt.eng.Graph),
 		Hints:    hintsFrom(world),
 		HostIdle: true,
 		Mode:     model.ModeIdle,
@@ -437,7 +436,7 @@ func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, 
 	} else {
 		// liveRequest is a complete request (requestFromDecision fills every
 		// field, Trigger included); only the --sim inputs are added here.
-		live, err := liveRequest(ctx, mon, cfg)
+		live, err := liveRequest(ctx, rt.mon, cfg)
 		if err != nil {
 			return err
 		}
@@ -446,8 +445,8 @@ func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, 
 	}
 	// Sampled after the warmup polls and before the probes start, so the
 	// utilization is the host's load, not hostping's own traffic.
-	req.Util = utilFrom(ctx, world, sampler, req.Util)
-	rep, err := eng.Run(ctx, req)
+	req.Util = utilFrom(ctx, world, rt.sampler, req.Util)
+	rep, err := rt.eng.Run(ctx, req)
 	if ctx.Err() == nil {
 		tel.RecordRunEnd(ctx, time.Now())
 	}
@@ -461,14 +460,14 @@ func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, 
 		// Same race as the daemon's idle run: a workload that comes back
 		// mid-run is judged against idle baselines. The operator asked for
 		// this report, so it is still printed, but flagged and failed.
-		ok, why, err := confirmIdleAfterRun(ctx, mon, cfg, req.CPULoad)
+		ok, why, err := confirmIdleAfterRun(ctx, rt.mon, cfg, req.CPULoad)
 		if err != nil {
 			_ = rp.emit(rep)
 			return fmt.Errorf("could not confirm the host stayed idle during the idle-mode run: %w", err)
 		}
 		if !ok {
 			_ = rp.emit(rep)
-			log.Printf("hostping: WARNING: the host became busy during the idle-mode run; its idle verdicts are unreliable: %s", why)
+			rt.logf("hostping: WARNING: the host became busy during the idle-mode run; its idle verdicts are unreliable: %s", why)
 			return fmt.Errorf("host became busy during the idle-mode run (%s); rerun when the host is idle", why)
 		}
 	}
@@ -477,7 +476,7 @@ func runOnce(ctx context.Context, eng *engine.Engine, tel *telemetry.Telemetry, 
 		tel.RecordRunFailed(ctx, telemetry.FailedReport)
 		return fmt.Errorf("write report: %w", err)
 	}
-	tel.RecordSuccess(ctx, rep.Started.Add(rep.Elapsed))
+	tel.RecordSuccess(ctx, runEnd(rep))
 	return nil
 }
 
@@ -541,13 +540,14 @@ func requestFromDecision(dec monitor.Decision) (engine.RunRequest, error) {
 		return engine.RunRequest{}, fmt.Errorf("monitor warmup incomplete; refusing to assume idle")
 	}
 	if !dec.IdleKnown {
-		if len(dec.UnreadCounters) > 0 {
-			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (PFC pause or drop counters unread on %s); refusing to assume idle", strings.Join(dec.UnreadCounters, ","))
-		}
-		if dec.CPUUnknown {
+		switch kind, rnics := unknownIdleCause(dec); kind {
+		case countersUnread:
+			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (PFC pause or drop counters unread on %s); refusing to assume idle", rnics)
+		case cpuUnread:
 			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (CPU load unread); refusing to assume idle")
+		default:
+			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (GPU util or RNIC line rate unread); refusing to assume idle")
 		}
-		return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (GPU util or RNIC line rate unread); refusing to assume idle")
 	}
 	mode := model.ModeIdle
 	if !dec.HostIdle {

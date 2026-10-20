@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -126,9 +127,8 @@ func TestEmitNamesSkippedEndpointsInTheNoBottleneckLine(t *testing.T) {
 func logged(t *testing.T, rep model.Report) string {
 	t.Helper()
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
-	rp := &reporter{format: config.ReportFormatPretty, stdout: io.Discard, now: time.Now}
+	logf := func(format string, args ...any) { fmt.Fprintf(&buf, format+"\n", args...) }
+	rp := &reporter{format: config.ReportFormatPretty, stdout: io.Discard, now: time.Now, logf: logf}
 	if err := rp.emit(rep); err != nil {
 		t.Fatal(err)
 	}

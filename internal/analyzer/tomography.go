@@ -51,7 +51,7 @@ func ClassifyPaths(g topology.Graph, ms []model.PathMeasurement, mode model.RunM
 			markUncertain(m, model.UncertainNoPath)
 			continue
 		}
-		n, _ := g.RNIC(m.RNIC)
+		n := mustRNIC(g, m.RNIC)
 		base, class := pathBaseline(g, bases, p)
 		m.BaselineClass = class
 
@@ -165,7 +165,7 @@ func busyClassOf(g topology.Graph, bases baseline.Overlay, m model.PathMeasureme
 // that sub-class ("cross_root/fast"), or "" when the distance's own value
 // applies.
 func pathBaseline(g topology.Graph, bases baseline.Overlay, p model.Path) (baseline.PathBaseline, string) {
-	n, _ := g.RNIC(p.RNIC)
+	n := mustRNIC(g, p.RNIC)
 	pair, _ := g.RootPortPair(p)
 	b, sub := baseline.ForPath(bases.Effective(n), p.Distance).ForPair(pair)
 	if sub == "" {
@@ -291,7 +291,23 @@ func latencyHigh(got, ref uint64, th float64) bool {
 // LinkUncertain, so a gray hop is always tested. An uncertain path decides
 // nothing and tests no hop.
 func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode model.RunMode, busy map[string]bool) []model.LinkState {
-	guarded := busyRootPorts(g, mode, busy)
+	states := newLinkStates(g)
+	normal, abnormal := decidedPaths(g, ms)
+	markNormalHops(states, normal)
+	judged := judgedHops(g, states, abnormal, busyRootPorts(g, mode, busy))
+	isolateAbnormalHops(states, judged)
+	countAbnormalRNICs(states, abnormal, judged)
+	grayFlappingHops(states, judged)
+
+	out := make([]model.LinkState, 0, len(g.Links))
+	for _, l := range g.Links {
+		out = append(out, *states[l.ID])
+	}
+	return out
+}
+
+// newLinkStates starts every link of g uncertain and untested.
+func newLinkStates(g topology.Graph) map[string]*model.LinkState {
 	states := make(map[string]*model.LinkState, len(g.Links))
 	for _, l := range g.Links {
 		states[l.ID] = &model.LinkState{
@@ -300,16 +316,17 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			AbnormalRNICs: map[string]struct{}{},
 		}
 	}
+	return states
+}
 
-	var normal, abnormal []model.Path
-	measOf := map[string]model.PathMeasurement{}
+// decidedPaths is the routed paths of the normal and of the abnormal
+// measurements, in measurement order. An uncertain path decides nothing.
+func decidedPaths(g topology.Graph, ms []model.PathMeasurement) (normal, abnormal []model.Path) {
 	for _, m := range ms {
 		p, ok := g.Path(m.RNIC, m.Endpoint)
 		if !ok {
 			continue
 		}
-		key := pathKey(m.RNIC, m.Endpoint)
-		measOf[key] = m
 		switch m.Status {
 		case model.PathNormal:
 			normal = append(normal, p)
@@ -317,7 +334,11 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			abnormal = append(abnormal, p)
 		}
 	}
+	return normal, abnormal
+}
 
+// markNormalHops marks every hop of a normal path normal and tested.
+func markNormalHops(states map[string]*model.LinkState, normal []model.Path) {
 	for _, p := range normal {
 		for _, id := range p.LinkIDs {
 			if s := states[id]; s != nil {
@@ -326,9 +347,12 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			}
 		}
 	}
+}
 
-	// Hops each abnormal path is allowed to judge, resolved once so every pass
-	// below sees the same hop sets.
+// judgedHops resolves, once, the hops each abnormal path is allowed to judge
+// (pathJudgesAbnormal, with guarded the busy root ports), so every pass over
+// the abnormal paths sees the same hop sets, and marks those hops tested.
+func judgedHops(g topology.Graph, states map[string]*model.LinkState, abnormal []model.Path, guarded map[string]bool) [][]string {
 	judged := make([][]string, len(abnormal))
 	for i, p := range abnormal {
 		for _, id := range p.LinkIDs {
@@ -341,16 +365,20 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			}
 		}
 	}
+	return judged
+}
 
-	// NSDI'23 Algorithm 1: mark a hop abnormal only when it is the unique
-	// remaining uncertain hop (|U|=1). Marking every U>1 hop paints GPU
-	// and switch links abnormal on an RNIC-wide cap (#1/#9/#10). A path that
-	// already crosses a known-abnormal hop is explained by that hop and
-	// cannot isolate a second one. Repeat until no status changes so the
-	// result does not depend on the order measurements arrive in.
+// isolateAbnormalHops is NSDI'23 Algorithm 1: mark a hop abnormal only when
+// it is the unique remaining uncertain hop (|U|=1) of an abnormal path.
+// Marking every U>1 hop paints GPU and switch links abnormal on an RNIC-wide
+// cap (#1/#9/#10). A path that already crosses a known-abnormal hop is
+// explained by that hop and cannot isolate a second one. Repeat until no
+// status changes so the result does not depend on the order measurements
+// arrive in.
+func isolateAbnormalHops(states map[string]*model.LinkState, judged [][]string) {
 	for {
 		changed := false
-		for i := range abnormal {
+		for i := range judged {
 			uncertain, seenAbnormal := "", false
 			n := 0
 			for _, id := range judged[i] {
@@ -371,9 +399,11 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			break
 		}
 	}
+}
 
-	// abnormal_cnt is how many distinct RNICs judge a hop abnormal (Algorithm 1
-	// lines 9-14). Counted once the statuses have settled.
+// countAbnormalRNICs sets abnormal_cnt: how many distinct RNICs judge a hop
+// abnormal (Algorithm 1 lines 9-14). Counted once the statuses have settled.
+func countAbnormalRNICs(states map[string]*model.LinkState, abnormal []model.Path, judged [][]string) {
 	for i, p := range abnormal {
 		for _, id := range judged[i] {
 			s := states[id]
@@ -386,12 +416,15 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			}
 		}
 	}
+}
 
-	// An abnormal path whose hops are all normal cannot explain itself: some
-	// hop may be flapping (Algorithm 1 line 15). Decide every such path against
-	// the settled statuses, so graying one path does not hide the next.
+// grayFlappingHops grays the hops of an abnormal path whose hops are all
+// normal: such a path cannot explain itself, so some hop may be flapping
+// (Algorithm 1 line 15). Every such path is decided against the settled
+// statuses, so graying one path does not hide the next.
+func grayFlappingHops(states map[string]*model.LinkState, judged [][]string) {
 	var flapping []int
-	for i := range abnormal {
+	for i := range judged {
 		allNormal := true
 		for _, id := range judged[i] {
 			if states[id].Status != model.LinkNormal {
@@ -408,12 +441,6 @@ func DetectAbnormalLinks(g topology.Graph, ms []model.PathMeasurement, mode mode
 			states[id].Status = model.LinkGray
 		}
 	}
-
-	out := make([]model.LinkState, 0, len(g.Links))
-	for _, l := range g.Links {
-		out = append(out, *states[l.ID])
-	}
-	return out
 }
 
 // busyRootPorts is the set of root ports whose links only their own busy

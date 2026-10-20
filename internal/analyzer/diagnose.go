@@ -1,7 +1,9 @@
 package analyzer
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -141,26 +143,35 @@ func Analyze(in Input) Result {
 	causes = suppressOverlaps(causes, in.Graph)
 	causes = append(causes, diagnosePCIeDownTrain(in, paths, causes)...)
 	causes = append(causes, diagnoseLatency(in.Graph, paths, causes, in.Cfg.AbnormalTh, in.OneShot)...)
-	// high, medium, low — rank explicitly. Ties break on the cause's identity
-	// fields so the order never depends on map iteration.
-	rank := map[model.Confidence]int{model.ConfidenceHigh: 0, model.ConfidenceMedium: 1, model.ConfidenceLow: 2}
-	subject := func(c model.RootCause) string {
-		return strings.Join(c.RNICs, ",") + "\x00" +
-			strings.Join(c.Links, ",") + "\x00" +
-			strings.Join(c.Endpoints, ",")
-	}
-	sort.Slice(causes, func(i, j int) bool {
-		ri, rj := rank[causes[i].Confidence], rank[causes[j].Confidence]
-		if ri != rj {
-			return ri < rj
-		}
-		if causes[i].Code != causes[j].Code {
-			return causes[i].Code < causes[j].Code
-		}
-		return subject(causes[i]) < subject(causes[j])
-	})
+	slices.SortStableFunc(causes, compareCauses)
 
 	return Result{Paths: paths, Links: links, Causes: causes, GrayHits: gray, SlowMRHits: mrHits, LatencyHits: latHits}
+}
+
+// confidenceRank orders confidences high, medium, low for the report.
+var confidenceRank = map[model.Confidence]int{model.ConfidenceHigh: 0, model.ConfidenceMedium: 1, model.ConfidenceLow: 2}
+
+// causeKey is a cause's identity: its code and the RNICs, links and endpoints
+// it names, in that order. Two causes with one key say the same thing about
+// the same subject (dedupeCauses keeps the first), and the key breaks ties in
+// the report order so that never depends on map iteration.
+func causeKey(c model.RootCause) string {
+	return c.Code + "\x00" +
+		strings.Join(c.RNICs, ",") + "\x00" +
+		strings.Join(c.Links, ",") + "\x00" +
+		strings.Join(c.Endpoints, ",")
+}
+
+// compareCauses is the report order: confidence rank, then code, then the
+// cause's identity (causeKey).
+func compareCauses(a, b model.RootCause) int {
+	if ra, rb := confidenceRank[a.Confidence], confidenceRank[b.Confidence]; ra != rb {
+		return cmp.Compare(ra, rb)
+	}
+	if a.Code != b.Code {
+		return cmp.Compare(a.Code, b.Code)
+	}
+	return cmp.Compare(causeKey(a), causeKey(b))
 }
 
 func diagnoseMisconfig(in Input, paths []model.PathMeasurement) []model.RootCause {
@@ -179,8 +190,7 @@ func diagnoseMisconfig(in Input, paths []model.PathMeasurement) []model.RootCaus
 			if !ok || m.Status != model.PathAbnormal {
 				continue
 			}
-			nb := baseline.ForPath(in.Bases.Effective(n), model.DistanceSameSwitch)
-			if !latencyHigh(m.SmallLatNsP50, nb.LatencyNs, in.Cfg.AbnormalTh) {
+			if !affinitiveLatencyHigh(in, n, m) {
 				continue
 			}
 			rpc := in.PCIe[n.ID]
@@ -299,6 +309,21 @@ func flapping(ls model.LinkState, gray map[string]int, window int) bool {
 	return ls.Status == model.LinkGray && gray[ls.ID] >= window
 }
 
+// utilAtLeast reports whether the link's utilization was read and is at
+// least th. An unknown utilization never explains a link as overloaded.
+func utilAtLeast(ls model.LinkState, th float64) bool {
+	return ls.Utilization != nil && *ls.Utilization >= th
+}
+
+// utilEvidence renders the utilization for diagnosis evidence: "util=0.42",
+// or "util=unknown" when no live source read it.
+func utilEvidence(ls model.LinkState) string {
+	if ls.Utilization == nil {
+		return "util=unknown"
+	}
+	return fmt.Sprintf("util=%.2f", *ls.Utilization)
+}
+
 func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, gray map[string]int) []model.RootCause {
 	st := linkMap(links)
 	pm := pathMap(paths)
@@ -307,37 +332,20 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 	causes = append(causes, diagnoseMisconfig(in, paths)...)
 
 	for _, n := range g.RNICs {
-		aff := g.AffinitiveEndpoints(n.ID)
-		if len(aff) == 0 {
-			continue
-		}
-		allAbn := true
-		seen := 0
-		var eps []string
-		for _, e := range aff {
-			m, ok := pm[pathKey(n.ID, e.ID)]
-			if !ok {
-				continue // skipped (NoGDR / no device); not evidence of health
-			}
-			seen++
-			if m.Status != model.PathAbnormal {
-				allAbn = false
-				break
-			}
-			eps = append(eps, e.ID)
-		}
-		if !allAbn || seen == 0 {
+		// Every measured affinitive path of the RNIC is abnormal.
+		eps, abnormal := measuredAffinitive(g.AffinitiveEndpoints(n.ID), n.ID, pm)
+		if len(eps) == 0 || abnormal != len(eps) {
 			continue
 		}
 		pcieID := model.PCIeLinkID(n.ID)
 		ls := st[pcieID]
 		cfg := in.PCIe[n.ID]
 		switch {
-		case ls.UtilAtLeast(in.Cfg.UtilHigh):
+		case utilAtLeast(ls, in.Cfg.UtilHigh):
 			causes = append(causes, model.RootCause{
 				Code: model.CauseOverloadedRNICPCIe, Summary: "RNIC PCIe link overloaded (loopback contention)",
 				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("all affinitive paths abnormal; %s", ls.UtilEvidence()),
+				Evidence: fmt.Sprintf("all affinitive paths abnormal; %s", utilEvidence(ls)),
 			})
 		case rnicPCIeDegraded(cfg, n.LineRate):
 			causes = append(causes, model.RootCause{
@@ -387,20 +395,18 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		latAbn := false
 		if affRNIC != "" {
 			if m, ok := pm[pathKey(affRNIC, e.ID)]; ok {
-				n, _ := g.RNIC(affRNIC)
-				base := baseline.ForPath(in.Bases.Effective(n), model.DistanceSameSwitch)
-				latAbn = latencyHigh(m.SmallLatNsP50, base.LatencyNs, in.Cfg.AbnormalTh)
+				latAbn = affinitiveLatencyHigh(in, mustRNIC(g, affRNIC), m)
 			}
 		}
 		if latAbn {
 			continue // ACS/ATS handled by diagnoseMisconfig
 		}
 		switch {
-		case ls.UtilAtLeast(in.Cfg.UtilHigh):
+		case utilAtLeast(ls, in.Cfg.UtilHigh):
 			causes = append(causes, model.RootCause{
 				Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link overloaded",
 				Links: []string{id}, Endpoints: []string{e.ID}, Confidence: model.ConfidenceMedium,
-				Evidence: ls.UtilEvidence(),
+				Evidence: utilEvidence(ls),
 			})
 		default:
 			causes = append(causes, model.RootCause{
@@ -412,90 +418,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 	}
 	causes = append(causes, diagnoseGPUFromSiblings(g, pm, st, in)...)
 
-	for _, l := range g.LinksByKind(model.LinkKindMemory) {
-		ls := st[l.ID]
-		if flapping(ls, gray, in.Cfg.FlapWindow) {
-			causes = append(causes, model.RootCause{
-				Code: model.CauseMemoryChannelFlapping, Summary: "memory channel flapping",
-				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
-			})
-			continue
-		}
-		// NSDI'23 §4.3 / ToN'24 §IV-C: utilization only explains a link that
-		// tomography already found abnormal; a busy but healthy bus is no cause.
-		if ls.Status != model.LinkAbnormal {
-			continue
-		}
-		if ls.UtilAtLeast(in.Cfg.UtilHigh) {
-			causes = append(causes, model.RootCause{
-				Code: model.CauseOverloadedMemory, Summary: "memory channel overloaded",
-				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
-			})
-			continue
-		}
-		causes = append(causes, model.RootCause{
-			Code: model.CauseMemoryChannelFailure, Summary: "memory channel failed",
-			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-			Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
-		})
-	}
-
-	// Only upi.* links ever carry the UPI causes; a fault localized to the
-	// package mesh of a sub-NUMA-clustered host is reported below instead.
-	for _, l := range g.LinksByKind(model.LinkKindUPI) {
-		ls := st[l.ID]
-		if flapping(ls, gray, in.Cfg.FlapWindow) {
-			causes = append(causes, model.RootCause{
-				Code: model.CauseUPIFailure, Summary: "inter-socket bus flapping",
-				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
-			})
-			continue
-		}
-		// NSDI'23 §4.3 / ToN'24 §IV-C: utilization only explains a link that
-		// tomography already found abnormal; a busy but healthy bus is no cause.
-		if ls.Status != model.LinkAbnormal {
-			continue
-		}
-		if ls.UtilAtLeast(in.Cfg.UtilHigh) {
-			causes = append(causes, model.RootCause{
-				Code: model.CauseOverloadedUPI, Summary: "inter-socket bus overloaded",
-				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
-			})
-			continue
-		}
-		causes = append(causes, model.RootCause{
-			Code: model.CauseUPIFailure, Summary: "inter-socket bus (UPI/xGMI) failed",
-			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-			Evidence: fmt.Sprintf("status=%s abnormal_cnt=%d", ls.Status, ls.AbnormalCount),
-		})
-	}
-
-	// The fabric between two NUMA nodes of one package (sub-NUMA
-	// clustering), judged by the upi_failure rules. No source reads its
-	// utilization, so an abnormal mesh link is never explained as load.
-	for _, l := range g.LinksByKind(model.LinkKindSNCMesh) {
-		ls := st[l.ID]
-		if flapping(ls, gray, in.Cfg.FlapWindow) {
-			causes = append(causes, model.RootCause{
-				Code: model.CauseSNCMeshFailure, Summary: "intra-package mesh between NUMA nodes flapping",
-				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
-			})
-			continue
-		}
-		if ls.Status != model.LinkAbnormal {
-			continue
-		}
-		causes = append(causes, model.RootCause{
-			Code: model.CauseSNCMeshFailure, Summary: "intra-package mesh between NUMA nodes (sub-NUMA clustering) failed",
-			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
-			Evidence: fmt.Sprintf("status=%s abnormal_cnt=%d %s", ls.Status, ls.AbnormalCount, ls.UtilEvidence()),
-		})
-	}
+	causes = append(causes, diagnoseBusLinks(g, st, gray, in.Cfg)...)
 
 	causes = append(causes, diagnoseRootPorts(g, paths, st)...)
 	causes = append(causes, diagnoseBusyEqualRNIC(in, paths, st, causes)...)
@@ -509,6 +432,107 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		}
 	}
 	return dedupeCauses(causes)
+}
+
+// busLinkRule is how one kind of bus link between NUMA nodes or memory
+// channels is diagnosed: flapping (NSDI'23 §4.3) names its own cause; an
+// abnormal link whose utilization is at or above UtilHigh is overloaded,
+// where the kind has an overload cause; any other abnormal link failed.
+type busLinkRule struct {
+	kind string
+	// flapCode / flapSummary name the flapping cause.
+	flapCode, flapSummary string
+	// overloadCode / overloadSummary name the overload cause. An empty
+	// overloadCode means no source reads this kind's utilization, so an
+	// abnormal link is never explained as load.
+	overloadCode, overloadSummary string
+	// failCode / failSummary name the failure cause; failEvidence renders
+	// its evidence from the link state.
+	failCode, failSummary string
+	failEvidence          func(ls model.LinkState) string
+}
+
+// busLinkRules are applied in this order: memory channels, then the
+// inter-socket bus, then the package mesh. Only upi.* links ever carry the
+// UPI causes; a fault localized to the package mesh of a sub-NUMA-clustered
+// host is reported as snc_mesh_failure instead, judged by the upi_failure
+// rules.
+var busLinkRules = []busLinkRule{
+	{
+		kind:            model.LinkKindMemory,
+		flapCode:        model.CauseMemoryChannelFlapping,
+		flapSummary:     "memory channel flapping",
+		overloadCode:    model.CauseOverloadedMemory,
+		overloadSummary: "memory channel overloaded",
+		failCode:        model.CauseMemoryChannelFailure,
+		failSummary:     "memory channel failed",
+		failEvidence: func(ls model.LinkState) string {
+			return fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, utilEvidence(ls))
+		},
+	},
+	{
+		kind:            model.LinkKindUPI,
+		flapCode:        model.CauseUPIFailure,
+		flapSummary:     "inter-socket bus flapping",
+		overloadCode:    model.CauseOverloadedUPI,
+		overloadSummary: "inter-socket bus overloaded",
+		failCode:        model.CauseUPIFailure,
+		failSummary:     "inter-socket bus (UPI/xGMI) failed",
+		failEvidence: func(ls model.LinkState) string {
+			return fmt.Sprintf("status=%s abnormal_cnt=%d", ls.Status, ls.AbnormalCount)
+		},
+	},
+	{
+		// The fabric between two NUMA nodes of one package (sub-NUMA
+		// clustering). No source reads its utilization.
+		kind:        model.LinkKindSNCMesh,
+		flapCode:    model.CauseSNCMeshFailure,
+		flapSummary: "intra-package mesh between NUMA nodes flapping",
+		failCode:    model.CauseSNCMeshFailure,
+		failSummary: "intra-package mesh between NUMA nodes (sub-NUMA clustering) failed",
+		failEvidence: func(ls model.LinkState) string {
+			return fmt.Sprintf("status=%s abnormal_cnt=%d %s", ls.Status, ls.AbnormalCount, utilEvidence(ls))
+		},
+	},
+}
+
+// diagnoseBusLinks applies busLinkRules, one kind at a time and each kind's
+// links in g.Links order.
+func diagnoseBusLinks(g topology.Graph, st map[string]model.LinkState, gray map[string]int, cfg config.Config) []model.RootCause {
+	var out []model.RootCause
+	for _, r := range busLinkRules {
+		for _, l := range g.LinksByKind(r.kind) {
+			ls := st[l.ID]
+			if flapping(ls, gray, cfg.FlapWindow) {
+				out = append(out, model.RootCause{
+					Code: r.flapCode, Summary: r.flapSummary,
+					Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
+					Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
+				})
+				continue
+			}
+			// NSDI'23 §4.3 / ToN'24 §IV-C: utilization only explains a link
+			// that tomography already found abnormal; a busy but healthy bus
+			// is no cause.
+			if ls.Status != model.LinkAbnormal {
+				continue
+			}
+			if r.overloadCode != "" && utilAtLeast(ls, cfg.UtilHigh) {
+				out = append(out, model.RootCause{
+					Code: r.overloadCode, Summary: r.overloadSummary,
+					Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
+					Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, utilEvidence(ls)),
+				})
+				continue
+			}
+			out = append(out, model.RootCause{
+				Code: r.failCode, Summary: r.failSummary,
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
+				Evidence: r.failEvidence(ls),
+			})
+		}
+	}
+	return out
 }
 
 // diagnoseGPUFromSiblings catches a GPU PCIe fault when Algorithm 1 cannot
@@ -532,8 +556,7 @@ func diagnoseGPUFromSiblings(g topology.Graph, pm map[string]model.PathMeasureme
 		if !ok || m.Status != model.PathAbnormal {
 			continue
 		}
-		base := baseline.ForPath(in.Bases.Effective(mustRNIC(g, aff)), model.DistanceSameSwitch)
-		if latencyHigh(m.SmallLatNsP50, base.LatencyNs, in.Cfg.AbnormalTh) {
+		if affinitiveLatencyHigh(in, mustRNIC(g, aff), m) {
 			continue
 		}
 		siblingOK := false
@@ -564,8 +587,17 @@ func mustRNIC(g topology.Graph, id string) model.RNIC {
 	return n
 }
 
+// affinitiveLatencyHigh reports whether m, an affinitive path of RNIC n, has
+// a small-message latency above the same_switch baseline: the ACS/ATS
+// symptom diagnoseMisconfig reads, which the GPU PCIe rules leave to it.
+func affinitiveLatencyHigh(in Input, n model.RNIC, m model.PathMeasurement) bool {
+	base := baseline.ForPath(in.Bases.Effective(n), model.DistanceSameSwitch)
+	return latencyHigh(m.SmallLatNsP50, base.LatencyNs, in.Cfg.AbnormalTh)
+}
+
 func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[string]model.LinkState) []model.RootCause {
 	pm := pathMap(paths)
+	localHealthy := localGPUsHealthyByRNIC(g, pm)
 	var out []model.RootCause
 	for _, l := range g.LinksByKind(model.LinkKindRootPort) {
 		// Gray sibling RPs are Algorithm 1 conflicts, not isolated #5 faults.
@@ -576,10 +608,7 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 		crossGPUAbn := false
 		var trans []string
 		for _, n := range g.RNICs {
-			if n.RootPort != l.ID {
-				continue
-			}
-			if !rnicLocalGPUsHealthy(g, n, pm) {
+			if n.RootPort == l.ID && !localHealthy[n.ID] {
 				localOK = false
 			}
 		}
@@ -601,10 +630,7 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 			if !okN || !okE || e.Kind != model.EndpointGPU {
 				continue
 			}
-			if e.RootPort == n.RootPort {
-				continue
-			}
-			if !rnicLocalGPUsHealthy(g, n, pm) {
+			if e.RootPort == n.RootPort || !localHealthy[p.RNIC] {
 				continue
 			}
 			aff := affinitiveRNIC(g, e)
@@ -643,6 +669,19 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: ev,
 		})
+	}
+	return out
+}
+
+// localGPUsHealthyByRNIC is rnicLocalGPUsHealthy decided once per RNIC ID
+// (the first RNIC of that ID, as g.RNIC resolves it): it reads only the RNIC
+// and the paths, so diagnoseRootPorts need not decide it once per path.
+func localGPUsHealthyByRNIC(g topology.Graph, pm map[string]model.PathMeasurement) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range g.RNICs {
+		if _, ok := out[n.ID]; !ok {
+			out[n.ID] = rnicLocalGPUsHealthy(g, n, pm)
+		}
 	}
 	return out
 }
@@ -761,6 +800,30 @@ func dropCauses(pairs []model.MutualMeasurement, summary string, evidence func(m
 	return out
 }
 
+// unionFind is a disjoint-set forest over ids, with path compression. An id
+// it has not seen is a set of its own.
+type unionFind map[string]string
+
+// find is the root of x's set.
+func (u unionFind) find(x string) string {
+	p, ok := u[x]
+	if !ok {
+		u[x] = x
+		return x
+	}
+	if p != x {
+		u[x] = u.find(p)
+	}
+	return u[x]
+}
+
+// union joins the sets of a and b under b's root.
+func (u unionFind) union(a, b string) {
+	if ra, rb := u.find(a), u.find(b); ra != rb {
+		u[ra] = rb
+	}
+}
+
 // dropGroup is one connected group of dropping pairs and the RNICs that take
 // part in every pair of it.
 type dropGroup struct {
@@ -773,29 +836,14 @@ type dropGroup struct {
 // yields exactly one suspect; a single dropping pair names both of its RNICs,
 // because the probe cannot tell which side dropped.
 func dropSuspects(pairs []model.MutualMeasurement) []dropGroup {
-	parent := map[string]string{}
-	var find func(string) string
-	find = func(x string) string {
-		p, ok := parent[x]
-		if !ok {
-			parent[x] = x
-			return x
-		}
-		if p != x {
-			parent[x] = find(p)
-		}
-		return parent[x]
-	}
+	sets := unionFind{}
 	for _, m := range pairs {
-		a, b := find(m.Src), find(m.Dst)
-		if a != b {
-			parent[a] = b
-		}
+		sets.union(m.Src, m.Dst)
 	}
 	var order []string
 	byRoot := map[string][]model.MutualMeasurement{}
 	for _, m := range pairs {
-		r := find(m.Src)
+		r := sets.find(m.Src)
 		if _, ok := byRoot[r]; !ok {
 			order = append(order, r)
 		}
@@ -981,7 +1029,7 @@ func diagnoseBusyEqualRNIC(in Input, paths []model.PathMeasurement, st map[strin
 		if !in.BusyRNICs[n.ID] {
 			continue
 		}
-		if hasRNICCause(already, n.ID) {
+		if hasCauseFor(already, "", n.ID, "") {
 			continue
 		}
 		aff := in.Graph.AffinitiveEndpoints(n.ID)
@@ -997,11 +1045,11 @@ func diagnoseBusyEqualRNIC(in Input, paths []model.PathMeasurement, st map[strin
 		ls := st[pcieID]
 		cfg := in.PCIe[n.ID]
 		switch {
-		case ls.UtilAtLeast(in.Cfg.UtilHigh):
+		case utilAtLeast(ls, in.Cfg.UtilHigh):
 			out = append(out, model.RootCause{
 				Code: model.CauseOverloadedRNICPCIe, Summary: "RNIC PCIe link overloaded (loopback contention)",
 				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
-				Evidence: fmt.Sprintf("busy equal-throttle fallback; %s", ls.UtilEvidence()),
+				Evidence: fmt.Sprintf("busy equal-throttle fallback; %s", utilEvidence(ls)),
 			})
 		case in.RNICHints[n.ID] == model.HintTxWindow:
 			out = append(out, model.RootCause{
@@ -1026,22 +1074,29 @@ func diagnoseBusyEqualRNIC(in Input, paths []model.PathMeasurement, st map[strin
 	return out
 }
 
+// allAffinitivePresentUncertain reports whether the RNIC has a measured
+// affinitive path and none of them is abnormal.
 func allAffinitivePresentUncertain(aff []model.Endpoint, rnic string, pm map[string]model.PathMeasurement) bool {
-	if len(aff) == 0 {
-		return false
-	}
-	seen := 0
+	eps, abnormal := measuredAffinitive(aff, rnic, pm)
+	return len(eps) > 0 && abnormal == 0
+}
+
+// measuredAffinitive lists, in aff order, the affinitive endpoints of rnic
+// whose path was measured, and how many of those paths are abnormal. An
+// endpoint with no measurement (skipped: NoGDR / no device) is left out,
+// because it is not evidence of health.
+func measuredAffinitive(aff []model.Endpoint, rnic string, pm map[string]model.PathMeasurement) (eps []string, abnormal int) {
 	for _, e := range aff {
 		m, ok := pm[pathKey(rnic, e.ID)]
 		if !ok {
 			continue
 		}
-		seen++
+		eps = append(eps, e.ID)
 		if m.Status == model.PathAbnormal {
-			return false
+			abnormal++
 		}
 	}
-	return seen > 0
+	return eps, abnormal
 }
 
 func anyLinkAbnormal(st map[string]model.LinkState) bool {
@@ -1053,10 +1108,20 @@ func anyLinkAbnormal(st map[string]model.LinkState) bool {
 	return false
 }
 
-func hasRNICCause(causes []model.RootCause, rnic string) bool {
+// hasCauseFor reports whether causes already name rnic (or endpoint) under
+// code, or under any code when code is "".
+func hasCauseFor(causes []model.RootCause, code, rnic, endpoint string) bool {
 	for _, c := range causes {
+		if code != "" && c.Code != code {
+			continue
+		}
 		for _, id := range c.RNICs {
-			if id == rnic {
+			if rnic != "" && id == rnic {
+				return true
+			}
+		}
+		for _, id := range c.Endpoints {
+			if endpoint != "" && id == endpoint {
 				return true
 			}
 		}
@@ -1096,7 +1161,7 @@ func dedupeCauses(in []model.RootCause) []model.RootCause {
 	seen := map[string]struct{}{}
 	var out []model.RootCause
 	for _, c := range in {
-		key := c.Code + "|" + strings.Join(c.Links, ",") + "|" + strings.Join(c.RNICs, ",") + "|" + strings.Join(c.Endpoints, ",")
+		key := causeKey(c)
 		if _, ok := seen[key]; ok {
 			continue
 		}
