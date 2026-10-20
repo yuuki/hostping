@@ -91,12 +91,16 @@ type Result struct {
 }
 
 func Analyze(in Input) Result {
-	paths := ClassifyPaths(in.Graph, in.Measurements, in.Mode, in.BusyRNICs, in.Cfg, in.Bases)
+	r := in.run()
+	// Every pass below judges the same paths, so their classes are resolved
+	// once.
+	classes := r.pathClasses(in.Measurements)
+	paths := r.classifyPaths(in.Measurements, classes)
 	// Applied before anything reads the bandwidth verdicts, so the links,
 	// gray streaks and causes all see the confirmed ones only. The two touch
 	// disjoint paths: idle-judged ones, and those of a loaded RNIC.
-	paths = applyBWRecheck(in.Graph, paths, in.Mode, in.BusyRNICs, in.Bases, in.Cfg.AbnormalTh, in.BWRecheck)
-	paths = applyBusyRecheck(paths, in.Mode, in.BusyRNICs, in.BusyRecheck)
+	paths = r.applyBWRecheck(paths, classes, in.BWRecheck)
+	paths = r.applyBusyRecheck(paths, in.BusyRecheck)
 	// After both rechecks, which confirm a drop that a constant CPU load
 	// causes, and before anything reads the bandwidth verdicts.
 	paths = applyCPUBusy(in.Graph, paths, in.CPUBusySockets)
@@ -105,9 +109,9 @@ func Analyze(in Input) Result {
 	// the cap marks, then the streaks. PlanLatencyRecheck pre-applied the
 	// locality shift to the sweep verdicts only to keep paths it clears off
 	// the cap; it clears them again here, after the recheck.
-	paths = ClassifyLatency(in.Graph, paths, in.Mode, in.Cfg, in.Bases)
+	paths = r.classifyLatency(paths, classes)
 	paths = applyLatencyRecheck(paths, in.LatencyRecheck)
-	paths = applyLocalityShift(in.Graph, paths, in.Bases, in.Cfg)
+	paths = r.applyLocalityShift(paths, classes)
 	paths = markLatencyRecheckSkipped(paths, in.LatencyRecheckSkipped)
 	paths = applyCPUBusyLatency(in.Graph, paths, in.CPUBusySockets)
 	latHits := latencyStreaks(in, paths)

@@ -3,10 +3,7 @@ package analyzer
 import (
 	"sort"
 
-	"github.com/yuuki/hostping/internal/baseline"
-	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/model"
-	"github.com/yuuki/hostping/internal/topology"
 )
 
 // The paired recheck removes the sibling verdicts that came from when a path
@@ -41,8 +38,8 @@ import (
 // not matter and a path the recheck cleared is not judged again.
 // PlanLatencyRecheck runs the same rule (localityShifts) on the sweep
 // verdicts, so the paths it would clear spend none of the recheck's cap.
-func applyLocalityShift(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, cfg config.Config) []model.PathMeasurement {
-	for i, loc := range localityShifts(g, paths, bases, cfg) {
+func (r run) applyLocalityShift(paths []model.PathMeasurement, classes map[string]pathClass) []model.PathMeasurement {
+	for i, loc := range r.localityShifts(paths, classes) {
 		m := &paths[i]
 		m.LatencyStatus, m.LatencyReason, m.LatencyLocality = model.LatencyNormal, model.LatencyLocalityShift, &loc
 	}
@@ -51,9 +48,9 @@ func applyLocalityShift(g topology.Graph, paths []model.PathMeasurement, bases b
 
 // localityShifts returns, keyed by index into paths, the locality reference
 // of each path applyLocalityShift clears, without changing paths.
-func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases baseline.Overlay, cfg config.Config) map[int]model.LatencyLocality {
+func (r run) localityShifts(paths []model.PathMeasurement, classes map[string]pathClass) map[int]model.LatencyLocality {
 	numaOf := map[string]int{}
-	for _, n := range g.RNICs {
+	for _, n := range r.g.RNICs {
 		numaOf[n.ID] = n.NUMA
 	}
 	known := func(rnic string) (int, bool) {
@@ -82,7 +79,7 @@ func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases basel
 		if !ok {
 			continue
 		}
-		c, _, why := latencyClassOf(g, m, bases)
+		c, _, why := latencyClassOf(classes, m)
 		if why != model.LatencyReasonNone {
 			continue
 		}
@@ -120,7 +117,7 @@ func localityShifts(g topology.Graph, paths []model.PathMeasurement, bases basel
 			continue
 		}
 		ref := medianU64(lats)
-		if siblingLatencyHigh(m.SmallLatNsP50, ref, cfg) {
+		if siblingLatencyHigh(m.SmallLatNsP50, ref, r.cfg) {
 			continue
 		}
 		loc := model.LatencyLocality{NUMA: numa, RefNs: ref}

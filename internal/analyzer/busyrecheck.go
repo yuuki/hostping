@@ -64,14 +64,16 @@ func PlanBusyRecheck(g topology.Graph, ms []model.PathMeasurement, mode model.Ru
 	if mode != model.ModeBusy {
 		return nil
 	}
-	judged := ClassifyPaths(g, ms, mode, busy, cfg, bases)
+	r := newRun(g, mode, busy, cfg, bases)
+	classes := r.pathClasses(ms)
+	judged := r.classifyPaths(ms, classes)
 	byClass := map[busyRefKey][]PathRef{}
 	classOf := map[int]busyRefKey{}
 	for i, m := range judged {
 		if !busy[m.RNIC] {
 			continue
 		}
-		k, ok := busyClassOf(g, bases, m)
+		k, ok := busyClassOf(classes, m)
 		if !ok {
 			continue
 		}
@@ -126,21 +128,21 @@ func JudgeBusyRecheck(path, siblings []uint64, th float64) model.BusyRecheck {
 // planned. A path the recheck did not confirm becomes uncertain with
 // UncertainRNICBusy, as any loaded path that is not degraded against its
 // siblings; a confirmed one stays abnormal. Nothing else changes.
-func applyBusyRecheck(paths []model.PathMeasurement, mode model.RunMode, busy map[string]bool, rc map[string]model.BusyRecheck) []model.PathMeasurement {
-	if len(rc) == 0 || mode != model.ModeBusy {
+func (r run) applyBusyRecheck(paths []model.PathMeasurement, rc map[string]model.BusyRecheck) []model.PathMeasurement {
+	if len(rc) == 0 || r.mode != model.ModeBusy {
 		return paths
 	}
 	for i := range paths {
 		m := &paths[i]
-		if m.Status != model.PathAbnormal || !busy[m.RNIC] {
+		if m.Status != model.PathAbnormal || !r.busy[m.RNIC] {
 			continue
 		}
-		r, ok := rc[pathKey(m.RNIC, m.Endpoint)]
+		b, ok := rc[pathKey(m.RNIC, m.Endpoint)]
 		if !ok {
 			continue
 		}
-		m.BusyRecheck = &r
-		if !r.Confirmed {
+		m.BusyRecheck = &b
+		if !b.Confirmed {
 			markUncertain(m, model.UncertainRNICBusy)
 		}
 	}
