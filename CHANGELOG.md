@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-20
+
 ### Changed
 
 - `--idle-gate-command` now tells a denial from a gate that could not decide.
