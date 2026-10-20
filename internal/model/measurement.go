@@ -1,7 +1,5 @@
 package model
 
-import "fmt"
-
 // PathMeasurement is one loopback result (small-message latency + derived bandwidth).
 type PathMeasurement struct {
 	RNIC     string `json:"rnic"`
@@ -212,23 +210,6 @@ func (l LinkState) Util() (float64, bool) {
 		return 0, false
 	}
 	return *l.Utilization, true
-}
-
-// UtilAtLeast reports whether the utilization was read and is at least th.
-// An unknown utilization never explains a link as overloaded.
-func (l LinkState) UtilAtLeast(th float64) bool {
-	u, ok := l.Util()
-	return ok && u >= th
-}
-
-// UtilEvidence renders the utilization for diagnosis evidence: "util=0.42",
-// or "util=unknown" when no live source read it.
-func (l LinkState) UtilEvidence() string {
-	u, ok := l.Util()
-	if !ok {
-		return "util=unknown"
-	}
-	return fmt.Sprintf("util=%.2f", u)
 }
 
 // MutualMeasurement is ToN RNIC-to-RNIC connectivity probe output.

@@ -470,33 +470,21 @@ func TestRootPortPair(t *testing.T) {
 func TestLinkStateUtil(t *testing.T) {
 	f := func(v float64) *float64 { return &v }
 	cases := []struct {
-		name     string
-		util     *float64
-		ok       bool
-		value    float64
-		atLeast  map[float64]bool
-		evidence string
+		name  string
+		util  *float64
+		ok    bool
+		value float64
 	}{
-		{"unread", nil, false, 0, map[float64]bool{0: false, 0.5: false, -1: false}, "util=unknown"},
-		{"zero", f(0), true, 0, map[float64]bool{0: true, 0.5: false}, "util=0.00"},
-		{"0.42", f(0.42), true, 0.42, map[float64]bool{0.42: true, 0.43: false, 0.4: true}, "util=0.42"},
-		{"rounds half up", f(0.425), true, 0.425, map[float64]bool{0.425: true}, "util=0.42"},
-		{"rounds", f(0.999), true, 0.999, map[float64]bool{1: false, 0.999: true}, "util=1.00"},
-		{"one", f(1), true, 1, map[float64]bool{1: true, 1.01: false}, "util=1.00"},
+		{"unread", nil, false, 0},
+		{"zero", f(0), true, 0},
+		{"0.42", f(0.42), true, 0.42},
+		{"one", f(1), true, 1},
 	}
 	for _, c := range cases {
 		l := model.LinkState{ID: "x", Utilization: c.util}
 		u, ok := l.Util()
 		if ok != c.ok || u != c.value {
 			t.Errorf("%s: Util() = %v, %v; want %v, %v", c.name, u, ok, c.value, c.ok)
-		}
-		for th, want := range c.atLeast {
-			if got := l.UtilAtLeast(th); got != want {
-				t.Errorf("%s: UtilAtLeast(%v) = %v, want %v", c.name, th, got, want)
-			}
-		}
-		if got := l.UtilEvidence(); got != c.evidence {
-			t.Errorf("%s: UtilEvidence() = %q, want %q", c.name, got, c.evidence)
 		}
 	}
 }
