@@ -39,50 +39,65 @@ func runWithTimeout(ctx context.Context, timeout time.Duration, name string, arg
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// gpuUtilCache rate-limits nvidia-smi and serves the last sample in between.
-// The compute mode rides on the same query, so it costs no extra fork and
-// comes from the same snapshot that decided whether a run starts.
-type gpuUtilCache struct {
+// rateLimited serves the last result of an external query for every after it
+// ran, so a command that costs a fork (and can hang on a wedged driver) is
+// not run on each 1 s poll. The first call of the process always runs the
+// query, so --once is never served stale; a failed query is cached like any
+// other result, so a missing binary is not probed every second; every <= 0
+// runs the query on each call. Q is the query the cache refreshes.
+type rateLimited[T any, Q query[T]] struct {
 	mu sync.Mutex
 	// run and now are nil outside tests.
 	run   runner
 	now   func() time.Time
 	at    time.Time
 	valid bool
-	smi   nvidiaSample
+	last  T
 }
+
+// query is what a rateLimited cache refreshes. It is a stateless type, so the
+// cache's zero value (a test's literal) already carries it.
+type query[T any] interface {
+	// defaultRunner is the runner the query forks with when none is injected.
+	defaultRunner() runner
+	fetch(ctx context.Context, run runner) T
+}
+
+func (c *rateLimited[T, Q]) get(ctx context.Context, every time.Duration) T {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if c.now != nil {
+		now = c.now()
+	}
+	if c.valid && every > 0 && now.Sub(c.at) < every {
+		return c.last
+	}
+	var q Q
+	run := c.run
+	if run == nil {
+		run = q.defaultRunner()
+	}
+	c.last = q.fetch(ctx, run)
+	c.at = now
+	c.valid = true
+	return c.last
+}
+
+// gpuUtilCache rate-limits nvidia-smi and serves the last sample in between.
+// The compute mode rides on the same query, so it costs no extra fork and
+// comes from the same snapshot that decided whether a run starts.
+type gpuUtilCache = rateLimited[nvidiaSample, nvidiaUtilQuery]
 
 var gpuUtil = &gpuUtilCache{}
 
-func (c *gpuUtilCache) clock() time.Time {
-	if c.now != nil {
-		return c.now()
-	}
-	return time.Now()
-}
+// nvidiaUtilQuery is the GPU utilization and compute mode query by normalized
+// BDF (nvidiaGPUsByBDF).
+type nvidiaUtilQuery struct{}
 
-func (c *gpuUtilCache) runner() runner {
-	if c.run != nil {
-		return c.run
-	}
-	return runBounded
-}
-
-// sample returns the GPU utilization and compute modes by normalized BDF,
-// refreshing at most once per every. A failed query is cached too, so a
-// missing nvidia-smi is not probed every second. The first call after process
-// start always samples.
-func (c *gpuUtilCache) sample(ctx context.Context, every time.Duration) nvidiaSample {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.clock()
-	if c.valid && every > 0 && now.Sub(c.at) < every {
-		return c.smi
-	}
-	c.smi = nvidiaGPUsByBDF(ctx, c.runner())
-	c.at = now
-	c.valid = true
-	return c.smi
+func (nvidiaUtilQuery) defaultRunner() runner { return runBounded }
+func (nvidiaUtilQuery) fetch(ctx context.Context, run runner) nvidiaSample {
+	return nvidiaGPUsByBDF(ctx, run)
 }
 
 // ethtoolGate suppresses ethtool -S per netdev once it is known not to answer.

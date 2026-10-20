@@ -64,25 +64,41 @@ type Engine struct {
 	// sweep's bandwidths, never a verdict.
 	SkipBWRecheck bool
 
-	// skipKey is the last reported set of (endpoint kind, reason) pairs.
-	skipKey string
-
-	// mutualKey is the last reported fabric set behind an empty mutual pair
-	// set; see reportMutualPairs.
-	mutualKey string
-
-	// ibExcludedLogged is set once the InfiniBand RNICs left out of the
-	// mutual probe have been named; see reportInfiniBandExcluded.
-	ibExcludedLogged bool
+	// lastLogged is, per topic, the key of the state last logged by the
+	// reports that speak only when that state changes (reportSkips,
+	// reportMutualPairs, reportInfiniBandExcluded, reportAddressing); see
+	// changed.
+	lastLogged map[string]string
 
 	// latencyRechecks counts the runs that planned a latency recheck. It is
 	// the rotating offset of analyzer.PlanLatencyRecheck, so the per-run cap
 	// moves over the candidates from run to run; a one-shot engine passes 0.
 	latencyRechecks int
+}
 
-	// addrKey is, per RNIC ID, the last logged loopback port addressing;
-	// see reportAddressing.
-	addrKey map[string]model.PortAddressing
+// The topics of lastLogged. Addressing is logged per RNIC, so its topic
+// carries the RNIC ID.
+const (
+	logSkips       = "skips"
+	logMutualPairs = "mutual_pairs"
+	logIBExcluded  = "ib_excluded"
+	logAddressing  = "addressing:"
+)
+
+// changed reports whether key differs from what topic last logged, and
+// records it. The daemon runs the engine on every trigger, so a report that
+// calls it states a standing condition once, when it appears or changes,
+// instead of on every run. A topic never logged has the empty key: an empty
+// state on the first run is not a change.
+func (e *Engine) changed(topic, key string) bool {
+	if e.lastLogged[topic] == key {
+		return false
+	}
+	if e.lastLogged == nil {
+		e.lastLogged = map[string]string{}
+	}
+	e.lastLogged[topic] = key
+	return true
 }
 
 func New(cfg config.Config, g topology.Graph, p Prober) *Engine {
@@ -715,7 +731,7 @@ func markCrossRail(g topology.Graph, ms []model.MutualMeasurement) {
 // graph is fixed for the life of a process, so the agent cannot reach it.
 func (e *Engine) reportMutualPairs(pairs [][2]model.RNIC) {
 	if len(pairs) > 0 {
-		e.mutualKey = ""
+		delete(e.lastLogged, logMutualPairs)
 		return
 	}
 	keys := e.Graph.FabricKeys()
@@ -723,11 +739,9 @@ func (e *Engine) reportMutualPairs(pairs [][2]model.RNIC) {
 	if scope == "" {
 		scope = model.MutualScopeRail
 	}
-	key := fmt.Sprintf("%s %d %q", scope, len(e.Graph.RNICs), keys)
-	if key == e.mutualKey {
+	if !e.changed(logMutualPairs, fmt.Sprintf("%s %d %q", scope, len(e.Graph.RNICs), keys)) {
 		return
 	}
-	e.mutualKey = key
 	need := "two RNICs with a RoCEv2 GID"
 	if e.Cfg.MutualInfiniBand {
 		need = "two RNICs of one link layer with a RoCEv2 GID or InfiniBand LID"
@@ -859,11 +873,9 @@ func skippedEndpoints(groups []skipGroup) []model.EndpointSkip {
 // paths, so they move between runs without the operator-visible state changing.
 // Per-run counts stay in the report and in hostping.endpoint.skipped.
 func (e *Engine) reportSkips(groups []skipGroup) {
-	key := skipSignature(groups)
-	if key == e.skipKey {
+	if !e.changed(logSkips, skipSignature(groups)) {
 		return
 	}
-	e.skipKey = key
 	if len(groups) == 0 {
 		e.logf("hostping: endpoints skipped none (every endpoint registered again)")
 		return
@@ -892,10 +904,9 @@ func skipSignature(groups []skipGroup) string {
 // mutual probe leaves out (all of them, unless --mutual-infiniband). The graph
 // is fixed for the life of the process, so once is enough.
 func (e *Engine) reportInfiniBandExcluded() {
-	if e.ibExcludedLogged || e.Cfg.MutualInfiniBand {
+	if e.Cfg.MutualInfiniBand || !e.changed(logIBExcluded, "logged") {
 		return
 	}
-	e.ibExcludedLogged = true
 	ids := e.Graph.InfiniBandRNICs()
 	if len(ids) == 0 {
 		return
@@ -911,13 +922,9 @@ func (e *Engine) reportAddressing(n model.RNIC, a model.PortAddressing) {
 	if a.Mode == "" {
 		return
 	}
-	if e.addrKey == nil {
-		e.addrKey = map[string]model.PortAddressing{}
-	}
-	if prev, ok := e.addrKey[n.ID]; ok && prev == a {
+	if !e.changed(logAddressing+n.ID, fmt.Sprintf("%q %d %d", a.Mode, a.Port, a.LID)) {
 		return
 	}
-	e.addrKey[n.ID] = a
 	e.logf("hostping: loopback addressing rnic=%s device=%s link_layer=%s mode=%s port=%d lid=%d",
 		n.ID, n.Device, n.LinkLayer, a.Mode, a.Port, a.LID)
 }

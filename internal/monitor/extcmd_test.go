@@ -21,9 +21,10 @@ func newFakeClock() *fakeClock {
 
 const smiOut = "00000000:17:00.0, 42\n00000000:65:00.0, 3\n"
 
-// get is the utilization half of sample, which is all these tests look at.
-func (c *gpuUtilCache) get(ctx context.Context, every time.Duration) map[string]float64 {
-	return c.sample(ctx, every).util
+// utilOf is the utilization half of the cache's sample, which is all these
+// tests look at.
+func utilOf(c *gpuUtilCache, ctx context.Context, every time.Duration) map[string]float64 {
+	return c.get(ctx, every).util
 }
 
 func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
@@ -42,7 +43,7 @@ func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
 	ctx := context.Background()
 
 	// The first call of the process must sample (one-shot/warmup path).
-	got := c.get(ctx, 10*time.Second)
+	got := utilOf(c, ctx, 10*time.Second)
 	if calls != 1 {
 		t.Fatalf("calls=%d, want 1", calls)
 	}
@@ -53,7 +54,7 @@ func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
 	// Nine 1s polls inside the interval must not fork again.
 	for i := 0; i < 9; i++ {
 		clk.add(time.Second)
-		if u := c.get(ctx, 10*time.Second)["17:00.0"]; u != 42 {
+		if u := utilOf(c, ctx, 10*time.Second)["17:00.0"]; u != 42 {
 			t.Fatalf("cached util=%v, want 42", u)
 		}
 	}
@@ -63,7 +64,7 @@ func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
 
 	// Past the interval it refreshes exactly once.
 	clk.add(time.Second)
-	c.get(ctx, 10*time.Second)
+	utilOf(c, ctx, 10*time.Second)
 	if calls != 2 {
 		t.Fatalf("calls=%d after interval, want 2", calls)
 	}
@@ -80,18 +81,18 @@ func TestGPUUtilCacheCachesFailure(t *testing.T) {
 		},
 	}
 	ctx := context.Background()
-	if u := c.get(ctx, 10*time.Second); u != nil {
+	if u := utilOf(c, ctx, 10*time.Second); u != nil {
 		t.Fatalf("util=%v, want nil", u)
 	}
 	clk.add(5 * time.Second)
-	if u := c.get(ctx, 10*time.Second); u != nil {
+	if u := utilOf(c, ctx, 10*time.Second); u != nil {
 		t.Fatalf("util=%v, want nil", u)
 	}
 	if calls != 1 {
 		t.Fatalf("calls=%d, want 1 (failure must be cached too)", calls)
 	}
 	clk.add(6 * time.Second)
-	c.get(ctx, 10*time.Second)
+	utilOf(c, ctx, 10*time.Second)
 	if calls != 2 {
 		t.Fatalf("calls=%d after interval, want 2", calls)
 	}
@@ -107,8 +108,8 @@ func TestGPUUtilCacheZeroIntervalAlwaysSamples(t *testing.T) {
 			return []byte(smiOut), nil
 		},
 	}
-	c.get(context.Background(), 0)
-	c.get(context.Background(), 0)
+	utilOf(c, context.Background(), 0)
+	utilOf(c, context.Background(), 0)
 	if calls != 2 {
 		t.Fatalf("calls=%d, want 2", calls)
 	}

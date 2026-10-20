@@ -140,7 +140,7 @@ func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	// across runs; the paired recheck stands in (analyzer.Input.OneShot).
 	rt.eng.OneShot = cfg.Once
 	if world != nil {
-		rt.sampler = monitor.StaticSampler{Util: world.LinkUtil, GPU: idleGPUs(g, world.ComputeMode)}
+		rt.sampler = monitor.StaticSampler{Util: world.Util(), GPU: idleGPUs(g, world.ComputeModes())}
 	} else {
 		s, closeUncore := liveSampler(g, cfg)
 		rt.sampler, rt.close = s, closeUncore
@@ -380,7 +380,7 @@ func startMutualLoop(ctx context.Context, cfg config.Config, g topology.Graph, w
 		LossIsDrop: world != nil,
 		TimeoutTh:  cfg.TimeoutTh,
 		MinProbes:  mutualMinProbes,
-	}, rnics, pairs, tr, nil, nil, logf)
+	}, rnics, pairs, tr, mutual.WithLogf(logf))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -427,7 +427,7 @@ func runOnce(ctx context.Context, rt *rig, tel *telemetry.Telemetry, cfg config.
 		Mode:     model.ModeIdle,
 	}
 	if world != nil {
-		req.GPUComputeMode = world.ComputeMode
+		req.GPUComputeMode = world.ComputeModes()
 		req.BusyRNICs = world.Busy
 		if len(req.BusyRNICs) > 0 {
 			req.Mode = model.ModeBusy
@@ -602,7 +602,7 @@ func idleGPUs(g topology.Graph, modes map[string]string) []model.GPUStatus {
 // source reads is left out, which the analyzer treats as unknown.
 func utilFrom(ctx context.Context, w *sim.World, s monitor.Sampler, rnic map[string]float64) map[string]float64 {
 	if w != nil {
-		return w.LinkUtil
+		return w.Util()
 	}
 	out := map[string]float64{}
 	for id, u := range rnic {
@@ -621,7 +621,7 @@ func utilFrom(ctx context.Context, w *sim.World, s monitor.Sampler, rnic map[str
 
 func pcieFrom(w *sim.World, g topology.Graph) map[string]model.PCIeConfig {
 	if w != nil {
-		return w.PCIe
+		return w.PCIeConfigs()
 	}
 	out := map[string]model.PCIeConfig{}
 	put := func(key, bdf string) {
@@ -669,22 +669,12 @@ func bdfFromTopoID(id string) string {
 	return ""
 }
 
+// hintsFrom is the simulated monitor's RNIC hints; a live run has none.
 func hintsFrom(w *sim.World) map[string]string {
 	if w == nil {
 		return nil
 	}
-	h := map[string]string{}
-	for id, ok := range w.SlowStart {
-		if ok {
-			h[id] = model.HintSlowStart
-		}
-	}
-	for id, ok := range w.TxWindow {
-		if ok {
-			h[id] = model.HintTxWindow
-		}
-	}
-	return h
+	return w.Hints()
 }
 
 func PrintTopology(cfg config.Config) error {

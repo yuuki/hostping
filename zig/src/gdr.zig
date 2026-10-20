@@ -42,27 +42,18 @@ var detail_buf: detail.Detail = .{};
 var test_backend_store: [8]Backend = undefined;
 var test_backends: ?[]const Backend = null;
 
-var cuda_rt: ?std.DynLib = null;
 var cuda_drv: ?std.DynLib = null;
-var hip_rt: ?std.DynLib = null;
 
-const CudaMalloc = *const fn (ptr: *?*anyopaque, size: usize) callconv(.c) c_int;
-const CudaFree = *const fn (ptr: ?*anyopaque) callconv(.c) c_int;
-const CudaMemset = *const fn (ptr: ?*anyopaque, value: c_int, count: usize) callconv(.c) c_int;
-const CudaSync = *const fn () callconv(.c) c_int;
-const CudaGetCount = *const fn (n: *c_int) callconv(.c) c_int;
-const CudaSetDevice = *const fn (dev: c_int) callconv(.c) c_int;
-const CudaPciBusId = *const fn (id: [*]u8, len: c_int, dev: c_int) callconv(.c) c_int;
-const CudaDeviceReset = *const fn () callconv(.c) c_int;
-
-const HipMalloc = CudaMalloc;
-const HipFree = CudaFree;
-const HipMemset = CudaMemset;
-const HipSync = CudaSync;
-const HipGetCount = CudaGetCount;
-const HipSetDevice = CudaSetDevice;
-const HipPciBusId = CudaPciBusId;
-const HipDeviceReset = CudaDeviceReset;
+// cudart and HIP share every runtime signature; `RtFns` holds one resolved
+// set and `RuntimeApi` generates the backend over it for each library.
+const RtMalloc = *const fn (ptr: *?*anyopaque, size: usize) callconv(.c) c_int;
+const RtFree = *const fn (ptr: ?*anyopaque) callconv(.c) c_int;
+const RtMemset = *const fn (ptr: ?*anyopaque, value: c_int, count: usize) callconv(.c) c_int;
+const RtSync = *const fn () callconv(.c) c_int;
+const RtGetCount = *const fn (n: *c_int) callconv(.c) c_int;
+const RtSetDevice = *const fn (dev: c_int) callconv(.c) c_int;
+const RtPciBusId = *const fn (id: [*]u8, len: c_int, dev: c_int) callconv(.c) c_int;
+const RtDeviceReset = *const fn () callconv(.c) c_int;
 
 const CuInit = *const fn (flags: c_uint) callconv(.c) c_int;
 const CuPointerSetAttribute = *const fn (value: *const anyopaque, attribute: c_uint, ptr: c_ulonglong) callconv(.c) c_int;
@@ -85,26 +76,15 @@ const CuCtxSetCurrent = *const fn (ctx: ?*anyopaque) callconv(.c) c_int;
 // hipDeviceptr_t is void* on AMD; the device VA is pointer-sized on LP64.
 const HipMemGetHandleForAddressRange = *const fn (handle: *anyopaque, dptr: ?*anyopaque, size: usize, handle_type: c_int, flags: c_ulonglong) callconv(.c) c_int;
 
-const CudaFns = struct {
-    malloc: CudaMalloc,
-    free: CudaFree,
-    memset: CudaMemset,
-    sync: CudaSync,
-    get_count: CudaGetCount,
-    set_device: CudaSetDevice,
-    pci_bus_id: CudaPciBusId,
-    device_reset: CudaDeviceReset,
-};
-
-const HipFns = struct {
-    malloc: HipMalloc,
-    free: HipFree,
-    memset: HipMemset,
-    sync: HipSync,
-    get_count: HipGetCount,
-    set_device: HipSetDevice,
-    pci_bus_id: HipPciBusId,
-    device_reset: HipDeviceReset,
+const RtFns = struct {
+    malloc: RtMalloc,
+    free: RtFree,
+    memset: RtMemset,
+    sync: RtSync,
+    get_count: RtGetCount,
+    set_device: RtSetDevice,
+    pci_bus_id: RtPciBusId,
+    device_reset: RtDeviceReset,
 };
 
 const CudaDrvFns = struct {
@@ -121,11 +101,7 @@ const CudaDrvFns = struct {
     ctx_set_current: CuCtxSetCurrent,
 };
 
-var cuda_fns: ?CudaFns = null;
-var hip_fns: ?HipFns = null;
 var cuda_drv_fns: ?CudaDrvFns = null;
-var cuda_load_tried = false;
-var hip_load_tried = false;
 var cuda_drv_load_tried = false;
 var cu_init_tried = false;
 var cu_init_ok = false;
@@ -307,7 +283,7 @@ pub fn dmaBufFd(mem: DeviceMem) ?i32 {
     return null;
 }
 
-fn liveCudaGetDmaBuf(ptr: usize, len: usize) ?i32 {
+fn liveCudaDmaBuf(ptr: usize, len: usize) ?i32 {
     const lib = ensureCudaDrv() orelse return null;
     const get = lib.lookup(CuMemGetHandleForAddressRange, "cuMemGetHandleForAddressRange") orelse return null;
     var fd: c_int = -1;
@@ -317,8 +293,8 @@ fn liveCudaGetDmaBuf(ptr: usize, len: usize) ?i32 {
     return @intCast(fd);
 }
 
-fn liveHipGetDmaBuf(ptr: usize, len: usize) ?i32 {
-    const lib = if (hip_rt) |*l| l else return null;
+fn liveHipDmaBuf(ptr: usize, len: usize) ?i32 {
+    const lib = if (hip.lib) |*l| l else return null;
     const get = lib.lookup(HipMemGetHandleForAddressRange, "hipMemGetHandleForAddressRange") orelse return null;
     var fd: c_int = -1;
     // hipMemRangeHandleTypeDmaBufFd = 0x1
@@ -332,62 +308,6 @@ fn openFirst(names: []const []const u8) ?std.DynLib {
         if (std.DynLib.open(n)) |lib| return lib else |_| continue;
     }
     return null;
-}
-
-fn liveCudaCount() error{NoGDR}!u32 {
-    const fns = cuda_fns orelse return error.NoGDR;
-    var n: c_int = 0;
-    if (fns.get_count(&n) != 0) return error.NoGDR;
-    if (n < 0) return error.NoGDR;
-    return @intCast(n);
-}
-
-fn liveCudaPci(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
-    const fns = cuda_fns orelse return error.NoGDR;
-    if (buf.len == 0) return error.NoGDR;
-    @memset(buf, 0);
-    if (fns.pci_bus_id(buf.ptr, @intCast(buf.len), @intCast(dev)) != 0) return error.NoGDR;
-    return buf;
-}
-
-fn liveCudaMalloc(dev: u32, len: usize) error{NoGDR}!usize {
-    const fns = cuda_fns orelse return error.NoGDR;
-    if (dev >= max_devices) return error.NoGDR;
-    if (fns.set_device(@intCast(dev)) != 0) return error.NoGDR;
-    // cudaSetDevice may already have created the primary context.
-    cuda_rt_ctxs.bound(dev);
-    var ptr: ?*anyopaque = null;
-    if (fns.malloc(&ptr, len) != 0) return error.NoGDR;
-    const dev_ptr = ptr orelse return error.NoGDR;
-    if (fns.memset(dev_ptr, 0, len) != 0) {
-        _ = fns.free(dev_ptr);
-        return error.NoGDR;
-    }
-    if (fns.sync() != 0) {
-        _ = fns.free(dev_ptr);
-        return error.NoGDR;
-    }
-    cuda_rt_ctxs.allocated(dev);
-    return @intFromPtr(dev_ptr);
-}
-
-fn liveCudaFree(dev: u32, ptr: usize) void {
-    const fns = cuda_fns orelse return;
-    _ = fns.set_device(@intCast(dev));
-    if (ptr != 0) {
-        _ = fns.free(@ptrFromInt(ptr));
-    }
-    cuda_rt_ctxs.freed(dev);
-}
-
-fn liveCudaReset(dev: u32) void {
-    const fns = cuda_fns orelse return;
-    if (fns.set_device(@intCast(dev)) != 0) return;
-    _ = fns.device_reset();
-}
-
-fn liveCudaDmaBuf(ptr: usize, len: usize) ?i32 {
-    return liveCudaGetDmaBuf(ptr, len);
 }
 
 /// Highest device ordinal + 1 whose context hostping tracks; a device past it
@@ -432,15 +352,146 @@ const RtCtxs = struct {
     }
 };
 
-var cuda_rt_ctxs: RtCtxs = .{};
-var hip_rt_ctxs: RtCtxs = .{};
+/// What tells the two runtime APIs apart: where the library lives and what
+/// it names the entry points. Everything else is generated by `RuntimeApi`.
+const RuntimeSpec = struct {
+    /// Library names in the order they are tried.
+    libs: []const []const u8,
+    /// One symbol name per `RtFns` field.
+    symbols: RtSymbols,
+};
+
+const RtSymbols = struct {
+    malloc: [:0]const u8,
+    free: [:0]const u8,
+    memset: [:0]const u8,
+    sync: [:0]const u8,
+    get_count: [:0]const u8,
+    set_device: [:0]const u8,
+    pci_bus_id: [:0]const u8,
+    device_reset: [:0]const u8,
+};
+
+const cuda_spec = RuntimeSpec{
+    .libs = &.{ "libcudart.so.13", "libcudart.so.12", "libcudart.so.11", "libcudart.so" },
+    .symbols = .{
+        .malloc = "cudaMalloc",
+        .free = "cudaFree",
+        .memset = "cudaMemset",
+        .sync = "cudaDeviceSynchronize",
+        .get_count = "cudaGetDeviceCount",
+        .set_device = "cudaSetDevice",
+        .pci_bus_id = "cudaDeviceGetPCIBusId",
+        .device_reset = "cudaDeviceReset",
+    },
+};
+
+const hip_spec = RuntimeSpec{
+    .libs = &.{ "libamdhip64.so.6", "libamdhip64.so" },
+    .symbols = .{
+        .malloc = "hipMalloc",
+        .free = "hipFree",
+        .memset = "hipMemset",
+        .sync = "hipDeviceSynchronize",
+        .get_count = "hipGetDeviceCount",
+        .set_device = "hipSetDevice",
+        .pci_bus_id = "hipDeviceGetPCIBusId",
+        .device_reset = "hipDeviceReset",
+    },
+};
+
+/// One runtime (cudart or HIP) allocation backend: the loaded library, its
+/// resolved entry points, the primary contexts it has bound, and the
+/// `Backend` hooks over them. Each instantiation owns its own statics.
+fn RuntimeApi(comptime spec: RuntimeSpec) type {
+    return struct {
+        var lib: ?std.DynLib = null;
+        var fns: ?RtFns = null;
+        var load_tried = false;
+        var ctxs: RtCtxs = .{};
+
+        /// Open the library and resolve every entry point, once.
+        fn load() ?RtFns {
+            if (load_tried) return fns;
+            load_tried = true;
+            if (lib == null) lib = openFirst(spec.libs);
+            const opened = if (lib) |*l| l else return null;
+            var resolved: RtFns = undefined;
+            const info = @typeInfo(RtFns).@"struct";
+            inline for (info.field_names, info.field_types) |name, T| {
+                @field(resolved, name) = opened.lookup(T, @field(spec.symbols, name)) orelse return null;
+            }
+            fns = resolved;
+            return resolved;
+        }
+
+        fn count() error{NoGDR}!u32 {
+            const f = fns orelse return error.NoGDR;
+            var n: c_int = 0;
+            if (f.get_count(&n) != 0) return error.NoGDR;
+            if (n < 0) return error.NoGDR;
+            return @intCast(n);
+        }
+
+        fn pci(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
+            const f = fns orelse return error.NoGDR;
+            if (buf.len == 0) return error.NoGDR;
+            @memset(buf, 0);
+            if (f.pci_bus_id(buf.ptr, @intCast(buf.len), @intCast(dev)) != 0) return error.NoGDR;
+            return buf;
+        }
+
+        fn malloc(dev: u32, len: usize) error{NoGDR}!usize {
+            const f = fns orelse return error.NoGDR;
+            if (dev >= max_devices) return error.NoGDR;
+            if (f.set_device(@intCast(dev)) != 0) return error.NoGDR;
+            // set-device may already have created the primary context.
+            ctxs.bound(dev);
+            var ptr: ?*anyopaque = null;
+            if (f.malloc(&ptr, len) != 0) return error.NoGDR;
+            const dev_ptr = ptr orelse return error.NoGDR;
+            if (f.memset(dev_ptr, 0, len) != 0) {
+                _ = f.free(dev_ptr);
+                return error.NoGDR;
+            }
+            if (f.sync() != 0) {
+                _ = f.free(dev_ptr);
+                return error.NoGDR;
+            }
+            ctxs.allocated(dev);
+            return @intFromPtr(dev_ptr);
+        }
+
+        fn free(dev: u32, ptr: usize) void {
+            const f = fns orelse return;
+            _ = f.set_device(@intCast(dev));
+            if (ptr != 0) {
+                _ = f.free(@ptrFromInt(ptr));
+            }
+            ctxs.freed(dev);
+        }
+
+        fn reset(dev: u32) void {
+            const f = fns orelse return;
+            if (f.set_device(@intCast(dev)) != 0) return;
+            _ = f.device_reset();
+        }
+
+        fn releaseIdle() void {
+            if (fns != null) _ = ctxs.releaseIdle(reset);
+        }
+    };
+}
+
+const cuda = RuntimeApi(cuda_spec);
+const hip = RuntimeApi(hip_spec);
 
 /// Hand back every runtime primary context no allocation still needs, so the
 /// process holds no GPU context between runs. Driver-API contexts need no help
 /// here: they are released on their last free (`liveCudaDrvFree`).
 pub fn releaseIdle() void {
-    if (cuda_fns != null) _ = cuda_rt_ctxs.releaseIdle(liveCudaReset);
-    if (hip_fns != null) _ = hip_rt_ctxs.releaseIdle(liveHipReset);
+    cuda.releaseIdle();
+    hip.releaseIdle();
 }
 
 // Driver-API primary contexts, one slot per device ordinal. cuMemAlloc needs
@@ -449,15 +500,13 @@ pub fn releaseIdle() void {
 // Slots are refcounted: retained on the first live allocation for a device
 // and handed back on the last free. A primary context left retained pins GPU
 // state for the life of the process, which is hostile on a shared node.
-const max_drv_devices = max_devices;
-
 const DrvCtx = struct {
     ctx: ?*anyopaque = null,
     handle: c_int = 0,
     refs: u32 = 0,
 };
 
-var drv_ctxs: [max_drv_devices]DrvCtx = @splat(.{});
+var drv_ctxs: [max_devices]DrvCtx = @splat(.{});
 
 fn drvDeviceHandle(fns: CudaDrvFns, dev: u32) error{NoGDR}!c_int {
     if (!ensureCuInit(fns.init)) return error.NoGDR;
@@ -521,7 +570,7 @@ fn liveCudaDrvPci(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
 
 fn liveCudaDrvMalloc(dev: u32, len: usize) error{NoGDR}!usize {
     const fns = cuda_drv_fns orelse return error.NoGDR;
-    if (dev >= max_drv_devices) return error.NoGDR;
+    if (dev >= max_devices) return error.NoGDR;
     const fresh = try drvBind(fns, dev);
     errdefer if (fresh) drvDropCtx(fns, dev);
 
@@ -539,7 +588,7 @@ fn liveCudaDrvMalloc(dev: u32, len: usize) error{NoGDR}!usize {
 
 fn liveCudaDrvFree(dev: u32, ptr: usize) void {
     const fns = cuda_drv_fns orelse return;
-    if (dev >= max_drv_devices) return;
+    if (dev >= max_devices) return;
     const slot = &drv_ctxs[dev];
     if (slot.ctx == null) return;
     _ = fns.ctx_set_current(slot.ctx);
@@ -548,119 +597,6 @@ fn liveCudaDrvFree(dev: u32, ptr: usize) void {
     }
     if (slot.refs > 0) slot.refs -= 1;
     if (slot.refs == 0) drvDropCtx(fns, dev);
-}
-
-fn liveHipCount() error{NoGDR}!u32 {
-    const fns = hip_fns orelse return error.NoGDR;
-    var n: c_int = 0;
-    if (fns.get_count(&n) != 0) return error.NoGDR;
-    if (n < 0) return error.NoGDR;
-    return @intCast(n);
-}
-
-fn liveHipPci(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
-    const fns = hip_fns orelse return error.NoGDR;
-    if (buf.len == 0) return error.NoGDR;
-    @memset(buf, 0);
-    if (fns.pci_bus_id(buf.ptr, @intCast(buf.len), @intCast(dev)) != 0) return error.NoGDR;
-    return buf;
-}
-
-fn liveHipMalloc(dev: u32, len: usize) error{NoGDR}!usize {
-    const fns = hip_fns orelse return error.NoGDR;
-    if (dev >= max_devices) return error.NoGDR;
-    if (fns.set_device(@intCast(dev)) != 0) return error.NoGDR;
-    hip_rt_ctxs.bound(dev);
-    var ptr: ?*anyopaque = null;
-    if (fns.malloc(&ptr, len) != 0) return error.NoGDR;
-    const dev_ptr = ptr orelse return error.NoGDR;
-    if (fns.memset(dev_ptr, 0, len) != 0) {
-        _ = fns.free(dev_ptr);
-        return error.NoGDR;
-    }
-    if (fns.sync() != 0) {
-        _ = fns.free(dev_ptr);
-        return error.NoGDR;
-    }
-    hip_rt_ctxs.allocated(dev);
-    return @intFromPtr(dev_ptr);
-}
-
-fn liveHipFree(dev: u32, ptr: usize) void {
-    const fns = hip_fns orelse return;
-    _ = fns.set_device(@intCast(dev));
-    if (ptr != 0) {
-        _ = fns.free(@ptrFromInt(ptr));
-    }
-    hip_rt_ctxs.freed(dev);
-}
-
-fn liveHipReset(dev: u32) void {
-    const fns = hip_fns orelse return;
-    if (fns.set_device(@intCast(dev)) != 0) return;
-    _ = fns.device_reset();
-}
-
-fn liveHipDmaBuf(ptr: usize, len: usize) ?i32 {
-    return liveHipGetDmaBuf(ptr, len);
-}
-
-fn loadCudaFns() ?CudaFns {
-    if (cuda_load_tried) return cuda_fns;
-    cuda_load_tried = true;
-    if (cuda_rt == null) {
-        cuda_rt = openFirst(&.{ "libcudart.so.13", "libcudart.so.12", "libcudart.so.11", "libcudart.so" });
-    }
-    const lib = if (cuda_rt) |*l| l else return null;
-    const malloc_fn = lib.lookup(CudaMalloc, "cudaMalloc") orelse return null;
-    const free_fn = lib.lookup(CudaFree, "cudaFree") orelse return null;
-    const memset_fn = lib.lookup(CudaMemset, "cudaMemset") orelse return null;
-    const sync_fn = lib.lookup(CudaSync, "cudaDeviceSynchronize") orelse return null;
-    const count_fn = lib.lookup(CudaGetCount, "cudaGetDeviceCount") orelse return null;
-    const set_fn = lib.lookup(CudaSetDevice, "cudaSetDevice") orelse return null;
-    const pci_fn = lib.lookup(CudaPciBusId, "cudaDeviceGetPCIBusId") orelse return null;
-    const reset_fn = lib.lookup(CudaDeviceReset, "cudaDeviceReset") orelse return null;
-    const fns = CudaFns{
-        .malloc = malloc_fn,
-        .free = free_fn,
-        .memset = memset_fn,
-        .sync = sync_fn,
-        .get_count = count_fn,
-        .set_device = set_fn,
-        .pci_bus_id = pci_fn,
-        .device_reset = reset_fn,
-    };
-    cuda_fns = fns;
-    return fns;
-}
-
-fn loadHipFns() ?HipFns {
-    if (hip_load_tried) return hip_fns;
-    hip_load_tried = true;
-    if (hip_rt == null) {
-        hip_rt = openFirst(&.{ "libamdhip64.so.6", "libamdhip64.so" });
-    }
-    const lib = if (hip_rt) |*l| l else return null;
-    const malloc_fn = lib.lookup(HipMalloc, "hipMalloc") orelse return null;
-    const free_fn = lib.lookup(HipFree, "hipFree") orelse return null;
-    const memset_fn = lib.lookup(HipMemset, "hipMemset") orelse return null;
-    const sync_fn = lib.lookup(HipSync, "hipDeviceSynchronize") orelse return null;
-    const count_fn = lib.lookup(HipGetCount, "hipGetDeviceCount") orelse return null;
-    const set_fn = lib.lookup(HipSetDevice, "hipSetDevice") orelse return null;
-    const pci_fn = lib.lookup(HipPciBusId, "hipDeviceGetPCIBusId") orelse return null;
-    const reset_fn = lib.lookup(HipDeviceReset, "hipDeviceReset") orelse return null;
-    const fns = HipFns{
-        .malloc = malloc_fn,
-        .free = free_fn,
-        .memset = memset_fn,
-        .sync = sync_fn,
-        .get_count = count_fn,
-        .set_device = set_fn,
-        .pci_bus_id = pci_fn,
-        .device_reset = reset_fn,
-    };
-    hip_fns = fns;
-    return fns;
 }
 
 /// Resolve a symbol, preferring the `_v2` name the CUDA headers macro to.
@@ -708,13 +644,11 @@ fn loadCudaDrvFns() ?CudaDrvFns {
     return fns;
 }
 
-const Avail = struct { cuda_rt: bool, cuda_drv: bool, hip: bool };
-
 /// The order `alloc` walks the backends in. The CUDA runtime comes first so
 /// hosts with a CUDA Toolkit keep exactly the code path they have today; the
 /// driver API only gets a turn when the runtime is missing, or is present but
 /// refuses to enumerate devices (a runtime newer than the driver does that).
-fn orderKinds(avail: Avail, out: *[3]Kind) []const Kind {
+fn orderKinds(avail: struct { cuda_rt: bool, cuda_drv: bool, hip: bool }, out: *[3]Kind) []const Kind {
     var n: usize = 0;
     if (avail.cuda_rt) {
         out[n] = .cuda;
@@ -735,10 +669,10 @@ fn backendFor(kind: Kind) Backend {
     return switch (kind) {
         .cuda => .{
             .kind = .cuda,
-            .device_count = liveCudaCount,
-            .pci_bus_id = liveCudaPci,
-            .malloc = liveCudaMalloc,
-            .free = liveCudaFree,
+            .device_count = cuda.count,
+            .pci_bus_id = cuda.pci,
+            .malloc = cuda.malloc,
+            .free = cuda.free,
             .dma_buf_fd = liveCudaDmaBuf,
         },
         // dma-buf export is a driver-API call either way, so both CUDA
@@ -753,10 +687,10 @@ fn backendFor(kind: Kind) Backend {
         },
         .hip => .{
             .kind = .hip,
-            .device_count = liveHipCount,
-            .pci_bus_id = liveHipPci,
-            .malloc = liveHipMalloc,
-            .free = liveHipFree,
+            .device_count = hip.count,
+            .pci_bus_id = hip.pci,
+            .malloc = hip.malloc,
+            .free = hip.free,
             .dma_buf_fd = liveHipDmaBuf,
         },
     };
@@ -765,12 +699,12 @@ fn backendFor(kind: Kind) Backend {
 fn liveBackends() []const Backend {
     var kind_buf: [3]Kind = undefined;
     const kinds = orderKinds(.{
-        .cuda_rt = loadCudaFns() != null,
+        .cuda_rt = cuda.load() != null,
         // Resolving the driver symbols is a dlopen plus lookups; cuInit is
         // deferred to the first device_count so a working runtime host pays
         // nothing for the fallback being registered.
         .cuda_drv = loadCudaDrvFns() != null,
-        .hip = loadHipFns() != null,
+        .hip = hip.load() != null,
     }, &kind_buf);
     for (kinds, 0..) |kind, i| {
         live_backend_buf[i] = backendFor(kind);
@@ -821,345 +755,65 @@ test "normalizeBdf stops at NUL and ignores trailing junk" {
     try std.testing.expect(bdfEql(raw, "0000:3b:00.0"));
 }
 
-test "alloc matches C-string PCI bus id from a 32-byte buffer" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memset(buf, 0xAA);
-            @memcpy(buf[0..s.len], s);
-            buf[s.len] = 0;
-            return buf; // full 32-byte buffer, not a precise slice
-        }
-        fn malloc(_: u32, len: usize) error{NoGDR}!usize {
-            return 0x3000 + len;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const mem = try alloc("0000:18:00.0", 4096);
-    try std.testing.expectEqual(@as(usize, 0x3000 + 4096), mem.ptr);
-}
+/// How a fake hands back a PCI bus id: a precise slice, the full buffer
+/// zero-padded, or a C string with whatever the buffer held after the NUL.
+const BusForm = enum { slice, padded, c_string };
 
-test "alloc with no backend is NoGDR: no cuda" {
-    restoreBackends();
-    installBackendsForTest(&.{});
-    defer restoreBackends();
-    const err = alloc("0000:18:00.0", 4096);
-    try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("no cuda", lastDetail());
-}
+const FakeOpts = struct {
+    /// malloc hands out `base + len`.
+    base: usize = 0,
+    /// One bus id per device ordinal, so the length is the device count.
+    bdfs: []const []const u8 = &.{"0000:18:00.0"},
+    bus_form: BusForm = .padded,
+    /// Only this ordinal allocates; malloc on any other one fails.
+    only_dev: ?u32 = null,
+    fail_malloc: bool = false,
+    /// What dma_buf_fd exports for the last allocation; null exports nothing.
+    fd: ?i32 = null,
+};
 
-test "alloc with no matching BDF is NoGDR: missing gpu" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
-            _ = dev;
-            const s = "0000:19:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(_: u32, _: usize) error{NoGDR}!usize {
-            return 0x1000;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const err = alloc("0000:18:00.0", 4096);
-    try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("missing gpu", lastDetail());
-}
-
-test "alloc matches BDF and records pointer" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 2;
-        }
-        fn bus(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s: []const u8 = if (dev == 0) "0000:17:00.0" else "0000:18:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(dev: u32, len: usize) error{NoGDR}!usize {
-            if (dev != 1) return error.NoGDR;
-            return 0x2000 + len;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const mem = try alloc("0000:18:00.0", 65536);
-    try std.testing.expectEqual(@as(usize, 0x2000 + 65536), mem.ptr);
-    try std.testing.expectEqual(@as(u32, 1), mem.device);
-    try std.testing.expectEqual(Kind.cuda, mem.kind);
-    try std.testing.expectEqual(@as(usize, 65536), mem.len);
-}
-
-test "alloc skips a failing CUDA backend and uses HIP" {
-    const bad = struct {
-        fn count() error{NoGDR}!u32 {
-            return error.NoGDR;
-        }
-        fn bus(_: u32, _: []u8) error{NoGDR}![]const u8 {
-            return error.NoGDR;
-        }
-        fn malloc(_: u32, _: usize) error{NoGDR}!usize {
-            return error.NoGDR;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const good = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(_: u32, len: usize) error{NoGDR}!usize {
-            return 0x4000 + len;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const backends = [_]Backend{
-        .{
-            .kind = .cuda,
-            .device_count = bad.count,
-            .pci_bus_id = bad.bus,
-            .malloc = bad.malloc,
-            .free = bad.free,
-            .dma_buf_fd = bad.fd,
-        },
-        .{
-            .kind = .hip,
-            .device_count = good.count,
-            .pci_bus_id = good.bus,
-            .malloc = good.malloc,
-            .free = good.free,
-            .dma_buf_fd = good.fd,
-        },
-    };
-    installBackendsForTest(&backends);
-    defer restoreBackends();
-    const mem = try alloc("0000:18:00.0", 4096);
-    try std.testing.expectEqual(Kind.hip, mem.kind);
-    try std.testing.expectEqual(@as(usize, 0x4000 + 4096), mem.ptr);
-}
-
-test "alloc matches 8-digit domain against 4-digit CUDA bus id" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memset(buf, 0);
-            @memcpy(buf[0..s.len], s);
-            return buf;
-        }
-        fn malloc(_: u32, len: usize) error{NoGDR}!usize {
-            return 0x6000 + len;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const mem = try alloc("00000000:18:00.0", 4096);
-    try std.testing.expectEqual(@as(usize, 0x6000 + 4096), mem.ptr);
-}
-
-test "dmaBufFd uses the matching backend hook" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(_: u32, _: usize) error{NoGDR}!usize {
-            return 0x7000;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(ptr: usize, len: usize) ?i32 {
-            if (ptr != 0x7000 or len != 4096) return null;
-            return 7;
-        }
-    };
-    const be = Backend{
-        .kind = .hip,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const mem = try alloc("0000:18:00.0", 4096);
-    try std.testing.expectEqual(Kind.hip, mem.kind);
-    try std.testing.expectEqual(@as(i32, 7), dmaBufFd(mem).?);
-}
-
-test "alloc malloc failure is NoGDR: alloc" {
-    const pci = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(_: u32, _: usize) error{NoGDR}!usize {
-            return error.NoGDR;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const err = alloc("0000:18:00.0", 4096);
-    try std.testing.expectError(error.NoGDR, err);
-    try std.testing.expectEqualStrings("alloc", lastDetail());
-}
-
-test "GPU loopback allocates and exports source and destination as one range" {
-    // NSDI'23 §4.1.1: both loopback regions live in the GPU. The live probe
-    // asks for one allocation covering both halves and registers it through
-    // a single dma-buf fd, so the backend must see the full planned length.
-    const loopbuf = @import("loopbuf.zig");
-    const p = loopbuf.plan(128 * 1024, true);
-    const pci = struct {
+/// A backend that reports the GPUs in `opts.bdfs` and hands out
+/// `opts.base + len`. `opts` is a comptime parameter so each instantiation is
+/// a distinct type with its own function pointers and statics, which is what
+/// Backend stores.
+fn FakeGpu(comptime opts: FakeOpts) type {
+    return struct {
+        /// What the last malloc and dma_buf_fd calls saw.
+        var malloc_ptr: usize = 0;
         var malloc_len: usize = 0;
         var fd_len: usize = 0;
+
         fn count() error{NoGDR}!u32 {
-            return 1;
+            return @intCast(opts.bdfs.len);
         }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
+        fn bus(dev: u32, buf: []u8) error{NoGDR}![]const u8 {
+            const s = opts.bdfs[dev];
             @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
+            switch (opts.bus_form) {
+                .slice => return buf[0..s.len],
+                .padded => {
+                    @memset(buf[s.len..], 0);
+                    return buf;
+                },
+                .c_string => {
+                    buf[s.len] = 0;
+                    @memset(buf[s.len + 1 ..], 0xAA);
+                    return buf; // full 32-byte buffer, not a precise slice
+                },
+            }
         }
-        fn malloc(_: u32, len: usize) error{NoGDR}!usize {
+        fn malloc(dev: u32, len: usize) error{NoGDR}!usize {
+            if (opts.fail_malloc) return error.NoGDR;
+            if (opts.only_dev) |only| if (dev != only) return error.NoGDR;
             malloc_len = len;
-            return 0x100000;
+            malloc_ptr = opts.base + len;
+            return malloc_ptr;
         }
         fn free(_: u32, _: usize) void {}
         fn fd(ptr: usize, len: usize) ?i32 {
-            if (ptr != 0x100000) return null;
+            if (ptr != malloc_ptr or len != malloc_len) return null;
             fd_len = len;
-            return 9;
-        }
-    };
-    const be = Backend{
-        .kind = .cuda,
-        .device_count = pci.count,
-        .pci_bus_id = pci.bus,
-        .malloc = pci.malloc,
-        .free = pci.free,
-        .dma_buf_fd = pci.fd,
-    };
-    installBackendsForTest(&.{be});
-    defer restoreBackends();
-    const mem = try alloc("0000:18:00.0", p.alloc_len);
-    try std.testing.expectEqual(p.alloc_len, pci.malloc_len);
-    try std.testing.expectEqual(p.alloc_len, mem.len);
-    try std.testing.expectEqual(@as(i32, 9), dmaBufFd(mem).?);
-    try std.testing.expectEqual(p.alloc_len, pci.fd_len);
-    // The destination half starts inside the same allocation, past the source.
-    try std.testing.expect(mem.ptr + p.dst_off + p.region_len <= mem.ptr + mem.len);
-    try std.testing.expect(mem.ptr + p.src_off + p.region_len <= mem.ptr + p.dst_off);
-}
-
-/// A backend that reports one GPU at 0000:18:00.0 and hands out `base + len`.
-/// `base` is a comptime parameter so each instantiation is a distinct type
-/// with its own function pointers, which is what Backend stores.
-fn FakeGpu(comptime base: usize) type {
-    return struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memset(buf, 0);
-            @memcpy(buf[0..s.len], s);
-            return buf;
-        }
-        fn malloc(_: u32, len: usize) error{NoGDR}!usize {
-            return base + len;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
+            return opts.fd;
         }
         fn backend(kind: Kind) Backend {
             return .{
@@ -1201,6 +855,103 @@ const DeadGpu = struct {
     }
 };
 
+test "alloc matches C-string PCI bus id from a 32-byte buffer" {
+    const gpu = FakeGpu(.{ .base = 0x3000, .bus_form = .c_string });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const mem = try alloc("0000:18:00.0", 4096);
+    try std.testing.expectEqual(@as(usize, 0x3000 + 4096), mem.ptr);
+}
+
+test "alloc with no backend is NoGDR: no cuda" {
+    restoreBackends();
+    installBackendsForTest(&.{});
+    defer restoreBackends();
+    const err = alloc("0000:18:00.0", 4096);
+    try std.testing.expectError(error.NoGDR, err);
+    try std.testing.expectEqualStrings("no cuda", lastDetail());
+}
+
+test "alloc with no matching BDF is NoGDR: missing gpu" {
+    const gpu = FakeGpu(.{ .base = 0x1000, .bdfs = &.{"0000:19:00.0"}, .bus_form = .slice });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const err = alloc("0000:18:00.0", 4096);
+    try std.testing.expectError(error.NoGDR, err);
+    try std.testing.expectEqualStrings("missing gpu", lastDetail());
+}
+
+test "alloc matches BDF and records pointer" {
+    const gpu = FakeGpu(.{
+        .base = 0x2000,
+        .bdfs = &.{ "0000:17:00.0", "0000:18:00.0" },
+        .bus_form = .slice,
+        .only_dev = 1,
+    });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const mem = try alloc("0000:18:00.0", 65536);
+    try std.testing.expectEqual(@as(usize, 0x2000 + 65536), mem.ptr);
+    try std.testing.expectEqual(@as(u32, 1), mem.device);
+    try std.testing.expectEqual(Kind.cuda, mem.kind);
+    try std.testing.expectEqual(@as(usize, 65536), mem.len);
+}
+
+test "alloc skips a failing CUDA backend and uses HIP" {
+    const good = FakeGpu(.{ .base = 0x4000, .bus_form = .slice });
+    const backends = [_]Backend{ DeadGpu.backend(.cuda), good.backend(.hip) };
+    installBackendsForTest(&backends);
+    defer restoreBackends();
+    const mem = try alloc("0000:18:00.0", 4096);
+    try std.testing.expectEqual(Kind.hip, mem.kind);
+    try std.testing.expectEqual(@as(usize, 0x4000 + 4096), mem.ptr);
+}
+
+test "alloc matches 8-digit domain against 4-digit CUDA bus id" {
+    const gpu = FakeGpu(.{ .base = 0x6000 });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const mem = try alloc("00000000:18:00.0", 4096);
+    try std.testing.expectEqual(@as(usize, 0x6000 + 4096), mem.ptr);
+}
+
+test "dmaBufFd uses the matching backend hook" {
+    const gpu = FakeGpu(.{ .base = 0x7000, .bus_form = .slice, .fd = 7 });
+    installBackendsForTest(&.{gpu.backend(.hip)});
+    defer restoreBackends();
+    const mem = try alloc("0000:18:00.0", 4096);
+    try std.testing.expectEqual(Kind.hip, mem.kind);
+    try std.testing.expectEqual(@as(i32, 7), dmaBufFd(mem).?);
+}
+
+test "alloc malloc failure is NoGDR: alloc" {
+    const gpu = FakeGpu(.{ .bus_form = .slice, .fail_malloc = true });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const err = alloc("0000:18:00.0", 4096);
+    try std.testing.expectError(error.NoGDR, err);
+    try std.testing.expectEqualStrings("alloc", lastDetail());
+}
+
+test "GPU loopback allocates and exports source and destination as one range" {
+    // NSDI'23 §4.1.1: both loopback regions live in the GPU. The live probe
+    // asks for one allocation covering both halves and registers it through
+    // a single dma-buf fd, so the backend must see the full planned length.
+    const loopbuf = @import("loopbuf.zig");
+    const p = loopbuf.plan(128 * 1024, true);
+    const gpu = FakeGpu(.{ .base = 0x100000, .bus_form = .slice, .fd = 9 });
+    installBackendsForTest(&.{gpu.backend(.cuda)});
+    defer restoreBackends();
+    const mem = try alloc("0000:18:00.0", p.alloc_len);
+    try std.testing.expectEqual(p.alloc_len, gpu.malloc_len);
+    try std.testing.expectEqual(p.alloc_len, mem.len);
+    try std.testing.expectEqual(@as(i32, 9), dmaBufFd(mem).?);
+    try std.testing.expectEqual(p.alloc_len, gpu.fd_len);
+    // The destination half starts inside the same allocation, past the source.
+    try std.testing.expect(mem.ptr + p.dst_off + p.region_len <= mem.ptr + mem.len);
+    try std.testing.expect(mem.ptr + p.src_off + p.region_len <= mem.ptr + p.dst_off);
+}
+
 test "orderKinds puts the CUDA runtime ahead of the driver API" {
     var buf: [3]Kind = undefined;
     try std.testing.expectEqualSlices(
@@ -1221,8 +972,8 @@ test "orderKinds puts the CUDA runtime ahead of the driver API" {
 }
 
 test "alloc uses the CUDA runtime when both CUDA backends are live" {
-    const rt = FakeGpu(0x5000);
-    const drv = FakeGpu(0x9000);
+    const rt = FakeGpu(.{ .base = 0x5000 });
+    const drv = FakeGpu(.{ .base = 0x9000 });
     const backends = [_]Backend{ rt.backend(.cuda), drv.backend(.cuda_drv) };
     installBackendsForTest(&backends);
     defer restoreBackends();
@@ -1232,7 +983,7 @@ test "alloc uses the CUDA runtime when both CUDA backends are live" {
 }
 
 test "alloc uses the driver backend when the CUDA runtime is absent" {
-    const drv = FakeGpu(0x9000);
+    const drv = FakeGpu(.{ .base = 0x9000 });
     installBackendsForTest(&.{drv.backend(.cuda_drv)});
     defer restoreBackends();
     const mem = try alloc("0000:18:00.0", 4096);
@@ -1243,7 +994,7 @@ test "alloc uses the driver backend when the CUDA runtime is absent" {
 test "alloc falls through an unusable CUDA runtime to the driver backend" {
     // libcudart loaded but cannot enumerate, e.g. a runtime newer than the
     // installed driver. The driver API still knows the GPUs.
-    const drv = FakeGpu(0x9000);
+    const drv = FakeGpu(.{ .base = 0x9000 });
     const backends = [_]Backend{ DeadGpu.backend(.cuda), drv.backend(.cuda_drv) };
     installBackendsForTest(&backends);
     defer restoreBackends();
@@ -1270,31 +1021,8 @@ test "a driver backend that cannot enumerate is NoGDR: cuda drv init" {
 }
 
 test "driver backend allocation failure is NoGDR: cuda drv alloc" {
-    const drv = struct {
-        fn count() error{NoGDR}!u32 {
-            return 1;
-        }
-        fn bus(_: u32, buf: []u8) error{NoGDR}![]const u8 {
-            const s = "0000:18:00.0";
-            @memcpy(buf[0..s.len], s);
-            return buf[0..s.len];
-        }
-        fn malloc(_: u32, _: usize) error{NoGDR}!usize {
-            return error.NoGDR;
-        }
-        fn free(_: u32, _: usize) void {}
-        fn fd(_: usize, _: usize) ?i32 {
-            return null;
-        }
-    };
-    installBackendsForTest(&.{.{
-        .kind = .cuda_drv,
-        .device_count = drv.count,
-        .pci_bus_id = drv.bus,
-        .malloc = drv.malloc,
-        .free = drv.free,
-        .dma_buf_fd = drv.fd,
-    }});
+    const drv = FakeGpu(.{ .bus_form = .slice, .fail_malloc = true });
+    installBackendsForTest(&.{drv.backend(.cuda_drv)});
     defer restoreBackends();
     const err = alloc("0000:18:00.0", 4096);
     try std.testing.expectError(error.NoGDR, err);

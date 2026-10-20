@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/topology"
 )
 
 func mkFile(t *testing.T, root, rel, content string) {
@@ -196,5 +197,92 @@ func TestEthtoolScanCountsDrops(t *testing.T) {
 	// Drop counters alone are an answer, so the device must not be backed off.
 	if !g.allow("eth0") {
 		t.Fatal("a device reporting only drop counters must keep being polled")
+	}
+}
+
+// mkDRMCard lays out one class/drm entry whose device link resolves to the
+// PCI device directory devDir (relative to root); busy is written to its
+// gpu_busy_percent when not empty.
+func mkDRMCard(t *testing.T, root, card, devDir, busy string) {
+	t.Helper()
+	dev := filepath.Join(root, devDir)
+	if err := os.MkdirAll(dev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if busy != "" {
+		mkFile(t, root, filepath.Join(devDir, "gpu_busy_percent"), busy)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "class/drm", card), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dev, filepath.Join(root, "class/drm", card, "device")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDRMBusy(t *testing.T) {
+	root := t.TempDir()
+	mkDRMCard(t, root, "card0", "devices/pci0000:00/0000:3c:00.0", "37")
+	// A GPU whose driver exports no busy counter.
+	mkDRMCard(t, root, "card1", "devices/pci0000:00/0000:af:00.0", "")
+	// A render node whose device link dangles must be skipped, not fatal.
+	if err := os.MkdirAll(filepath.Join(root, "class/drm/renderD128"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "nowhere"), filepath.Join(root, "class/drm/renderD128/device")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The 8-digit domain nvidia-smi and the discovery graph carry, sysfs's
+	// 4-digit one and a bare bus:dev.fn all name the same card.
+	for _, bdf := range []string{"00000000:3C:00.0", "0000:3c:00.0", "3c:00.0"} {
+		u, ok := drmBusy(root, bdf)
+		if !ok || u != 37 {
+			t.Errorf("drmBusy(%q) = %v, %v; want 37, true", bdf, u, ok)
+		}
+	}
+	if u, ok := drmBusy(root, "00000000:AF:00.0"); ok {
+		t.Errorf("a card without gpu_busy_percent must be unknown, got %v", u)
+	}
+	if u, ok := drmBusy(root, "0000:01:00.0"); ok {
+		t.Errorf("a BDF with no DRM entry must be unknown, got %v", u)
+	}
+	if u, ok := drmBusy(filepath.Join(root, "nosys"), "0000:3c:00.0"); ok {
+		t.Errorf("a host without class/drm must be unknown, got %v", u)
+	}
+}
+
+// A GPU nvidia-smi does not report falls back to its DRM busy counter; one
+// with neither stays unknown.
+func TestReadGPUsFallsBackToDRM(t *testing.T) {
+	old := gpuUtil
+	defer func() { gpuUtil = old }()
+	gpuUtil = &gpuUtilCache{run: func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("nvidia-smi: not found")
+	}}
+	root := t.TempDir()
+	mkDRMCard(t, root, "card0", "devices/pci0000:00/0000:3c:00.0", "37")
+	mkDRMCard(t, root, "card1", "devices/pci0000:00/0000:3d:00.0", "2")
+	g := topology.Graph{Endpoints: []model.Endpoint{
+		{ID: "gpu0", Kind: model.EndpointGPU, PCIeBDF: "0000:3c:00.0"},
+		{ID: "gpu1", Kind: model.EndpointGPU, PCIeBDF: "0000:3d:00.0"},
+		{ID: "gpu2", Kind: model.EndpointGPU, PCIeBDF: "0000:3e:00.0"},
+	}}
+	got, err := (SysfsSampler{Graph: g, Sysroot: root}).GPUs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []model.GPUStatus{
+		{ID: "gpu0", Util: 37},
+		{ID: "gpu1", Util: 2, Idle: true},
+		{ID: "gpu2", Unknown: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("gpu %d: got %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }

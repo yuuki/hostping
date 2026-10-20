@@ -22,6 +22,9 @@ import (
 // receive errors.
 type SysfsSampler struct {
 	Graph topology.Graph
+	// Sysroot is the sysfs mount the counters are read under; empty means
+	// /sys. Tests point it at a fixture tree.
+	Sysroot string
 	// GPUUtilInterval rate-limits nvidia-smi; zero means DefaultGPUUtilInterval.
 	GPUUtilInterval time.Duration
 	// Uncore reads memory-link and inter-socket utilization from the IMC
@@ -36,7 +39,15 @@ func (s SysfsSampler) PollBus(_ context.Context, reset bool) {
 }
 
 func (s SysfsSampler) RNIC(ctx context.Context, n model.RNIC) (model.RNICCounters, error) {
-	return ReadRNICSysfs(ctx, n)
+	return ReadRNICSysfsFrom(ctx, s.sysroot(), n)
+}
+
+// sysroot is Sysroot, or /sys when unset.
+func (s SysfsSampler) sysroot() string {
+	if s.Sysroot != "" {
+		return s.Sysroot
+	}
+	return "/sys"
 }
 
 // ReadRNICSysfs reads n's counters from the live /sys; SysfsSampler.RNIC, the
@@ -141,7 +152,7 @@ func isInfiniBandLinkLayer(v string) bool {
 }
 
 func (s SysfsSampler) GPUs(ctx context.Context) ([]model.GPUStatus, error) {
-	return ReadGPUs(ctx, s.Graph, s.GPUUtilInterval), nil
+	return ReadGPUsFrom(ctx, s.sysroot(), s.Graph, s.GPUUtilInterval), nil
 }
 
 // Bus reads GPU PCIe utilization through nvidia-smi, refreshed at most once
@@ -178,14 +189,21 @@ func hasGPU(g topology.Graph) bool {
 	return false
 }
 
-// ReadGPUs reports per-GPU busy state. The nvidia-smi query is refreshed at
-// most once per gpuUtilInterval (zero selects DefaultGPUUtilInterval); the
-// first call of the process always samples, so --once is never served stale.
+// ReadGPUs reports per-GPU busy state from the live /sys and nvidia-smi.
+// The nvidia-smi query is refreshed at most once per gpuUtilInterval (zero
+// selects DefaultGPUUtilInterval); the first call of the process always
+// samples, so --once is never served stale.
 func ReadGPUs(ctx context.Context, g topology.Graph, gpuUtilInterval time.Duration) []model.GPUStatus {
+	return ReadGPUsFrom(ctx, "/sys", g, gpuUtilInterval)
+}
+
+// ReadGPUsFrom is ReadGPUs with the DRM busy counters read under sysroot
+// (normally /sys) so tests can inject a tree.
+func ReadGPUsFrom(ctx context.Context, sysroot string, g topology.Graph, gpuUtilInterval time.Duration) []model.GPUStatus {
 	if gpuUtilInterval <= 0 {
 		gpuUtilInterval = DefaultGPUUtilInterval
 	}
-	smi := gpuUtil.sample(ctx, gpuUtilInterval)
+	smi := gpuUtil.get(ctx, gpuUtilInterval)
 	var out []model.GPUStatus
 	for _, e := range g.Endpoints {
 		if e.Kind != model.EndpointGPU {
@@ -200,7 +218,7 @@ func ReadGPUs(ctx context.Context, g topology.Graph, gpuUtilInterval time.Durati
 			out = append(out, st)
 			continue
 		}
-		if u, ok := drmBusy(e.PCIeBDF); ok {
+		if u, ok := drmBusy(sysroot, e.PCIeBDF); ok {
 			st.Unknown = false
 			st.Util = u
 			st.Idle = u < 5
@@ -272,14 +290,18 @@ func computeMode(cell string) string {
 	return ""
 }
 
-func drmBusy(bdf string) (float64, bool) {
-	ents, err := os.ReadDir("/sys/class/drm")
+// drmBusy is the gpu_busy_percent of the DRM (AMD) GPU at bdf under sysroot:
+// the class/drm entry whose device link resolves to that PCI address. A GPU
+// without the file, or none at that address, is unknown.
+func drmBusy(sysroot, bdf string) (float64, bool) {
+	drm := filepath.Join(sysroot, "class/drm")
+	ents, err := os.ReadDir(drm)
 	if err != nil {
 		return 0, false
 	}
 	want := normalizeBDF(bdf)
 	for _, e := range ents {
-		dev := filepath.Join("/sys/class/drm", e.Name(), "device")
+		dev := filepath.Join(drm, e.Name(), "device")
 		real, err := filepath.EvalSymlinks(dev)
 		if err != nil {
 			continue
@@ -406,6 +428,25 @@ func (a *pauseAccum) flush(c *model.RNICCounters) {
 	}
 }
 
+// classifyCounter files one counter (lower-cased name, value) with the family
+// it belongs to: a pause duration into acc, a drop into c's Tx or Rx drops,
+// anything else nowhere. It reports which family took it.
+func classifyCounter(name string, v uint64, c *model.RNICCounters, acc *pauseAccum) (pause, drop bool) {
+	switch {
+	case looksLikePauseDuration(name):
+		acc.add(name, v)
+		return true, false
+	case looksLikeDrop(name):
+		if isTxCounter(name) {
+			c.TxDrops += v
+		} else {
+			c.RxDrops += v
+		}
+		return false, true
+	}
+	return false, false
+}
+
 // scanCounterDir sums the drop counters, and the pause-duration counters when
 // pause is set, in one sysfs directory, and reports which of the two families
 // had at least one readable counter there. It serves both the InfiniBand
@@ -417,27 +458,17 @@ func scanCounterDir(dir string, c *model.RNICCounters, pause bool) (pauseFound, 
 	}
 	var acc pauseAccum
 	for _, e := range ents {
-		name := strings.ToLower(e.Name())
 		v, ok := sysfs.ReadUint64OK(filepath.Join(dir, e.Name()))
 		if !ok {
 			continue
 		}
-		switch {
-		case looksLikePauseDuration(name):
-			if pause {
-				pauseFound = true
-				acc.add(name, v)
-			}
-		case looksLikeDrop(name):
-			dropFound = true
-			if isTxCounter(name) {
-				c.TxDrops += v
-			} else {
-				c.RxDrops += v
-			}
-		}
+		p, d := classifyCounter(strings.ToLower(e.Name()), v, c, &acc)
+		pauseFound = pauseFound || (p && pause)
+		dropFound = dropFound || d
 	}
-	acc.flush(c)
+	if pause {
+		acc.flush(c)
+	}
 	return pauseFound, dropFound
 }
 
@@ -458,50 +489,12 @@ func (g *ethtoolGate) scan(ctx context.Context, netdev string, c *model.RNICCoun
 	if netdev == "" {
 		return ethtoolResult{why: "no netdev for ethtool -S"}
 	}
-	if !g.allow(netdev) {
-		return ethtoolResult{why: "ethtool -S backed off (" + g.lastWhy(netdev) + ")"}
+	out, res, ok := g.stats(ctx, netdev)
+	if !ok {
+		return res
 	}
-	b, err := g.runner()(ctx, "ethtool", "-S", netdev)
-	if err != nil && ctx.Err() != nil {
-		// The caller canceled (shutdown) or ran out of time: that says
-		// nothing about the netdev, so no backoff and no reason. Only the
-		// command's own bound, with ctx still live, is a failure.
-		return ethtoolResult{}
-	}
-	if err != nil {
-		why := "ethtool -S failed: " + err.Error()
-		if errors.Is(err, exec.ErrNotFound) {
-			why = "ethtool not on PATH"
-		}
-		g.failed(netdev, why)
-		return ethtoolResult{why: why}
-	}
-	var res ethtoolResult
 	var acc pauseAccum
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		k, rest, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		v, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 64)
-		if err != nil {
-			continue
-		}
-		name := strings.ToLower(strings.TrimSpace(k))
-		switch {
-		case looksLikePauseDuration(name):
-			res.pause = true
-			acc.add(name, v)
-		case looksLikeDrop(name):
-			res.drops = true
-			if isTxCounter(name) {
-				c.TxDrops += v
-			} else {
-				c.RxDrops += v
-			}
-		}
-	}
+	res.pause, res.drops = parseEthtoolStats(string(out), c, &acc)
 	if !res.pause && !res.drops {
 		// Neither pause nor drop stats on this device; stop forking for it.
 		g.failed(netdev, ethtoolGaveNone)
@@ -518,6 +511,52 @@ func (g *ethtoolGate) scan(ctx context.Context, netdev string, c *model.RNICCoun
 	}
 	acc.flush(c)
 	return res
+}
+
+// stats is the output of ethtool -S netdev. When netdev is in backoff or the
+// command fails, ok is false and res carries the reason, with a failure put
+// into backoff; a read the caller cut short (ctx done) says nothing about
+// the netdev, so it gets neither a backoff nor a reason.
+func (g *ethtoolGate) stats(ctx context.Context, netdev string) (out []byte, res ethtoolResult, ok bool) {
+	if !g.allow(netdev) {
+		return nil, ethtoolResult{why: "ethtool -S backed off (" + g.lastWhy(netdev) + ")"}, false
+	}
+	b, err := g.runner()(ctx, "ethtool", "-S", netdev)
+	if err != nil && ctx.Err() != nil {
+		// The caller canceled (shutdown) or ran out of time: that says
+		// nothing about the netdev, so no backoff and no reason. Only the
+		// command's own bound, with ctx still live, is a failure.
+		return nil, ethtoolResult{}, false
+	}
+	if err != nil {
+		why := "ethtool -S failed: " + err.Error()
+		if errors.Is(err, exec.ErrNotFound) {
+			why = "ethtool not on PATH"
+		}
+		g.failed(netdev, why)
+		return nil, ethtoolResult{why: why}, false
+	}
+	return b, ethtoolResult{}, true
+}
+
+// parseEthtoolStats files each "name: value" line of ethtool -S output with
+// classifyCounter and reports which families the output had: drops go into
+// c as they are read, pause durations into acc for the caller to flush.
+func parseEthtoolStats(out string, c *model.RNICCounters, acc *pauseAccum) (pause, drops bool) {
+	for _, line := range strings.Split(out, "\n") {
+		k, rest, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 64)
+		if err != nil {
+			continue
+		}
+		p, d := classifyCounter(strings.ToLower(strings.TrimSpace(k)), v, c, acc)
+		pause = pause || p
+		drops = drops || d
+	}
+	return pause, drops
 }
 
 // readTrim is the trimmed contents of path, "" when unreadable.

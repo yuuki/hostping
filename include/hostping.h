@@ -17,12 +17,16 @@ extern "C" {
 /* HOSTPING_ERR_TIMEOUT and HOSTPING_ERR_CONNECT are the connectivity classes:
  * the path itself failed (QP handshake, completion error or timeout). Only
  * these make hostping_mutual report a measured "not connected" result; every
- * other code is a local setup failure that says nothing about the path. */
+ * other code is a local setup failure that says nothing about the path.
+ * err starts with the Zig error name ("Connect: ..."); the Go side
+ * (internal/zigprobe) sub-classifies HOSTPING_ERR_CONNECT and
+ * HOSTPING_ERR_PORT by that leading name, so the names are part of the ABI. */
 #define HOSTPING_ERR_TIMEOUT 4
 #define HOSTPING_ERR_CONNECT 5
 #define HOSTPING_ERR_NO_GDR 6
 /* No usable port address: no active RoCEv2 GID on a RoCE port, or an
- * InfiniBand port that is not ACTIVE or has no LID. err names which. */
+ * InfiniBand port that is not ACTIVE or has no LID. err names which, by its
+ * leading Zig error name (NoLid, PortDown, Port), which Go reads. */
 #define HOSTPING_ERR_PORT 7
 
 /* hostping_loopback_res.addr_mode: how a live probe addressed its port. */

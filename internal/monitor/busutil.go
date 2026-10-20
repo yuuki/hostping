@@ -4,7 +4,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
@@ -178,40 +177,24 @@ func parseDmonPCIe(out string, bdfByIndex map[string]string) map[string]float64 
 // gpuPCIeCache rate-limits the nvidia-smi dmon pass like gpuUtilCache. It is
 // only consulted right before an engine run (Sampler.Bus), so a cached value
 // always predates the probes that follow it.
-type gpuPCIeCache struct {
-	mu sync.Mutex
-	// run and now are nil outside tests.
-	run   runner
-	now   func() time.Time
-	at    time.Time
-	valid bool
-	rate  map[string]float64
-}
+type gpuPCIeCache = rateLimited[map[string]float64, nvidiaPCIeQuery]
 
 var gpuPCIe = &gpuPCIeCache{}
 
-func (c *gpuPCIeCache) get(ctx context.Context, every time.Duration) map[string]float64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	if c.now != nil {
-		now = c.now()
+// nvidiaPCIeQuery is the GPU PCIe throughput query by normalized BDF
+// (nvidiaPCIeByBDF).
+type nvidiaPCIeQuery struct{}
+
+func (nvidiaPCIeQuery) defaultRunner() runner { return runSMI }
+func (nvidiaPCIeQuery) fetch(ctx context.Context, run runner) map[string]float64 {
+	return nvidiaPCIeByBDF(ctx, run)
+}
+
+// runSMI bounds an nvidia-smi command like any sampler command, except dmon,
+// which carries its own, longer deadline.
+func runSMI(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "dmon" {
+		return runWithTimeout(ctx, dmonTimeout, name, args...)
 	}
-	if c.valid && every > 0 && now.Sub(c.at) < every {
-		return c.rate
-	}
-	run := c.run
-	if run == nil {
-		run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			// dmon carries its own, longer deadline.
-			if len(args) > 0 && args[0] == "dmon" {
-				return runWithTimeout(ctx, dmonTimeout, name, args...)
-			}
-			return runBounded(ctx, name, args...)
-		}
-	}
-	c.rate = nvidiaPCIeByBDF(ctx, run)
-	c.at = now
-	c.valid = true
-	return c.rate
+	return runBounded(ctx, name, args...)
 }

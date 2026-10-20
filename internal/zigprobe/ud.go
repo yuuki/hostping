@@ -119,7 +119,7 @@ func (t *UDTransport) Send(src, dst int, seq uint32) (uint64, error) {
 		return uint64(sent), nil
 	}
 	msg := C.GoString(&errBuf[0])
-	if rc == C.HOSTPING_ERR_CONNECT && len(msg) >= 7 && msg[:7] == "Connect" {
+	if rc == C.HOSTPING_ERR_CONNECT && zigErrIs(msg, zigErrConnect) {
 		// No address handle: no route to the peer's GID.
 		return 0, fmt.Errorf("%w: %s", mutual.ErrNoRoute, msg)
 	}

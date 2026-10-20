@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -287,38 +288,38 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.MetricInterval, "metric-interval", c.MetricInterval, "RNIC counter poll interval")
 	fs.DurationVar(&c.GPUUtilInterval, "gpu-util-interval", c.GPUUtilInterval, "minimum period between nvidia-smi GPU utilization queries")
 	fs.StringVar(&c.IdleGateCommand, "idle-gate-command", c.IdleGateCommand, "daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start; exit 1 (denied), exit 2 or higher (the gate could not decide), a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits 1 while a scheduler job holds the host and 2 when the scheduler cannot be queried; empty: no gate)")
-	fs.Var(&boundedDuration{p: &c.IdleGateTimeout, max: MaxIdleGateTimeout}, "idle-gate-timeout", "daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most 20s)")
+	fs.Var(&boundedDuration{p: &c.IdleGateTimeout, max: MaxIdleGateTimeout}, "idle-gate-timeout", fmt.Sprintf("daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most %v)", MaxIdleGateTimeout))
 	fs.DurationVar(&c.BusyCooldown, "busy-cooldown", c.BusyCooldown, "minimum interval between PFC/drop-triggered busy runs (0 disables)")
 	fs.DurationVar(&c.BusyInterval, "busy-interval", c.BusyInterval, "periodic busy-mode run on a loaded host without PFC/drops, at most once per interval (0 disables; beyond NSDI'23 §4.2)")
 	fs.Var((*uint32Value)(&c.BusySamples), "busy-samples", "loopback readings per path on a loaded RNIC in busy mode; the median is classified, so a single noisy sample no longer marks a healthy sibling abnormal (1 disables the repeat)")
 	fs.BoolVar(&c.Once, "once", c.Once, "run the engine once and exit")
 	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "per-probe timeout")
 	fs.Float64Var(&c.TimeoutTh, "timeout-th", c.TimeoutTh, "mutual probe timeout ratio above which an RNIC is flagged (ToN'24 Timeout_th)")
-	fs.Var((*mutualScope)(&c.MutualScope), "mutual-scope", "RNIC pairs the mutual probe measures: rail (only RNICs sharing an IPv4 subnet or GID rail) or host (every RNIC, across rails too; only meaningful when the rails route to each other)")
+	fs.Var(&enumValue[model.MutualScope]{p: &c.MutualScope, allowed: []model.MutualScope{model.MutualScopeRail, model.MutualScopeHost}, what: "mutual scope"}, "mutual-scope", "RNIC pairs the mutual probe measures: rail (only RNICs sharing an IPv4 subnet or GID rail) or host (every RNIC, across rails too; only meaningful when the rails route to each other)")
 	fs.BoolVar(&c.MutualInfiniBand, "mutual-infiniband", c.MutualInfiniBand, "include InfiniBand-link-layer RNICs in the mutual probe, paired by subnet prefix (off by default: separate fabrics sharing the default prefix fe80::/64 would pair and time out)")
-	fs.Var((*mutualTransport)(&c.MutualTransport), "mutual-transport", "live mutual probe transport: rc (RC ping-pong; retransmission hides isolated loss) or ud (UD request/reply, one lost packet is one timeout; required by --mutual-interval)")
+	fs.Var(&enumValue[model.MutualTransport]{p: &c.MutualTransport, allowed: []model.MutualTransport{model.MutualTransportRC, model.MutualTransportUD}, what: "mutual transport"}, "mutual-transport", "live mutual probe transport: rc (RC ping-pong; retransmission hides isolated loss) or ud (UD request/reply, one lost packet is one timeout; required by --mutual-interval)")
 	fs.DurationVar(&c.MutualTimeout, "mutual-timeout", c.MutualTimeout, "wait for one mutual probe's reply before it counts as a timeout (ToN'24: 500ms)")
 	fs.DurationVar(&c.MutualInterval, "mutual-interval", c.MutualInterval, "daemon: every RNIC probes one random peer this often (opt-in, 0 = off: pairs are probed in a burst per engine run; ToN'24 recommends 100ms)")
 	fs.DurationVar(&c.MutualWindow, "mutual-window", c.MutualWindow, "daemon: sliding window of the scheduled mutual probe's timeout ratio (ToN'24: 20s)")
 	fs.Float64Var(&c.AbnormalTh, "abnormal-th", c.AbnormalTh, "path abnormality threshold")
-	fs.Var(&boundedDuration{p: &c.LatencyFloor, max: MaxLatencyFloor}, "latency-floor", "least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor)")
+	fs.Var(&boundedDuration{p: &c.LatencyFloor, max: MaxLatencyFloor}, "latency-floor", fmt.Sprintf("least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most %dus; a set baseline LAT has no floor)", MaxLatencyFloor/time.Microsecond))
 	fs.Float64Var(&c.PFCHigh, "pfc-high", c.PFCHigh, "Tx pause duration ratio that triggers busy diagnosis")
 	fs.Float64Var(&c.UtilHigh, "util-high", c.UtilHigh, "bus utilization that marks a link overloaded")
 	fs.Var(&boundedFloat{p: &c.CPUBusyHigh, max: 1}, "cpu-busy-high", "CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1)")
 	fs.Var(&linkCapacityFlag{c: &c.MemCapacity, prefix: "mem."}, "mem-channel-capacity", "memory bandwidth of each mem.N link (all channels of one NUMA node, reads + writes), replacing the assumed constant (repeatable). BW for every link or mem.N=BW for one; units bps/Gbps (bits) or GB/s/GiB/s (bytes)")
 	fs.Var(&linkCapacityFlag{c: &c.UPICapacity, prefix: "upi."}, "upi-capacity", "capacity of each upi.A-B inter-socket link, replacing the assumed constant (repeatable). BW for every link or upi.A-B=BW for one; units as --mem-channel-capacity")
 	fs.BoolVar(&c.UncoreUtil, "uncore-util", c.UncoreUtil, "read memory-channel and inter-socket utilization from Intel uncore IMC and UPI PMUs via perf_event_open (Linux; needs CAP_PERFMON or perf_event_paranoid <= 0, and --mem-channel-capacity / --upi-capacity)")
-	fs.Var(&boundedFloat{p: &c.UPIBytesPerFlit, max: MaxUPIBytesPerFlit}, "upi-bytes-per-flit", "bytes of data one UPI data-flit count (UNC_UPI_TxL_FLITS.ALL_DATA) carries, for a processor whose ratio hostping has not measured; measure it against a known cross-socket load (0 = the measured per-model ratio, at most 64)")
+	fs.Var(&boundedFloat{p: &c.UPIBytesPerFlit, max: MaxUPIBytesPerFlit}, "upi-bytes-per-flit", fmt.Sprintf("bytes of data one UPI data-flit count (UNC_UPI_TxL_FLITS.ALL_DATA) carries, for a processor whose ratio hostping has not measured; measure it against a known cross-socket load (0 = the measured per-model ratio, at most %d)", MaxUPIBytesPerFlit))
 	fs.Float64Var(&c.ThpLowFraction, "thp-low", c.ThpLowFraction, "fraction of RNIC line rate below which the host counts as idle")
 	fs.Var((*uint32Value)(&c.Iters), "iters", "loopback probe iterations (small/large WRITE pairs) per measurement, at most 512")
 	fs.Var((*uint32Value)(&c.MutualIters), "mutual-iters", "round trips per mutual probe burst (a pair that does not answer costs this many --mutual-timeout)")
-	fs.Var(&boundedDuration{p: &c.MemWarmup, max: MaxMemWarmup}, "mem-warmup", "before each host-memory loopback probe, write the probe's NUMA-bound buffers from the CPU for this long so the memory subsystem is awake when measuring (0 = off, at most 1s; GPU endpoints unaffected)")
+	fs.Var(&boundedDuration{p: &c.MemWarmup, max: MaxMemWarmup}, "mem-warmup", fmt.Sprintf("before each host-memory loopback probe, write the probe's NUMA-bound buffers from the CPU for this long so the memory subsystem is awake when measuring (0 = off, at most %v; GPU endpoints unaffected)", MaxMemWarmup))
 	fs.Var((*uint32Value)(&c.SmallMsgBytes), "small-msg", "small-message size in bytes (latency probe)")
-	fs.Var(&boundedUint32{p: &c.LargeMsgBytes, min: 1, max: MaxLargeMsgBytes}, "large-msg", "large-message size in bytes (bandwidth probe), at most 16 MiB")
-	fs.Var(&boundedUint32{p: &c.MutualMsgBytes, min: 1, max: MaxMutualMsgBytes}, "mutual-msg", "mutual-probe UD SEND payload in bytes, 1 to 4096 and at most the port MTU")
+	fs.Var(&boundedUint32{p: &c.LargeMsgBytes, min: 1, max: MaxLargeMsgBytes}, "large-msg", fmt.Sprintf("large-message size in bytes (bandwidth probe), at most %d MiB", MaxLargeMsgBytes>>20))
+	fs.Var(&boundedUint32{p: &c.MutualMsgBytes, min: 1, max: MaxMutualMsgBytes}, "mutual-msg", fmt.Sprintf("mutual-probe UD SEND payload in bytes, 1 to %d and at most the port MTU", MaxMutualMsgBytes))
 	fs.IntVar(&c.FlapWindow, "flap-window", c.FlapWindow, "consecutive gray tests on a link that diagnose flapping")
 	fs.Var((*baselineSpecs)(&c.BaselineSpecs), "baseline", "per-distance idle baseline (repeatable). KEY=BW[,LAT] e.g. local_mem=270Gbps,1400ns. Keys: same_switch, multi_switch, cross_root, cross_socket, local_mem, remote_mem. Units: bps/Gbps, ns/us. Path status is bandwidth-only; a LAT you set judges that distance's advisory idle latency_status (unset: same-distance siblings; the Fig.4 latencies are never used for it); same_switch latency also gates ACS/ATS. Unset distances keep Fig.4×line-rate defaults.")
-	fs.Var((*ReportFormat)(&c.ReportFormat), "report-format", "how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)")
+	fs.Var(&enumValue[ReportFormat]{p: &c.ReportFormat, allowed: []ReportFormat{ReportFormatJSON, ReportFormatPretty, ReportFormatNone}, what: "report format"}, "report-format", "how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)")
 	fs.StringVar(&c.ReportFile, "report-file", c.ReportFile, "append each report to this file as one JSON line (created 0640; reopened per report, so logrotate needs no signal)")
 	fs.StringVar(&c.StateDir, "state-dir", c.StateDir, "daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)")
 	fs.StringVar(&c.BaselineFile, "baseline-file", c.BaselineFile, "JSON object of idle baselines (same keys as --baseline). Fields: bandwidth_bps or bandwidth (e.g. 270Gbps), latency_ns or latency (e.g. 1400ns). An optional \"tables\" object holds per-Fig.4-table sections (key line_rate=<N>Gbps[,pcie_hop=<N>Gbps]) that replace the top level for RNICs on that table. Unknown fields are rejected. Flags override the file, sections included.")
@@ -502,41 +503,42 @@ func (v *boundedDuration) Set(s string) error {
 	return nil
 }
 
-// mutualScope is the --mutual-scope flag value, restricted to the known scopes.
-type mutualScope model.MutualScope
+// enumValue is a flag whose value is one of a fixed set of words, case
+// included (--mutual-scope, --mutual-transport, --report-format). what names
+// the flag in the error a value outside the set produces, e.g. "mutual
+// scope" for `unknown mutual scope "x" (want rail or host)`.
+type enumValue[T ~string] struct {
+	p       *T
+	allowed []T
+	what    string
+}
 
-func (v *mutualScope) String() string {
-	if v == nil {
+func (v *enumValue[T]) String() string {
+	if v == nil || v.p == nil {
 		return ""
 	}
-	return string(*v)
+	return string(*v.p)
 }
 
-func (v *mutualScope) Set(s string) error {
-	switch model.MutualScope(s) {
-	case model.MutualScopeRail, model.MutualScopeHost:
-		*v = mutualScope(s)
-		return nil
+func (v *enumValue[T]) Set(s string) error {
+	if !slices.Contains(v.allowed, T(s)) {
+		return fmt.Errorf("unknown %s %q (want %s)", v.what, s, oneOf(v.allowed))
 	}
-	return fmt.Errorf("unknown mutual scope %q (want %s or %s)", s, model.MutualScopeRail, model.MutualScopeHost)
+	*v.p = T(s)
+	return nil
 }
 
-type mutualTransport model.MutualTransport
-
-func (v *mutualTransport) String() string {
-	if v == nil {
-		return ""
+// oneOf lists the allowed words as prose: "rail or host", "json, pretty or
+// none".
+func oneOf[T ~string](allowed []T) string {
+	words := make([]string, len(allowed))
+	for i, a := range allowed {
+		words[i] = string(a)
 	}
-	return string(*v)
-}
-
-func (v *mutualTransport) Set(s string) error {
-	switch model.MutualTransport(s) {
-	case model.MutualTransportRC, model.MutualTransportUD:
-		*v = mutualTransport(s)
-		return nil
+	if len(words) < 2 {
+		return strings.Join(words, "")
 	}
-	return fmt.Errorf("unknown mutual transport %q (want %s or %s)", s, model.MutualTransportRC, model.MutualTransportUD)
+	return strings.Join(words[:len(words)-1], ", ") + " or " + words[len(words)-1]
 }
 
 // rnicList is the repeatable --exclude-rnic flag; a value may also list
@@ -575,7 +577,8 @@ func (s *baselineSpecs) Set(v string) error {
 	return nil
 }
 
-// ReportFormat is the --report-format flag value.
+// ReportFormat is the --report-format flag value; the flag itself is an
+// enumValue over the three constants.
 type ReportFormat string
 
 const (
@@ -586,19 +589,3 @@ const (
 	// ReportFormatNone writes no report to stdout.
 	ReportFormatNone ReportFormat = "none"
 )
-
-func (v *ReportFormat) String() string {
-	if v == nil {
-		return ""
-	}
-	return string(*v)
-}
-
-func (v *ReportFormat) Set(s string) error {
-	switch ReportFormat(s) {
-	case ReportFormatJSON, ReportFormatPretty, ReportFormatNone:
-		*v = ReportFormat(s)
-		return nil
-	}
-	return fmt.Errorf("unknown report format %q (want %s, %s or %s)", s, ReportFormatJSON, ReportFormatPretty, ReportFormatNone)
-}
