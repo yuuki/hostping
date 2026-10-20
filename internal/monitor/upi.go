@@ -125,10 +125,42 @@ func upiGroup(from, to int) string { return fmt.Sprintf("upi:%d>%d", from, to) }
 // names the packages with a link whose peer sysfs does not give on a host of
 // more than two packages; the traffic they send cannot be attributed.
 func discoverUPIEvents(sysroot string, bytesPerFlit float64) (evs []uncoreEvent, unresolved map[int]bool, err error) {
+	links, err := readUPILinks(sysroot)
+	if err != nil {
+		return nil, nil, err
+	}
+	return attributeUPILinks(sysroot, links, bytesPerFlit)
+}
+
+// upiLink is one UPI link-layer PMU as sysfs describes it: the data-flit
+// event encoded for it, the CPU standing for each die, and, per die, the die
+// the link is wired to.
+type upiLink struct {
+	pmu  string
+	typ  uint32
+	c    [3]uint64
+	cpus []int
+	// peer[i] is the logical die link i of die i is wired to, -1 when
+	// sysfs names none.
+	peer []int
+}
+
+// wired reports whether sysfs names the peer of any of the link's dies.
+func (l upiLink) wired() bool {
+	for _, p := range l.peer {
+		if p >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// readUPILinks reads every UPI link-layer PMU under sysroot, in name order.
+func readUPILinks(sysroot string) ([]upiLink, error) {
 	dir := filepath.Join(sysroot, "bus/event_source/devices")
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("perf PMUs: %w", err)
+		return nil, fmt.Errorf("perf PMUs: %w", err)
 	}
 	var pmus []string
 	for _, e := range ents {
@@ -137,71 +169,98 @@ func discoverUPIEvents(sysroot string, bytesPerFlit float64) (evs []uncoreEvent,
 		}
 	}
 	if len(pmus) == 0 {
-		return nil, nil, fmt.Errorf("%w: no uncore_upi_<n> PMU under %s (not an Intel multi-socket server, or uncore driver not loaded)", errUncoreUnsupported, dir)
+		return nil, fmt.Errorf("%w: no uncore_upi_<n> PMU under %s (not an Intel multi-socket server, or uncore driver not loaded)", errUncoreUnsupported, dir)
 	}
 	sort.Strings(pmus)
-	type link struct {
-		pmu  string
-		typ  uint32
-		c    [3]uint64
-		cpus []int
-		// peer[i] is the logical die link i of die i is wired to, -1 when
-		// sysfs names none.
-		peer []int
-	}
-	var links []link
-	topo := false
+	var links []upiLink
 	for _, pmu := range pmus {
-		d := filepath.Join(dir, pmu)
-		typ, err := strconv.ParseUint(readTrim(filepath.Join(d, "type")), 10, 32)
+		l, err := readUPILink(filepath.Join(dir, pmu), pmu)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %s: type: %v", errUncoreUnsupported, pmu, err)
-		}
-		var cpus []int
-		cpus, err = parseCPUList(readTrim(filepath.Join(d, "cpumask")))
-		if err != nil || len(cpus) == 0 {
-			return nil, nil, fmt.Errorf("%w: %s: no cpumask", errUncoreUnsupported, pmu)
-		}
-		sort.Ints(cpus)
-		format, err := readPMUFormat(filepath.Join(d, "format"))
-		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %s: %v", errUncoreUnsupported, pmu, err)
-		}
-		c0, c1, c2, err := encodeEvent(upiTxDataEvent, format)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%w: %s: %v", errUncoreUnsupported, pmu, err)
-		}
-		l := link{pmu: pmu, typ: uint32(typ), c: [3]uint64{c0, c1, c2}, cpus: cpus, peer: make([]int, len(cpus))}
-		for i := range cpus {
-			l.peer[i] = -1
-			s := readTrim(filepath.Join(d, fmt.Sprintf("die%d", i)))
-			if s == "" {
-				continue
-			}
-			m := upiDieRe.FindStringSubmatch(s)
-			if m == nil {
-				return nil, nil, fmt.Errorf("%w: %s/die%d: malformed %q", errUncoreUnsupported, pmu, i, s)
-			}
-			e, _ := strconv.Atoi(m[2])
-			if e >= len(cpus) {
-				return nil, nil, fmt.Errorf("%w: %s/die%d: die %d is not in the cpumask", errUncoreUnsupported, pmu, i, e)
-			}
-			l.peer[i] = e
-			topo = true
+			return nil, err
 		}
 		links = append(links, l)
+	}
+	return links, nil
+}
+
+// readUPILink reads the UPI PMU pmu from its sysfs directory.
+func readUPILink(dir, pmu string) (upiLink, error) {
+	info, err := readPMU(dir)
+	if err != nil {
+		return upiLink{}, fmt.Errorf("%w: %s: %v", errUncoreUnsupported, pmu, err)
+	}
+	cpus := info.cpus
+	sort.Ints(cpus)
+	c0, c1, c2, err := encodeEvent(upiTxDataEvent, info.format)
+	if err != nil {
+		return upiLink{}, fmt.Errorf("%w: %s: %v", errUncoreUnsupported, pmu, err)
+	}
+	l := upiLink{pmu: pmu, typ: info.typ, c: [3]uint64{c0, c1, c2}, cpus: cpus, peer: make([]int, len(cpus))}
+	for i := range cpus {
+		l.peer[i] = -1
+		s := readTrim(filepath.Join(dir, fmt.Sprintf("die%d", i)))
+		if s == "" {
+			continue
+		}
+		m := upiDieRe.FindStringSubmatch(s)
+		if m == nil {
+			return upiLink{}, fmt.Errorf("%w: %s/die%d: malformed %q", errUncoreUnsupported, pmu, i, s)
+		}
+		e, _ := strconv.Atoi(m[2])
+		if e >= len(cpus) {
+			return upiLink{}, fmt.Errorf("%w: %s/die%d: die %d is not in the cpumask", errUncoreUnsupported, pmu, i, e)
+		}
+		l.peer[i] = e
+	}
+	return l, nil
+}
+
+// cpuPackages is the package of each of cpus.
+func cpuPackages(sysroot string, cpus []int) ([]int, error) {
+	pkgs := make([]int, len(cpus))
+	for i, c := range cpus {
+		p := readIntDef(filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", c), "topology/physical_package_id"), -1)
+		if p < 0 {
+			return nil, fmt.Errorf("%w: cpu%d has no physical_package_id", errUncoreUnsupported, c)
+		}
+		pkgs[i] = p
+	}
+	return pkgs, nil
+}
+
+// peerPackage is the package die i of l sends to: the package of the die
+// sysfs wires it to, or the only other package of a two-package host. ok is
+// false when neither says.
+func (l upiLink) peerPackage(i int, pkgs []int, distinct map[int]bool) (to int, ok bool) {
+	switch {
+	case l.peer[i] >= 0:
+		return pkgs[l.peer[i]], true
+	case len(distinct) == 2:
+		for p := range distinct {
+			if p != pkgs[i] {
+				to = p
+			}
+		}
+		return to, true
+	}
+	return -1, false
+}
+
+// attributeUPILinks turns links into one data-flit counter per link and die,
+// each in the group of the package pair it carries traffic between; see
+// discoverUPIEvents.
+func attributeUPILinks(sysroot string, links []upiLink, bytesPerFlit float64) (evs []uncoreEvent, unresolved map[int]bool, err error) {
+	topo := false
+	for _, l := range links {
+		topo = topo || l.wired()
 	}
 	// A die's logical ID is its position in the cpumask: the kernel numbers
 	// dies in the order their first CPU comes up, and the cpumask holds one
 	// CPU per die in CPU order.
 	cpus := links[0].cpus
-	pkgs := make([]int, len(cpus))
-	for i, c := range cpus {
-		p := readIntDef(filepath.Join(sysroot, "devices/system/cpu", fmt.Sprintf("cpu%d", c), "topology/physical_package_id"), -1)
-		if p < 0 {
-			return nil, nil, fmt.Errorf("%w: cpu%d has no physical_package_id", errUncoreUnsupported, c)
-		}
-		pkgs[i] = p
+	pkgs, err := cpuPackages(sysroot, cpus)
+	if err != nil {
+		return nil, nil, err
 	}
 	distinct := map[int]bool{}
 	for _, p := range pkgs {
@@ -217,17 +276,9 @@ func discoverUPIEvents(sysroot string, bytesPerFlit float64) (evs []uncoreEvent,
 			return nil, nil, fmt.Errorf("%w: %s: cpumask differs from %s", errUncoreUnsupported, l.pmu, links[0].pmu)
 		}
 		for i, cpu := range l.cpus {
-			from, to := pkgs[i], -1
-			switch {
-			case l.peer[i] >= 0:
-				to = pkgs[l.peer[i]]
-			case len(distinct) == 2:
-				for p := range distinct {
-					if p != from {
-						to = p
-					}
-				}
-			default:
+			from := pkgs[i]
+			to, ok := l.peerPackage(i, pkgs, distinct)
+			if !ok {
 				unresolved[from] = true
 				continue
 			}
