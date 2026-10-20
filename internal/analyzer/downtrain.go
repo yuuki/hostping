@@ -171,23 +171,3 @@ func downTrainHalves(speed, width bool) string {
 func gbpsString(bps uint64) string {
 	return fmt.Sprintf("%.0f Gb/s", float64(bps)/1e9)
 }
-
-// hasCauseFor reports whether causes already name rnic (or endpoint) under code.
-func hasCauseFor(causes []model.RootCause, code, rnic, endpoint string) bool {
-	for _, c := range causes {
-		if c.Code != code {
-			continue
-		}
-		for _, id := range c.RNICs {
-			if rnic != "" && id == rnic {
-				return true
-			}
-		}
-		for _, id := range c.Endpoints {
-			if endpoint != "" && id == endpoint {
-				return true
-			}
-		}
-	}
-	return false
-}

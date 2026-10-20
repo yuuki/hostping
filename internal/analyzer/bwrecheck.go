@@ -223,8 +223,7 @@ func applyBWRecheck(g topology.Graph, paths []model.PathMeasurement, mode model.
 		m.BWRecheck = &r
 		switch r.Outcome {
 		case model.BWRecheckCleared:
-			n, _ := g.RNIC(m.RNIC)
-			m.Status, m.UncertainReason = metBaseline(g, n, p, r.PathBPS, th)
+			m.Status, m.UncertainReason = metBaseline(g, mustRNIC(g, m.RNIC), p, r.PathBPS, th)
 		case model.BWRecheckHostShift:
 			markUncertain(m, model.UncertainHostShift)
 		}

@@ -177,7 +177,7 @@ func latencyClassOf(g topology.Graph, m model.PathMeasurement, bases baseline.Ov
 		return latClass{}, 0, model.LatencyNoReading
 	}
 	pair, _ := g.RootPortPair(p)
-	n, _ := g.RNIC(m.RNIC)
+	n := mustRNIC(g, m.RNIC)
 	ov, sec := bases.Of(baseline.RNICTable(n))
 	user, sub := ov[p.Distance].ForPair(pair)
 	return latClass{dist: p.Distance, sub: sub, section: sec}, user.LatencyNs, model.LatencyReasonNone

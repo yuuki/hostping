@@ -164,19 +164,9 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 //
 // Pairs with a down RNIC are already explained and take no part.
 func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) []model.RootCause {
-	parent := map[string]string{}
-	var find func(string) string
-	find = func(x string) string {
-		if p := parent[x]; p != x {
-			parent[x] = find(p)
-		}
-		return parent[x]
-	}
-	for _, id := range ids {
-		if !down[id] {
-			parent[id] = id
-		}
-	}
+	// RNICs that are not down, grouped by the pairs that answered; an RNIC
+	// no such pair links is a group of its own (unionFind).
+	reach := unionFind{}
 	var dead []pairTimeout
 	crossAnswered := false
 	for _, p := range pairs {
@@ -184,9 +174,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			continue
 		}
 		if p.ratio < 1 {
-			if a, b := find(p.m.Src), find(p.m.Dst); a != b {
-				parent[a] = b
-			}
+			reach.union(p.m.Src, p.m.Dst)
 			crossAnswered = crossAnswered || p.m.CrossRail
 			continue
 		}
@@ -217,7 +205,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 	groups := map[string][]string{}
 	for _, id := range ids {
 		if !down[id] {
-			r := find(id)
+			r := reach.find(id)
 			groups[r] = append(groups[r], id)
 		}
 	}
@@ -235,7 +223,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 	cut := map[string][]pairTimeout{}
 	var order []string
 	for _, p := range dead {
-		ra, rb := find(p.m.Src), find(p.m.Dst)
+		ra, rb := reach.find(p.m.Src), reach.find(p.m.Dst)
 		if ra == rb {
 			out = append(out, model.RootCause{
 				Code:    model.CauseRNICCrossRailUnreachable,
