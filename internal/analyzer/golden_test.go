@@ -137,7 +137,7 @@ func runGolden(t *testing.T, tc goldenCase) model.Report {
 	}
 	cfg := config.Defaults()
 	cfg.BaselineFile = tc.baselineFile
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	e.OneShot = true
 	e.Logf = func(string, ...any) {}
 	req := engine.RunRequest{

@@ -182,12 +182,12 @@ func TestBusyModeRunsAreNotHeld(t *testing.T) {
 // the run: while polluted, rnic0's memory path measures a third of its idle
 // bandwidth, which grays the memory link it crosses.
 type pollutedProber struct {
-	engine.SimProber
+	sim.Prober
 	polluted *bool
 }
 
 func (p pollutedProber) Loopback(ctx context.Context, n model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	m, err := p.SimProber.Loopback(ctx, n, ep, small, large)
+	m, err := p.Prober.Loopback(ctx, n, ep, small, large)
 	if err == nil && *p.polluted && n.ID == "rnic0" && ep.ID == "mem0" {
 		m.BandwidthBPS /= 3
 	}
@@ -226,7 +226,7 @@ func TestDiscardedIdleRunsDoNotAccumulateGrayHits(t *testing.T) {
 	cfg := config.Defaults()
 	g := topology.Fig2()
 	polluted := true
-	eng := engine.New(cfg, g, pollutedProber{SimProber: engine.SimProber{World: sim.New(g)}, polluted: &polluted})
+	eng := engine.New(cfg, g, pollutedProber{Prober: sim.Prober{World: sim.New(g)}, polluted: &polluted})
 	eng.Logf = func(string, ...any) {}
 	var p idleHold
 
@@ -260,7 +260,7 @@ func TestConfirmedIdleRunsKeepGrayHits(t *testing.T) {
 	cfg := config.Defaults()
 	g := topology.Fig2()
 	polluted := true
-	eng := engine.New(cfg, g, pollutedProber{SimProber: engine.SimProber{World: sim.New(g)}, polluted: &polluted})
+	eng := engine.New(cfg, g, pollutedProber{Prober: sim.Prober{World: sim.New(g)}, polluted: &polluted})
 	eng.Logf = func(string, ...any) {}
 	var p idleHold
 
@@ -317,7 +317,7 @@ func slowMREngine(t *testing.T, cfg config.Config) *engine.Engine {
 	if err := w.ApplyFault("slow_mr:gpu3"); err != nil {
 		t.Fatal(err)
 	}
-	eng := engine.New(cfg, g, engine.SimProber{World: w})
+	eng := engine.New(cfg, g, sim.Prober{World: w})
 	eng.Logf = func(string, ...any) {}
 	return eng
 }
@@ -371,7 +371,7 @@ func latencyEngine(t *testing.T, cfg config.Config) *engine.Engine {
 	if err := w.ApplyFault("lat:pcie.gpu3"); err != nil {
 		t.Fatal(err)
 	}
-	eng := engine.New(cfg, g, engine.SimProber{World: w})
+	eng := engine.New(cfg, g, sim.Prober{World: w})
 	eng.Logf = func(string, ...any) {}
 	return eng
 }

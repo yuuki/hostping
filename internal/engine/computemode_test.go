@@ -133,7 +133,7 @@ func TestEngineSimComputeModeFault(t *testing.T) {
 	if err := w.ApplyFault("compute_mode:gpu3=Prohibited"); err != nil {
 		t.Fatal(err)
 	}
-	e := quietEngine(config.Defaults(), g, SimProber{World: w})
+	e := quietEngine(config.Defaults(), g, sim.Prober{World: w})
 	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle, GPUComputeMode: w.ComputeMode})
 	if len(rep.SkippedEndpoints) != 1 || rep.SkippedEndpoints[0].Endpoints[0] != "gpu3" ||
 		rep.SkippedEndpoints[0].Reason != "compute_mode: Prohibited" {

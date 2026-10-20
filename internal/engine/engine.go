@@ -15,7 +15,6 @@ import (
 	"github.com/yuuki/hostping/internal/baseline"
 	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/model"
-	"github.com/yuuki/hostping/internal/sim"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
@@ -23,17 +22,6 @@ import (
 type Prober interface {
 	Loopback(ctx context.Context, rnic model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error)
 	Mutual(ctx context.Context, src, dst model.RNIC) (model.MutualMeasurement, error)
-}
-
-// SimProber uses the paper Eq.1 world.
-type SimProber struct{ World *sim.World }
-
-func (p SimProber) Loopback(_ context.Context, rnic model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	return p.World.Loopback(rnic.ID, ep.ID, small, large)
-}
-
-func (p SimProber) Mutual(_ context.Context, src, dst model.RNIC) (model.MutualMeasurement, error) {
-	return p.World.Mutual(src.ID, dst.ID), nil
 }
 
 // MutualWindow is the scheduled mutual probe (internal/mutual): each pair's
@@ -184,68 +172,13 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	}
 	var ms []model.PathMeasurement
 	var skips []probeSkip
-	samples := busySampleCount(e.Cfg)
 	for _, n := range e.Graph.RNICs {
-		paths := e.Graph.ProbePaths(n.ID, req.Mode)
-		repeated := e.busyRepeated(req, n.ID, paths)
-		// portFail is the failure that showed this RNIC's port cannot loop
-		// back (portFailFast); answered is whether any of its probes returned
-		// a reading in this run.
-		var portFail error
-		answered := false
-		for _, p := range paths {
-			ep, ok := e.Graph.Endpoint(p.Endpoint)
-			if !ok {
-				continue
-			}
-			if err := computeModeSkip(ep, req.GPUComputeMode); err != nil {
-				skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: err})
-				continue
-			}
-			if portFail != nil {
-				skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: notProbedError(portFail)})
-				continue
-			}
-			want := 1
-			if repeated[p.Endpoint] {
-				want = samples
-			}
-			var got []model.PathMeasurement
-			var skipErr error
-			for i := 0; i < want; i++ {
-				// A prober blocks until its own timeout, so the run can only be
-				// interrupted between probes; abort before starting another one.
-				if err := ctx.Err(); err != nil {
-					return model.Report{}, err
-				}
-				m, err := e.Prober.Loopback(ctx, n, ep, e.Cfg.SmallMsgBytes, e.Cfg.LargeMsgBytes)
-				if err != nil {
-					if !skippableProbe(err) {
-						return model.Report{}, fmt.Errorf("loopback %s->%s: %w", n.ID, ep.ID, err)
-					}
-					// The reasons a probe is skippable (no GDR, no device, no
-					// GID, a failed setup) do not come and go between two
-					// readings of the same path, so spend no further probes on
-					// it. A path that already answered keeps the readings it
-					// has: it is measured, not skipped, and counting it as both
-					// would double it in the report.
-					skipErr = err
-					break
-				}
-				m.EndpointKind = ep.Kind
-				e.reportAddressing(n, m.Addressing)
-				got = append(got, m)
-			}
-			if len(got) == 0 {
-				skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: skipErr})
-				if !answered && portFailFast(n, skipErr) {
-					portFail = skipErr
-				}
-				continue
-			}
-			answered = true
-			ms = append(ms, medianMeasurement(got))
+		got, skipped, err := e.sweepRNIC(ctx, req, n)
+		if err != nil {
+			return model.Report{}, err
 		}
+		ms = append(ms, got...)
+		skips = append(skips, skipped...)
 	}
 	if len(ms) == 0 {
 		return model.Report{}, noLoopbackError(skips)
@@ -255,7 +188,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	groups := groupSkips(skips)
 	e.reportSkips(groups)
 
-	recheck, capped, err := e.recheckLatency(ctx, req.Mode, ms, ov)
+	recheck, capped, err := e.recheckLatency(ctx, req, ms, ov)
 	if err != nil {
 		return model.Report{}, err
 	}
@@ -314,16 +247,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	e.SlowMR = res.SlowMRHits
 	e.Latency = res.LatencyHits
 
-	var abn []string
-	seen := map[string]struct{}{}
-	for _, p := range res.Paths {
-		if p.Status == model.PathAbnormal {
-			if _, ok := seen[p.RNIC]; !ok {
-				abn = append(abn, p.RNIC)
-				seen[p.RNIC] = struct{}{}
-			}
-		}
-	}
+	abn := abnormalRNICs(res.Paths)
 
 	return model.Report{
 		Trigger:          req.Trigger,
@@ -362,11 +286,11 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 // analyzer.Input.LatencyRecheckSkipped. Each run that plans a recheck passes
 // the engine's count of such runs as the plan's offset, so the cap rotates
 // over the candidates and no RNIC is starved run after run.
-func (e *Engine) recheckLatency(ctx context.Context, mode model.RunMode, ms []model.PathMeasurement, ov baseline.Overlay) (map[string]model.LatencyRecheck, map[string]model.LatencyRecheckSkip, error) {
-	if mode == model.ModeBusy || e.SkipLatencyRecheck {
+func (e *Engine) recheckLatency(ctx context.Context, req RunRequest, ms []model.PathMeasurement, ov baseline.Overlay) (map[string]model.LatencyRecheck, map[string]model.LatencyRecheckSkip, error) {
+	if req.Mode == model.ModeBusy || e.SkipLatencyRecheck {
 		return nil, nil, nil
 	}
-	sel := analyzer.PlanLatencyRecheck(e.Graph, ms, mode, e.Cfg, ov, e.latencyRechecks)
+	sel := analyzer.PlanLatencyRecheck(e.Graph, ms, req.Mode, e.Cfg, ov, e.latencyRechecks)
 	plans := sel.Plans
 	if len(plans) == 0 {
 		return nil, nil, nil
@@ -382,59 +306,22 @@ func (e *Engine) recheckLatency(ctx context.Context, mode model.RunMode, ms []mo
 		}
 		e.logf("hostping: latency recheck capped at %d paths; %d left for a later run, their streaks held: %s", analyzer.LatencyRecheckMaxPaths, len(names), strings.Join(names, " "))
 	}
-	read := func(p analyzer.PathRef) (uint64, error) {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		n, ok := e.Graph.RNIC(p.RNIC)
-		if !ok {
-			return 0, fmt.Errorf("no RNIC %s", p.RNIC)
-		}
-		ep, ok := e.Graph.Endpoint(p.Endpoint)
-		if !ok {
-			return 0, fmt.Errorf("no endpoint %s", p.Endpoint)
-		}
-		m, err := e.Prober.Loopback(ctx, n, ep, e.Cfg.SmallMsgBytes, e.Cfg.LargeMsgBytes)
-		if err != nil {
-			return 0, err
-		}
-		if m.SmallLatNsP50 == 0 {
-			return 0, fmt.Errorf("no small-message latency")
-		}
-		return m.SmallLatNsP50, nil
-	}
 	out := map[string]model.LatencyRecheck{}
 	for _, plan := range plans {
-		var path, sibs []uint64
-		var names []string
-		var failed error
+		// One read of the path before each sibling: path, sib0, path, sib1, ...
+		order := make([]analyzer.PathRef, 0, 2*len(plan.Siblings))
 		for _, sib := range plan.Siblings {
-			for _, r := range []analyzer.PathRef{plan.Path, sib} {
-				v, err := read(r)
-				if err != nil {
-					if cerr := ctx.Err(); cerr != nil {
-						return nil, nil, cerr
-					}
-					failed = fmt.Errorf("%s: %w", r, err)
-					break
-				}
-				if r == plan.Path {
-					path = append(path, v)
-				} else {
-					sibs = append(sibs, v)
-				}
-			}
-			if failed != nil {
-				break
-			}
-			names = append(names, sib.String())
+			order = append(order, plan.Path, sib)
 		}
-		if failed != nil {
-			e.logf("hostping: latency recheck of %s abandoned, keeping the sweep verdict: %v", plan.Path, failed)
+		path, sibs, ok, err := e.recheckReads(ctx, "latency", plan.Path.String(), plan.Path, order, smallLatency, "no small-message latency")
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
 			continue
 		}
 		rc := analyzer.JudgeLatencyRecheck(path, sibs, e.Cfg)
-		rc.Siblings = names
+		rc.Siblings = pathNames(plan.Siblings)
 		out[plan.Path.String()] = rc
 	}
 	return out, capped, nil
@@ -460,59 +347,19 @@ func (e *Engine) recheckBusy(ctx context.Context, req RunRequest, ms []model.Pat
 	if len(plans) == 0 {
 		return nil, nil
 	}
-	read := func(p analyzer.PathRef) (uint64, error) {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		n, ok := e.Graph.RNIC(p.RNIC)
-		if !ok {
-			return 0, fmt.Errorf("no RNIC %s", p.RNIC)
-		}
-		ep, ok := e.Graph.Endpoint(p.Endpoint)
-		if !ok {
-			return 0, fmt.Errorf("no endpoint %s", p.Endpoint)
-		}
-		m, err := e.Prober.Loopback(ctx, n, ep, e.Cfg.SmallMsgBytes, e.Cfg.LargeMsgBytes)
-		if err != nil {
-			return 0, err
-		}
-		if m.BandwidthBPS == 0 {
-			return 0, fmt.Errorf("no bandwidth")
-		}
-		return m.BandwidthBPS, nil
-	}
 	out := map[string]model.BusyRecheck{}
 	for _, plan := range plans {
-		order := append([]analyzer.PathRef{plan.Path}, plan.Siblings...)
-		var path, sibs []uint64
-		var failed error
-	rounds:
-		for range analyzer.BusyRecheckRounds {
-			for _, r := range order {
-				v, err := read(r)
-				if err != nil {
-					if cerr := ctx.Err(); cerr != nil {
-						return nil, cerr
-					}
-					failed = fmt.Errorf("%s: %w", r, err)
-					break rounds
-				}
-				if r == plan.Path {
-					path = append(path, v)
-				} else {
-					sibs = append(sibs, v)
-				}
-			}
+		order := pathRounds(plan.Path, plan.Siblings, analyzer.BusyRecheckRounds)
+		path, sibs, ok, err := e.recheckReads(ctx, "busy", plan.Path.String(), plan.Path, order, bandwidth, "no bandwidth")
+		if err != nil {
+			return nil, err
 		}
-		if failed != nil {
-			e.logf("hostping: busy recheck of %s abandoned, keeping the sweep verdict: %v", plan.Path, failed)
+		if !ok {
 			continue
 		}
 		rc := analyzer.JudgeBusyRecheck(path, sibs, e.Cfg.AbnormalTh)
 		rc.Rounds = analyzer.BusyRecheckRounds
-		for _, s := range plan.Siblings {
-			rc.Siblings = append(rc.Siblings, s.String())
-		}
+		rc.Siblings = pathNames(plan.Siblings)
 		out[plan.Path.String()] = rc
 	}
 	return out, nil
@@ -541,45 +388,75 @@ func (e *Engine) recheckIdleBandwidth(ctx context.Context, req RunRequest, ms []
 	}
 	out := map[string]model.BandwidthRecheck{}
 	for _, plan := range plans {
-		order := append([]analyzer.PathRef{plan.Path}, plan.Refs...)
-		var path, refs []uint64
-		var failed error
-	rounds:
-		for range analyzer.BWRecheckRounds {
-			for _, r := range order {
-				v, err := e.readBandwidth(ctx, r)
-				if err != nil {
-					if cerr := ctx.Err(); cerr != nil {
-						return nil, cerr
-					}
-					failed = fmt.Errorf("%s: %w", r, err)
-					break rounds
-				}
-				if r == plan.Path {
-					path = append(path, v)
-				} else {
-					refs = append(refs, v)
-				}
-			}
+		order := pathRounds(plan.Path, plan.Refs, analyzer.BWRecheckRounds)
+		path, refs, ok, err := e.recheckReads(ctx, "bandwidth", plan.Group, plan.Path, order, bandwidth, "no bandwidth")
+		if err != nil {
+			return nil, err
 		}
-		if failed != nil {
-			e.logf("hostping: bandwidth recheck of %s abandoned, keeping the sweep verdict: %v", plan.Group, failed)
+		if !ok {
 			continue
 		}
 		rc := analyzer.JudgeBWRecheck(path, refs, plan.BaselineBPS, e.Cfg.AbnormalTh)
 		rc.Path = plan.Path.String()
 		rc.Rounds = analyzer.BWRecheckRounds
-		for _, r := range plan.Refs {
-			rc.Refs = append(rc.Refs, r.String())
-		}
+		rc.Refs = pathNames(plan.Refs)
 		out[plan.Group] = rc
 	}
 	return out, nil
 }
 
-// readBandwidth probes one path once for a recheck and returns its
-// bandwidth; a reading without one is an error.
-func (e *Engine) readBandwidth(ctx context.Context, p analyzer.PathRef) (uint64, error) {
+// pathRounds is the read order of a recheck that reads the path and then
+// each of the others once per round, rounds times over.
+func pathRounds(path analyzer.PathRef, others []analyzer.PathRef, rounds int) []analyzer.PathRef {
+	round := append([]analyzer.PathRef{path}, others...)
+	return slices.Repeat(round, rounds)
+}
+
+// pathNames is the "rnic->endpoint" keys of paths, in order.
+func pathNames(paths []analyzer.PathRef) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, p.String())
+	}
+	return out
+}
+
+// smallLatency and bandwidth are the fields a recheck reads from a probe.
+func smallLatency(m model.PathMeasurement) uint64 { return m.SmallLatNsP50 }
+func bandwidth(m model.PathMeasurement) uint64    { return m.BandwidthBPS }
+
+// recheckReads makes the re-reads of one recheck plan, in the order the
+// caller built (the path and its siblings or references, however they are
+// interleaved), and sorts the values read: those of path into the first
+// result, every other into the second, in read order. kind and key name the
+// recheck in the log line when it is abandoned.
+//
+// A read that fails for any reason but the context abandons the plan: the
+// failure is logged, keyed by the path or reference that failed, and ok is
+// false, so the caller keeps the sweep verdict. A cancelled context is
+// returned as err and ends the run, like the sweep's.
+func (e *Engine) recheckReads(ctx context.Context, kind, key string, path analyzer.PathRef, order []analyzer.PathRef, field func(model.PathMeasurement) uint64, missing string) (pathVals, otherVals []uint64, ok bool, err error) {
+	for _, r := range order {
+		v, err := e.readField(ctx, r, field, missing)
+		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, nil, false, cerr
+			}
+			e.logf("hostping: %s recheck of %s abandoned, keeping the sweep verdict: %v", kind, key, fmt.Errorf("%s: %w", r, err))
+			return nil, nil, false, nil
+		}
+		if r == path {
+			pathVals = append(pathVals, v)
+		} else {
+			otherVals = append(otherVals, v)
+		}
+	}
+	return pathVals, otherVals, true, nil
+}
+
+// readField probes one path once for a recheck and returns the field of the
+// reading; a reading without it (field is zero) is the error missing.
+func (e *Engine) readField(ctx context.Context, p analyzer.PathRef, field func(model.PathMeasurement) uint64, missing string) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -595,10 +472,96 @@ func (e *Engine) readBandwidth(ctx context.Context, p analyzer.PathRef) (uint64,
 	if err != nil {
 		return 0, err
 	}
-	if m.BandwidthBPS == 0 {
-		return 0, fmt.Errorf("no bandwidth")
+	if v := field(m); v != 0 {
+		return v, nil
 	}
-	return m.BandwidthBPS, nil
+	return 0, errors.New(missing)
+}
+
+// sweepRNIC probes every path of n the run's mode takes (Graph.ProbePaths),
+// in order: the measurements it got, one per path that answered, and the
+// paths it skipped with their reasons. A path on a loaded RNIC is read
+// busyRepeated times and reduced to its median. An error ends the run: a
+// cancelled context, or a probe failure the run cannot skip.
+func (e *Engine) sweepRNIC(ctx context.Context, req RunRequest, n model.RNIC) (ms []model.PathMeasurement, skips []probeSkip, err error) {
+	paths := e.Graph.ProbePaths(n.ID, req.Mode)
+	repeated := e.busyRepeated(req, n.ID, paths)
+	samples := busySampleCount(e.Cfg)
+	// portFail is the failure that showed this RNIC's port cannot loop
+	// back (portFailFast); answered is whether any of its probes returned
+	// a reading in this run.
+	var portFail error
+	answered := false
+	for _, p := range paths {
+		ep, ok := e.Graph.Endpoint(p.Endpoint)
+		if !ok {
+			continue
+		}
+		if err := computeModeSkip(ep, req.GPUComputeMode); err != nil {
+			skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: err})
+			continue
+		}
+		if portFail != nil {
+			skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: notProbedError(portFail)})
+			continue
+		}
+		want := 1
+		if repeated[p.Endpoint] {
+			want = samples
+		}
+		var got []model.PathMeasurement
+		var skipErr error
+		for i := 0; i < want; i++ {
+			// A prober blocks until its own timeout, so the run can only be
+			// interrupted between probes; abort before starting another one.
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			m, err := e.Prober.Loopback(ctx, n, ep, e.Cfg.SmallMsgBytes, e.Cfg.LargeMsgBytes)
+			if err != nil {
+				if !skippableProbe(err) {
+					return nil, nil, fmt.Errorf("loopback %s->%s: %w", n.ID, ep.ID, err)
+				}
+				// The reasons a probe is skippable (no GDR, no device, no
+				// GID, a failed setup) do not come and go between two
+				// readings of the same path, so spend no further probes on
+				// it. A path that already answered keeps the readings it
+				// has: it is measured, not skipped, and counting it as both
+				// would double it in the report.
+				skipErr = err
+				break
+			}
+			m.EndpointKind = ep.Kind
+			e.reportAddressing(n, m.Addressing)
+			got = append(got, m)
+		}
+		if len(got) == 0 {
+			skips = append(skips, probeSkip{rnic: n.ID, ep: ep.ID, kind: ep.Kind, err: skipErr})
+			if !answered && portFailFast(n, skipErr) {
+				portFail = skipErr
+			}
+			continue
+		}
+		answered = true
+		ms = append(ms, medianMeasurement(got))
+	}
+	return ms, skips, nil
+}
+
+// abnormalRNICs is the RNIC of every abnormal path, each once, in path order.
+func abnormalRNICs(paths []model.PathMeasurement) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		if p.Status != model.PathAbnormal {
+			continue
+		}
+		if _, ok := seen[p.RNIC]; !ok {
+			out = append(out, p.RNIC)
+			seen[p.RNIC] = struct{}{}
+		}
+	}
+	return out
 }
 
 // mutual returns the run's mutual measurements: the scheduled probe's window

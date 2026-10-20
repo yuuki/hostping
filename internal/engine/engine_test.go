@@ -456,7 +456,7 @@ func TestEngineHostScopeFindsIsolatedRNIC(t *testing.T) {
 	}
 
 	var sink logSink
-	e := New(config.Defaults(), g, SimProber{World: w})
+	e := New(config.Defaults(), g, sim.Prober{World: w})
 	e.Logf = sink.logf
 	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) != 0 || len(sink.lines) != 1 {
@@ -468,7 +468,7 @@ func TestEngineHostScopeFindsIsolatedRNIC(t *testing.T) {
 
 	cfg := config.Defaults()
 	cfg.MutualScope = model.MutualScopeHost
-	e = New(cfg, g, SimProber{World: w})
+	e = New(cfg, g, sim.Prober{World: w})
 	e.Logf = sink.logf
 	rep = runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	if len(rep.Mutual) != 6 {

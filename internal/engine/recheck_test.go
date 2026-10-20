@@ -194,7 +194,7 @@ func TestLatencyRecheckSkipsUserBaseline(t *testing.T) {
 	}
 	n, _ := g.RNIC("rnic1")
 	ep, _ := g.Endpoint(target.Endpoint)
-	healthy, err := SimProber{World: sim.New(g)}.Loopback(context.Background(), n, ep, 1, 128*1024)
+	healthy, err := sim.Prober{World: sim.New(g)}.Loopback(context.Background(), n, ep, 1, 128*1024)
 	if err != nil {
 		t.Fatal(err)
 	}

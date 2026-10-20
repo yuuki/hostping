@@ -21,7 +21,7 @@ func runFault(t *testing.T, fault string, mode model.RunMode) model.Report {
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	// One run of a one-shot engine, as hostpingctl diagnose does.
 	e.OneShot = true
 	req := engine.RunRequest{
@@ -115,7 +115,7 @@ func TestPaperMemoryFlapping(t *testing.T) {
 	g := topology.Fig2()
 	cfg := config.Defaults()
 	w := sim.New(g)
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{Mode: model.ModeIdle, Trigger: model.TriggerIdle})
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestPaperFlappingNeedsConsecutiveGray(t *testing.T) {
 	g := topology.Fig2()
 	cfg := config.Defaults()
 	w := sim.New(g)
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{Mode: model.ModeIdle, Trigger: model.TriggerIdle})
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +274,7 @@ func TestPersistentGPUFaultIsNotFlapping(t *testing.T) {
 	if err := w.ApplyFault("gpu_pcie:gpu0"); err != nil {
 		t.Fatal(err)
 	}
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{Mode: model.ModeIdle, Trigger: model.TriggerIdle, PCIe: w.PCIe})
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestInvisiblePCIeIsNotSlowStart(t *testing.T) {
 	w := sim.New(g)
 	w.LinkBW["pcie.rnic0"] = 67_000_000_000
 	cfg := config.Defaults()
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{
 		Trigger: model.TriggerManual, Mode: model.ModeIdle, PCIe: w.PCIe,
 	})
@@ -461,7 +461,7 @@ func TestOverloadNeedsAbnormalLink(t *testing.T) {
 		for id, u := range util {
 			w.LinkUtil[id] = u
 		}
-		e := engine.New(config.Defaults(), g, engine.SimProber{World: w})
+		e := engine.New(config.Defaults(), g, sim.Prober{World: w})
 		rep, err := e.Run(context.Background(), engine.RunRequest{
 			Trigger: model.TriggerManual, Mode: model.ModeIdle, Util: w.LinkUtil, PCIe: w.PCIe,
 		})
@@ -537,7 +537,7 @@ func TestSlightRootPortFig8e(t *testing.T) {
 	w := sim.New(g)
 	w.LinkBW["rp.0"] = 110_000_000_000
 	cfg := config.Defaults()
-	e := engine.New(cfg, g, engine.SimProber{World: w})
+	e := engine.New(cfg, g, sim.Prober{World: w})
 	rep, err := e.Run(context.Background(), engine.RunRequest{
 		Trigger: model.TriggerManual, Mode: model.ModeIdle, PCIe: w.PCIe,
 	})
@@ -683,7 +683,7 @@ func TestLiveRNICWideCapWithoutPCIeEvidenceIsMedium(t *testing.T) {
 				if err := w.ApplyFault(fault); err != nil {
 					t.Fatal(err)
 				}
-				e := engine.New(config.Defaults(), g, engine.SimProber{World: w})
+				e := engine.New(config.Defaults(), g, sim.Prober{World: w})
 				// No Hints: what a live run passes, since hintsFrom has no
 				// sim world to read.
 				rep, err := e.Run(context.Background(), engine.RunRequest{

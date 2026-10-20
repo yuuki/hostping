@@ -27,7 +27,7 @@ func TestSubClassCalibrateThenDiagnose(t *testing.T) {
 	cfg := config.Defaults()
 	var reps []model.Report
 	for range 3 {
-		reps = append(reps, runIdle(t, cfg, g, SimProber{World: w}))
+		reps = append(reps, runIdle(t, cfg, g, sim.Prober{World: w}))
 	}
 	res := calibrate.Summarize(g, reps, calibrate.Options{Latency: true, AbnormalTh: cfg.AbnormalTh})
 	data, err := calibrate.MarshalFile(res.Baselines())
@@ -53,7 +53,7 @@ func TestSubClassCalibrateThenDiagnose(t *testing.T) {
 	}
 
 	cfg.BaselineFile = path
-	rep := runIdle(t, cfg, g, SimProber{World: w})
+	rep := runIdle(t, cfg, g, sim.Prober{World: w})
 	if len(rep.Causes) != 0 {
 		t.Fatalf("healthy host against its own file: causes %+v", rep.Causes)
 	}
@@ -91,7 +91,7 @@ func TestSubClassCalibrateThenDiagnose(t *testing.T) {
 
 	// The platform loses the fast route altogether: every fast path drops.
 	w.FastPairs = map[model.RootPortPair]bool{}
-	rep = runIdle(t, cfg, g, SimProber{World: w})
+	rep = runIdle(t, cfg, g, sim.Prober{World: w})
 	for _, ep := range []struct{ rnic, ep string }{{"rnic0", "gpu2"}, {"rnic0", "gpu3"}, {"rnic1", "gpu0"}, {"rnic1", "gpu1"}} {
 		if m := pathOf(t, rep, ep.rnic, ep.ep); m.Status != model.PathAbnormal || m.LatencyStatus != model.LatencyAbnormal {
 			t.Errorf("%s->%s = %+v, want abnormal bandwidth and latency", ep.rnic, ep.ep, m)

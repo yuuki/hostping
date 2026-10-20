@@ -136,18 +136,18 @@ func countProber(fail func(rnic string, i int) error) *flatProber {
 // simHookProber reads every path from the simulator, passed through hook when
 // one is set, and records every loopback.
 type simHookProber struct {
-	SimProber
+	sim.Prober
 	probeRecorder
 	hook loopbackHook
 }
 
 func newSimHookProber(w *sim.World, hook loopbackHook) *simHookProber {
-	return &simHookProber{SimProber: SimProber{World: w}, hook: hook}
+	return &simHookProber{Prober: sim.Prober{World: w}, hook: hook}
 }
 
 func (p *simHookProber) Loopback(ctx context.Context, n model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
 	i := p.record(n.ID, ep.ID)
-	m, err := p.SimProber.Loopback(ctx, n, ep, small, large)
+	m, err := p.Prober.Loopback(ctx, n, ep, small, large)
 	if err != nil {
 		return m, err
 	}
