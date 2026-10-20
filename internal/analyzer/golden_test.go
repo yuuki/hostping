@@ -191,9 +191,12 @@ func stripNondeterministic(rep model.Report) model.Report {
 	return rep
 }
 
+// marshalGolden renders the report as one line of compact JSON: the golden
+// files are large, and git stores them more cheaply that way. A mismatch is
+// reported indented (see checkGolden), so the failure stays readable.
 func marshalGolden(t *testing.T, rep model.Report) []byte {
 	t.Helper()
-	data, err := json.MarshalIndent(rep, "", "  ")
+	data, err := json.Marshal(rep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +222,19 @@ func checkGolden(t *testing.T, name string, got []byte) {
 		t.Fatalf("%v (run with -update to create it)", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("%s differs from the golden file (run with -update to accept the change):\n%s", path, firstDiff(want, got))
+		t.Fatalf("%s differs from the golden file (run with -update to accept the change):\n%s", path, firstDiff(indented(want), indented(got)))
 	}
+}
+
+// indented re-indents compact golden JSON so firstDiff can point at the
+// changed field rather than at one very long line. Bytes that are not JSON
+// (a truncated or hand-edited file) are returned as they are.
+func indented(data []byte) []byte {
+	var b bytes.Buffer
+	if err := json.Indent(&b, bytes.TrimSpace(data), "", "  "); err != nil {
+		return data
+	}
+	return b.Bytes()
 }
 
 // firstDiff renders the first differing lines of want and got, with a little
