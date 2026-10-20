@@ -1,0 +1,49 @@
+abnormal-th | 0.2 | path abnormality threshold
+baseline |  | per-distance idle baseline (repeatable). KEY=BW[,LAT] e.g. local_mem=270Gbps,1400ns. Keys: same_switch, multi_switch, cross_root, cross_socket, local_mem, remote_mem. Units: bps/Gbps, ns/us. Path status is bandwidth-only; a LAT you set judges that distance's advisory idle latency_status (unset: same-distance siblings; the Fig.4 latencies are never used for it); same_switch latency also gates ACS/ATS. Unset distances keep Fig.4×line-rate defaults.
+baseline-file |  | JSON object of idle baselines (same keys as --baseline). Fields: bandwidth_bps or bandwidth (e.g. 270Gbps), latency_ns or latency (e.g. 1400ns). An optional "tables" object holds per-Fig.4-table sections (key line_rate=<N>Gbps[,pcie_hop=<N>Gbps]) that replace the top level for RNICs on that table. Unknown fields are rejected. Flags override the file, sections included.
+busy-cooldown | 30s | minimum interval between PFC/drop-triggered busy runs (0 disables)
+busy-interval | 0s | periodic busy-mode run on a loaded host without PFC/drops, at most once per interval (0 disables; beyond NSDI'23 §4.2)
+busy-samples | 3 | loopback readings per path on a loaded RNIC in busy mode; the median is classified, so a single noisy sample no longer marks a healthy sibling abnormal (1 disables the repeat)
+cpu-busy-high | 0.5 | CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1)
+exclude-rnic |  | RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up
+fault |  | simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1)
+flap-window | 3 | consecutive gray tests on a link that diagnose flapping
+gpu-util-interval | 10s | minimum period between nvidia-smi GPU utilization queries
+idle-gate-command |  | daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start; exit 1 (denied), exit 2 or higher (the gate could not decide), a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits 1 while a scheduler job holds the host and 2 when the scheduler cannot be queried; empty: no gate)
+idle-gate-timeout | 5s | daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most 20s)
+idle-interval | 5m0s | idle-host full-mesh interval
+iters | 512 | loopback probe iterations (small/large WRITE pairs) per measurement, at most 512
+large-msg | 262144 | large-message size in bytes (bandwidth probe), at most 16 MiB
+latency-floor | 500ns | least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor)
+mem-channel-capacity |  | memory bandwidth of each mem.N link (all channels of one NUMA node, reads + writes), replacing the assumed constant (repeatable). BW for every link or mem.N=BW for one; units bps/Gbps (bits) or GB/s/GiB/s (bytes)
+mem-warmup | 0s | before each host-memory loopback probe, write the probe's NUMA-bound buffers from the CPU for this long so the memory subsystem is awake when measuring (0 = off, at most 1s; GPU endpoints unaffected)
+metric-interval | 1s | RNIC counter poll interval
+metrics | :9464 | Prometheus /metrics listen address (empty to disable; one-shot runs listen only when this flag is given)
+metrics-verb-durations | true | export hostping.verb.duration (2-3 series per RNIC→endpoint path); false drops the series from /metrics and OTLP, while reports and the gpu_slow_mr_reg diagnosis keep the timings
+metrics-web-config |  | Prometheus exporter-toolkit web config file enabling TLS and/or basic auth on the --metrics listener (empty: plain HTTP)
+mutual-infiniband | false | include InfiniBand-link-layer RNICs in the mutual probe, paired by subnet prefix (off by default: separate fabrics sharing the default prefix fe80::/64 would pair and time out)
+mutual-interval | 0s | daemon: every RNIC probes one random peer this often (opt-in, 0 = off: pairs are probed in a burst per engine run; ToN'24 recommends 100ms)
+mutual-iters | 64 | round trips per mutual probe burst (a pair that does not answer costs this many --mutual-timeout)
+mutual-msg | 1 | mutual-probe UD SEND payload in bytes, 1 to 4096 and at most the port MTU
+mutual-scope | rail | RNIC pairs the mutual probe measures: rail (only RNICs sharing an IPv4 subnet or GID rail) or host (every RNIC, across rails too; only meaningful when the rails route to each other)
+mutual-timeout | 500ms | wait for one mutual probe's reply before it counts as a timeout (ToN'24: 500ms)
+mutual-transport | rc | live mutual probe transport: rc (RC ping-pong; retransmission hides isolated loss) or ud (UD request/reply, one lost packet is one timeout; required by --mutual-interval)
+mutual-window | 20s | daemon: sliding window of the scheduled mutual probe's timeout ratio (ToN'24: 20s)
+once | false | run the engine once and exit
+otlp |  | OTLP gRPC endpoint (or OTEL_EXPORTER_OTLP_ENDPOINT): host:port, or http:// (plaintext) / https:// (TLS) URL
+otlp-insecure | false | plaintext OTLP for a host:port endpoint (unset: OTEL_EXPORTER_OTLP_INSECURE, else plaintext for loopback and TLS with the system roots otherwise)
+pfc-high | 0.03 | Tx pause duration ratio that triggers busy diagnosis
+report-file |  | append each report to this file as one JSON line (created 0640; reopened per report, so logrotate needs no signal)
+report-format |  | how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)
+sim | false | run against the in-process intra-host simulator
+small-msg | 1 | small-message size in bytes (latency probe)
+state-dir |  | daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)
+thp-low | 0.05 | fraction of RNIC line rate below which the host counts as idle
+timeout | 5s | per-probe timeout
+timeout-th | 0.1 | mutual probe timeout ratio above which an RNIC is flagged (ToN'24 Timeout_th)
+topology | fig2 | built-in topology name (fig2; fig2-rails: the same host with one rail per RNIC; fig2-snc: the same host with sub-NUMA clustering, two NUMA nodes per package)
+topology-file |  | JSON topology file
+uncore-util | false | read memory-channel and inter-socket utilization from Intel uncore IMC and UPI PMUs via perf_event_open (Linux; needs CAP_PERFMON or perf_event_paranoid <= 0, and --mem-channel-capacity / --upi-capacity)
+upi-bytes-per-flit | 0 | bytes of data one UPI data-flit count (UNC_UPI_TxL_FLITS.ALL_DATA) carries, for a processor whose ratio hostping has not measured; measure it against a known cross-socket load (0 = the measured per-model ratio, at most 64)
+upi-capacity |  | capacity of each upi.A-B inter-socket link, replacing the assumed constant (repeatable). BW for every link or upi.A-B=BW for one; units as --mem-channel-capacity
+util-high | 0.9 | bus utilization that marks a link overloaded
