@@ -135,19 +135,39 @@ func discoverIMCEvents(sysroot string, gnr bool) ([]uncoreEvent, error) {
 	return out, nil
 }
 
-func imcPMUEvents(sysroot, dir, pmu string, gnr bool) ([]uncoreEvent, error) {
+// pmuInfo is what a PMU's sysfs directory says about opening its events: its
+// perf event type, the CPUs its events are opened on (one per package or
+// die) and its format/ fields.
+type pmuInfo struct {
+	typ    uint32
+	cpus   []int
+	format map[string]formatField
+}
+
+// readPMU reads a PMU's type, cpumask and format/ fields from its sysfs
+// directory. The error names only what is wrong; the caller prefixes the PMU.
+func readPMU(dir string) (pmuInfo, error) {
 	typ, err := strconv.ParseUint(readTrim(filepath.Join(dir, "type")), 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("%s: type: %v", pmu, err)
+		return pmuInfo{}, fmt.Errorf("type: %v", err)
 	}
 	cpus, err := parseCPUList(readTrim(filepath.Join(dir, "cpumask")))
 	if err != nil || len(cpus) == 0 {
-		return nil, fmt.Errorf("%s: no cpumask", pmu)
+		return pmuInfo{}, errors.New("no cpumask")
 	}
 	format, err := readPMUFormat(filepath.Join(dir, "format"))
 	if err != nil {
+		return pmuInfo{}, err
+	}
+	return pmuInfo{typ: uint32(typ), cpus: cpus, format: format}, nil
+}
+
+func imcPMUEvents(sysroot, dir, pmu string, gnr bool) ([]uncoreEvent, error) {
+	info, err := readPMU(dir)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %v", pmu, err)
 	}
+	typ, cpus, format := info.typ, info.cpus, info.format
 	ents, err := os.ReadDir(filepath.Join(dir, "events"))
 	if err != nil {
 		return nil, fmt.Errorf("%s: events: %v", pmu, err)
@@ -210,7 +230,7 @@ func imcPMUEvents(sysroot, dir, pmu string, gnr bool) ([]uncoreEvent, error) {
 		seen[die] = true
 		for _, x := range encs {
 			out = append(out, uncoreEvent{
-				PMU: pmu, Name: x.name, Type: uint32(typ),
+				PMU: pmu, Name: x.name, Type: typ,
 				Config: x.c, Config1: x.c1, Config2: x.c2,
 				CPU: cpu, Die: die, Group: die, BytesPerCount: x.bytesCount,
 			})
@@ -540,157 +560,196 @@ func NewUncore(g topology.Graph, opts UncoreOptions) (*Uncore, error) {
 }
 
 func newUncore(g topology.Graph, sysroot, cpuinfo string, opts UncoreOptions, open perfOpener) (*Uncore, error) {
-	want := map[string][]string{}
-	skipped := map[string]string{}
-	var evs []uncoreEvent
-	sncBoxes := map[string]map[string]int{} // die → box → node
+	plan := &uncorePlan{want: map[string][]string{}, skipped: map[string]string{}}
+	sncBoxes := plan.memLinks(g, sysroot, cpuinfo, open)
+	plan.upiLinks(g, sysroot, cpuinfo, opts)
+	if len(plan.want) == 0 {
+		return nil, fmt.Errorf("no memory or inter-socket link to read (%s)", joinReasons(plan.skipped))
+	}
 
+	u := &Uncore{now: time.Now, links: map[string][]string{}, caps: map[string]uint64{}, Skipped: plan.skipped, SNCBoxes: describeSNC(sncBoxes)}
+	byGroup, failed := openGroups(plan.evs, groupSet(plan.want), open)
+	u.bindLinks(g, plan.want, byGroup, failed)
+	// Keep only the counters of groups some read link uses.
+	u.ctrs = pruneGroups(byGroup, groupSet(u.links))
+	if len(u.links) == 0 {
+		u.Close()
+		return nil, fmt.Errorf("no memory or inter-socket link to read (%s)", joinReasons(plan.skipped))
+	}
+	return u, nil
+}
+
+// uncorePlan is what the links of a host need before any counter is opened
+// for good: the traffic groups each readable link's utilization comes from,
+// why the other links are left unknown, and the counters that feed the
+// groups.
+type uncorePlan struct {
+	want    map[string][]string // link ID → traffic groups
+	skipped map[string]string   // link ID → reason
+	evs     []uncoreEvent
+}
+
+// memLinks plans the memory links of g: each one maps to the IMC traffic of
+// its die, or, under sub-NUMA clustering, of the die's boxes the start-up
+// measurement gave its node. It returns that measurement's result per die,
+// for the log.
+func (p *uncorePlan) memLinks(g topology.Graph, sysroot, cpuinfo string, open perfOpener) map[string]map[string]int {
 	memLinks, memSkipped := memLinkDies(g, sysroot)
 	for id, why := range memSkipped {
-		skipped[id] = why
+		p.skipped[id] = why
 	}
-	if len(memLinks) > 0 {
-		imc, err := discoverIMCEvents(sysroot, gnrSubChannel1(cpuinfo))
-		// Under sub-NUMA clustering, find which boxes serve which node and
-		// give each box's events that node's group.
-		sncErr := map[string]error{}
-		if err == nil {
-			for _, m := range memLinks {
-				if m.Nodes == nil || sncBoxes[m.Die] != nil || sncErr[m.Die] != nil {
-					continue
-				}
-				boxes, err := mapSNCBoxes(m.Die, m.Nodes, imc, open)
-				if err != nil {
-					sncErr[m.Die] = err
-					continue
-				}
-				sncBoxes[m.Die] = boxes
-			}
-			for i, ev := range imc {
-				if n, ok := sncBoxes[ev.Die][ev.PMU]; ok {
-					imc[i].Group = sncGroup(ev.Die, n)
-				}
-			}
-		}
-		for id, m := range memLinks {
-			switch {
-			case err != nil:
-				skipped[id] = err.Error()
-			case m.Nodes == nil:
-				want[id] = []string{m.Die}
-			case sncErr[m.Die] != nil:
-				skipped[id] = fmt.Sprintf("package/die %s holds %d NUMA nodes (sub-NUMA clustering) and which IMC serves which could not be measured: %v", m.Die, len(m.Nodes), sncErr[m.Die])
-			default:
-				want[id] = []string{sncGroup(m.Die, m.Node)}
-			}
-		}
-		evs = append(evs, imc...)
+	if len(memLinks) == 0 {
+		return nil
 	}
+	imc, err := discoverIMCEvents(sysroot, gnrSubChannel1(cpuinfo))
+	var sncBoxes map[string]map[string]int
+	var sncErr map[string]error
+	if err == nil {
+		sncBoxes, sncErr = regroupSNC(memLinks, imc, open)
+	}
+	for id, m := range memLinks {
+		switch {
+		case err != nil:
+			p.skipped[id] = err.Error()
+		case m.Nodes == nil:
+			p.want[id] = []string{m.Die}
+		case sncErr[m.Die] != nil:
+			p.skipped[id] = fmt.Sprintf("package/die %s holds %d NUMA nodes (sub-NUMA clustering) and which IMC serves which could not be measured: %v", m.Die, len(m.Nodes), sncErr[m.Die])
+		default:
+			p.want[id] = []string{sncGroup(m.Die, m.Node)}
+		}
+	}
+	p.evs = append(p.evs, imc...)
+	return sncBoxes
+}
 
+// upiLinks plans the inter-socket links of g: each one maps to the UPI
+// traffic groups of its two directions.
+func (p *uncorePlan) upiLinks(g topology.Graph, sysroot, cpuinfo string, opts UncoreOptions) {
 	upiLinks, upiSkipped := upiLinkGroups(g, sysroot)
 	for id, why := range upiSkipped {
-		skipped[id] = why
+		p.skipped[id] = why
 	}
-	if len(upiLinks) > 0 {
-		var upi []uncoreEvent
-		var unresolved map[int]bool
-		bpf, err := upiFlitBytes(cpuinfo, opts.UPIBytesPerFlit)
-		if err == nil {
-			upi, unresolved, err = discoverUPIEvents(sysroot, bpf)
+	if len(upiLinks) == 0 {
+		return
+	}
+	var upi []uncoreEvent
+	var unresolved map[int]bool
+	bpf, err := upiFlitBytes(cpuinfo, opts.UPIBytesPerFlit)
+	if err == nil {
+		upi, unresolved, err = discoverUPIEvents(sysroot, bpf)
+	}
+	for id, groups := range upiLinks {
+		if err != nil {
+			p.skipped[id] = err.Error()
+			continue
 		}
-	upiLinks:
-		for id, groups := range upiLinks {
-			if err != nil {
-				skipped[id] = err.Error()
-				continue
-			}
-			for p := range unresolved {
-				for _, gr := range groups {
-					if strings.HasPrefix(gr, fmt.Sprintf("upi:%d>", p)) {
-						skipped[id] = fmt.Sprintf("a UPI link of package %d names no peer in sysfs, so the traffic it sends cannot be attributed", p)
-						continue upiLinks
-					}
-				}
-			}
-			want[id] = groups
+		if pkg := unresolvedSender(groups, unresolved); pkg >= 0 {
+			p.skipped[id] = fmt.Sprintf("a UPI link of package %d names no peer in sysfs, so the traffic it sends cannot be attributed", pkg)
+			continue
 		}
-		evs = append(evs, upi...)
+		p.want[id] = groups
 	}
-	if len(want) == 0 {
-		return nil, fmt.Errorf("no memory or inter-socket link to read (%s)", joinReasons(skipped))
-	}
+	p.evs = append(p.evs, upi...)
+}
 
-	wanted := map[string]bool{}
-	for _, groups := range want {
+// unresolvedSender is a package of unresolved that sends on one of groups,
+// or -1 when none does.
+func unresolvedSender(groups []string, unresolved map[int]bool) int {
+	for pkg := range unresolved {
 		for _, gr := range groups {
-			wanted[gr] = true
+			if strings.HasPrefix(gr, fmt.Sprintf("upi:%d>", pkg)) {
+				return pkg
+			}
 		}
 	}
-	u := &Uncore{now: time.Now, links: map[string][]string{}, caps: map[string]uint64{}, Skipped: skipped, SNCBoxes: describeSNC(sncBoxes)}
-	failed := map[string]error{}
-	byGroup := map[string][]uncoreCounter{}
+	return -1
+}
+
+// groupSet is the set of traffic groups the links of m use.
+func groupSet(m map[string][]string) map[string]bool {
+	set := map[string]bool{}
+	for _, groups := range m {
+		for _, gr := range groups {
+			set[gr] = true
+		}
+	}
+	return set
+}
+
+// openGroups opens every counter of the wanted groups, in evs order. A group
+// missing one of its boxes or links would undercount, so when a counter
+// fails to open its group's already opened counters are closed and the group
+// is returned in failed, with why, instead of in byGroup.
+func openGroups(evs []uncoreEvent, wanted map[string]bool, open perfOpener) (byGroup map[string][]uncoreCounter, failed map[string]error) {
+	byGroup = map[string][]uncoreCounter{}
+	failed = map[string]error{}
 	for _, ev := range evs {
 		if !wanted[ev.Group] || failed[ev.Group] != nil {
 			continue
 		}
 		c, err := open(ev)
 		if err != nil {
-			// A group missing one of its boxes or links would undercount:
-			// drop the group.
 			failed[ev.Group] = fmt.Errorf("%s/%s on cpu%d: %w", ev.PMU, ev.Name, ev.CPU, err)
-			for _, x := range byGroup[ev.Group] {
-				_ = x.c.Close()
-			}
+			closeCounters(byGroup[ev.Group])
 			delete(byGroup, ev.Group)
 			continue
 		}
 		byGroup[ev.Group] = append(byGroup[ev.Group], uncoreCounter{ev: ev, c: c})
 	}
+	return byGroup, failed
+}
+
+// bindLinks reads every link of want whose groups all have open counters,
+// with its capacity, and skips the others with the reason.
+func (u *Uncore) bindLinks(g topology.Graph, want map[string][]string, byGroup map[string][]uncoreCounter, failed map[string]error) {
 	for id, groups := range want {
-		why := ""
-		for _, gr := range groups {
-			if err := failed[gr]; err != nil {
-				why = err.Error()
-				break
-			}
-			if len(byGroup[gr]) == 0 {
-				why = "no uncore counter covers " + groupDesc(gr)
-				break
-			}
-		}
-		if why != "" {
-			skipped[id] = why
+		if why := unreadableGroup(groups, byGroup, failed); why != "" {
+			u.Skipped[id] = why
 			continue
 		}
 		u.links[id] = groups
 		u.caps[id], _ = utilCapacity(g, id)
 	}
-	// Keep only the counters of groups some read link uses.
-	used := map[string]bool{}
-	for _, groups := range u.links {
-		for _, gr := range groups {
-			used[gr] = true
+}
+
+// unreadableGroup says why the first of groups that has no open counters
+// cannot be read, or "" when every group can.
+func unreadableGroup(groups []string, byGroup map[string][]uncoreCounter, failed map[string]error) string {
+	for _, gr := range groups {
+		if err := failed[gr]; err != nil {
+			return err.Error()
+		}
+		if len(byGroup[gr]) == 0 {
+			return "no uncore counter covers " + groupDesc(gr)
 		}
 	}
+	return ""
+}
+
+// pruneGroups closes the counters of every group of byGroup that is not
+// used and returns the others, in group-name order.
+func pruneGroups(byGroup map[string][]uncoreCounter, used map[string]bool) []uncoreCounter {
 	names := make([]string, 0, len(byGroup))
 	for gr := range byGroup {
 		names = append(names, gr)
 	}
 	sort.Strings(names)
+	var ctrs []uncoreCounter
 	for _, gr := range names {
 		if !used[gr] {
-			for _, x := range byGroup[gr] {
-				_ = x.c.Close()
-			}
+			closeCounters(byGroup[gr])
 			continue
 		}
-		u.ctrs = append(u.ctrs, byGroup[gr]...)
+		ctrs = append(ctrs, byGroup[gr]...)
 	}
-	if len(u.links) == 0 {
-		u.Close()
-		return nil, fmt.Errorf("no memory or inter-socket link to read (%s)", joinReasons(skipped))
+	return ctrs
+}
+
+func closeCounters(ctrs []uncoreCounter) {
+	for _, x := range ctrs {
+		_ = x.c.Close()
 	}
-	return u, nil
 }
 
 // groupDesc names a traffic group for a log line.
@@ -824,8 +883,6 @@ func (u *Uncore) Close() {
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	for _, c := range u.ctrs {
-		_ = c.c.Close()
-	}
+	closeCounters(u.ctrs)
 	u.ctrs = nil
 }

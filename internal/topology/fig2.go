@@ -1,6 +1,10 @@
 package topology
 
-import "github.com/yuuki/hostping/internal/model"
+import (
+	"strconv"
+
+	"github.com/yuuki/hostping/internal/model"
+)
 
 const lineRate200G = 200_000_000_000
 
@@ -71,7 +75,7 @@ func Fig2() Graph {
 	}
 
 	g := Graph{Name: "fig2", RNICs: rnics, Endpoints: eps, Links: links}
-	g.Paths = enumerateFig2(g, "upi.0")
+	g.Paths = fig2Paths(g, func(int, int) string { return "upi.0" })
 	g.setRNICPCIeCaps()
 	return g
 }
@@ -96,7 +100,7 @@ func Fig2SNC() Graph {
 		}
 	}
 	for i := 0; i < 4; i++ {
-		eps = append(eps, model.Endpoint{ID: "mem" + itoa(i), Kind: model.EndpointMemory, Index: i, Socket: i / 2, NUMA: i})
+		eps = append(eps, model.Endpoint{ID: "mem" + strconv.Itoa(i), Kind: model.EndpointMemory, Index: i, Socket: i / 2, NUMA: i})
 	}
 	g.Endpoints = eps
 
@@ -108,7 +112,7 @@ func Fig2SNC() Graph {
 		links = append(links, l)
 	}
 	for i := 0; i < 4; i++ {
-		links = append(links, model.Link{ID: "mem." + itoa(i), Kind: model.LinkKindMemory, Device: "mem" + itoa(i), Socket: i / 2, CapacityBPS: memCap})
+		links = append(links, model.Link{ID: "mem." + strconv.Itoa(i), Kind: model.LinkKindMemory, Device: "mem" + strconv.Itoa(i), Socket: i / 2, CapacityBPS: memCap})
 	}
 	// A real host's mesh capacity is unknown; the simulator still needs a
 	// healthy bandwidth for it, so it gets the memory channel's.
@@ -118,7 +122,7 @@ func Fig2SNC() Graph {
 		model.Link{ID: "mesh.2-3", Kind: model.LinkKindSNCMesh, Socket: 1, CapacityBPS: memCap, CapacityAssumed: true},
 	)
 	g.Links = links
-	g.Paths = enumerateFig2(g, "upi.0-1")
+	g.Paths = fig2Paths(g, upiID)
 	return g
 }
 
@@ -130,50 +134,28 @@ func Fig2Rails() Graph {
 	g := Fig2()
 	g.Name = "fig2-rails"
 	for i := range g.RNICs {
-		g.RNICs[i].Fabric = "rail" + itoa(i)
+		g.RNICs[i].Fabric = "rail" + strconv.Itoa(i)
 	}
 	return g
 }
 
-func enumerateFig2(g Graph, upi string) []model.Path {
-	sw := map[string]string{"rp.0": "sw.0", "rp.1": "sw.1", "rp.2": "sw.2", "rp.3": "sw.3"}
-	var paths []model.Path
+// fig2Paths enumerates the paths of a Fig.2 graph the way discovery would:
+// every RNIC and GPU hangs off the one switch of its root port (rp.N → sw.N),
+// so the live path builder, fed those chains, classifies and routes each pair.
+// Only the UPI link's name differs between the figures, hence upi.
+func fig2Paths(g Graph, upi upiNamer) []model.Path {
+	chain := func(rootPort string) pciChain {
+		return pciChain{RootPort: rootPort, Switches: []string{"sw." + rootPort[len("rp."):]}}
+	}
+	rnicCh := map[string]pciChain{}
 	for _, n := range g.RNICs {
-		for _, e := range g.Endpoints {
-			p := model.Path{RNIC: n.ID, Endpoint: e.ID}
-			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(n.ID), sw[n.RootPort])
-			switch {
-			case e.Kind == model.EndpointGPU && e.RootPort == n.RootPort:
-				p.Distance = model.DistanceSameSwitch
-				p.Affinitive = true
-				p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
-			case e.Kind == model.EndpointGPU && e.Socket == n.Socket:
-				p.Distance = model.DistanceCrossRoot
-				p.LinkIDs = append(p.LinkIDs, n.RootPort)
-				if e.NUMA != n.NUMA {
-					p.LinkIDs = append(p.LinkIDs, meshID(n.NUMA, e.NUMA))
-				}
-				p.LinkIDs = append(p.LinkIDs, e.RootPort, sw[e.RootPort], model.PCIeLinkID(e.ID))
-			case e.Kind == model.EndpointGPU:
-				p.Distance = model.DistanceCrossSocket
-				p.LinkIDs = append(p.LinkIDs, n.RootPort, upi, e.RootPort, sw[e.RootPort], model.PCIeLinkID(e.ID))
-			case e.Kind == model.EndpointMemory && e.Socket == n.Socket && e.NUMA == n.NUMA:
-				p.Distance = model.DistanceLocalMem
-				p.Affinitive = true
-				p.LinkIDs = append(p.LinkIDs, n.RootPort, "mem."+itoa(e.Index))
-			case e.Kind == model.EndpointMemory && e.Socket == n.Socket:
-				p.Distance = model.DistanceRemoteMem
-				p.LinkIDs = append(p.LinkIDs, n.RootPort, meshID(n.NUMA, e.NUMA), "mem."+itoa(e.Index))
-			default:
-				p.Distance = model.DistanceRemoteMem
-				p.LinkIDs = append(p.LinkIDs, n.RootPort, upi, "mem."+itoa(e.Index))
-			}
-			paths = append(paths, p)
+		rnicCh[n.ID] = chain(n.RootPort)
+	}
+	gpuCh := map[string]pciChain{}
+	for _, e := range g.Endpoints {
+		if e.Kind == model.EndpointGPU {
+			gpuCh[e.ID] = chain(e.RootPort)
 		}
 	}
-	return paths
-}
-
-func itoa(i int) string {
-	return string(rune('0' + i))
+	return enumeratePaths(g, rnicCh, gpuCh, upi)
 }

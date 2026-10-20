@@ -42,6 +42,32 @@ var touchNode = touchNodeMemory
 // sncGroup is the traffic group of one NUMA node on an SNC die.
 func sncGroup(die string, node int) string { return fmt.Sprintf("%s#node%d", die, node) }
 
+// regroupSNC finds, for every sub-NUMA-clustered die among memLinks, which
+// of its IMC boxes serve which node (mapSNCBoxes) and gives each box's events
+// that node's group. It returns the mapping per die (die → box → node) and,
+// per die that could not be measured, why.
+func regroupSNC(memLinks map[string]memLink, imc []uncoreEvent, open perfOpener) (map[string]map[string]int, map[string]error) {
+	sncBoxes := map[string]map[string]int{}
+	sncErr := map[string]error{}
+	for _, m := range memLinks {
+		if m.Nodes == nil || sncBoxes[m.Die] != nil || sncErr[m.Die] != nil {
+			continue
+		}
+		boxes, err := mapSNCBoxes(m.Die, m.Nodes, imc, open)
+		if err != nil {
+			sncErr[m.Die] = err
+			continue
+		}
+		sncBoxes[m.Die] = boxes
+	}
+	for i, ev := range imc {
+		if n, ok := sncBoxes[ev.Die][ev.PMU]; ok {
+			imc[i].Group = sncGroup(ev.Die, n)
+		}
+	}
+	return sncBoxes, sncErr
+}
+
 // mapSNCBoxes finds which of die's IMC boxes serve each of its nodes. evs are
 // the IMC events; those of die are opened for the measurement and closed
 // again. The result maps a box (PMU name) to its node.

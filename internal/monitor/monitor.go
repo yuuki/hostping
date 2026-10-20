@@ -74,19 +74,12 @@ type Decision struct {
 }
 
 type Monitor struct {
-	Cfg      config.Config
-	Graph    topology.Graph
-	Sampler  Sampler
-	prev     map[string]model.RNICCounters
-	lastIdle time.Time
-	lastBusy time.Time
-	// lastPeriodic is the reference for Config.BusyInterval: the last engine
-	// run of any trigger (idle, PFC/drops, periodic, or a MarkRun), or the
-	// first ready poll when none has run yet.
-	lastPeriodic time.Time
-	// periodicBefore is lastPeriodic before the last poll that started a
-	// run, for SkipRun.
-	periodicBefore time.Time
+	Cfg     config.Config
+	Graph   topology.Graph
+	Sampler Sampler
+	prev    map[string]model.RNICCounters
+	// cad is the trigger cadence: when each trigger last ran.
+	cad cadence
 	// now is the poll clock; tests replace it to step through intervals.
 	now func() time.Time
 	// rebaseline drops the next counter delta because it also contains the
@@ -97,7 +90,6 @@ type Monitor struct {
 	// moves on once per MutualWindow, so alarm runs are spaced by at least
 	// that and by BusyCooldown.
 	MutualAlarm func() bool
-	lastAlarm   time.Time
 	// Logf receives the counter source reports (a PFC or drop counter with
 	// no source, one that stops or resumes reading). nil logs through the
 	// standard logger.
@@ -204,26 +196,21 @@ func (m *Monitor) trackSource(tracks map[string]*sourceTrack, id string, fam cou
 // cooldown and the --busy-interval are measured from the end of the run.
 func (m *Monitor) MarkRun(t time.Time) {
 	m.rebaseline = true
-	m.lastBusy = t
-	m.lastPeriodic = t
+	m.cad.markRun(t)
 }
 
 // SkipRun records that the run the last Poll started did not happen (the
 // daemon's --idle-gate-command denied it). Nothing measured the host, so the
 // --busy-interval keeps counting from the run before. The attempt itself
 // still counts: the idle cadence, like the busy cooldown, is not rewound.
-func (m *Monitor) SkipRun() {
-	m.lastPeriodic = m.periodicBefore
-}
+func (m *Monitor) SkipRun() { m.cad.skipRun() }
 
 // ResumeIdle sets the idle cadence as if the last idle-trigger run had
 // started at t: the next idle run is due --idle-interval after it, and on the
 // first idle poll when that is already past. The daemon calls it once, before
 // the first poll, with the last idle run a previous process recorded
 // (--state-dir), so a restart does not pull the next full mesh forward.
-func (m *Monitor) ResumeIdle(t time.Time) {
-	m.lastIdle = t
-}
+func (m *Monitor) ResumeIdle(t time.Time) { m.cad.lastIdle = t }
 
 func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	// A canceled poll (shutdown) reads nothing: no counter source is
@@ -243,11 +230,10 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		bp.PollBus(ctx, reset)
 	}
 	var rates []model.RNICRates
-	allIdle := true
 	busy := map[string]bool{}
 	drops := map[string]uint64{}
 	util := map[string]float64{}
-	var pfc, sawDrop bool
+	var host rnicFlags
 	var unread []string
 	now := m.now()
 	ready := true
@@ -260,78 +246,29 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 			return Decision{}, err
 		}
 		c.Timestamp = now
-		r := model.RNICRates{Device: n.ID}
 		pauseState := m.trackSource(m.pauseSrc, n.ID, pauseFamily, c.PauseSources, c.PauseGap)
 		dropState := m.trackSource(m.dropSrc, n.ID, dropFamily, c.DropSources, c.DropGap)
 		p, ok := m.prev[n.ID]
 		m.prev[n.ID] = c
 		if !ok {
 			ready = false
-			rates = append(rates, r)
+			rates = append(rates, model.RNICRates{Device: n.ID})
 			continue
 		}
-		dt := c.Timestamp.Sub(p.Timestamp).Seconds()
-		if dt <= 0 {
-			dt = m.Cfg.MetricInterval.Seconds()
-			if dt <= 0 {
-				dt = 1
-			}
-		}
-		dRx := counterDelta(c.RxBytes, p.RxBytes)
-		dTx := counterDelta(c.TxBytes, p.TxBytes)
-		// Unidirectional line-rate comparison (NSDI Thplow).
-		peak := dRx
-		if dTx > peak {
-			peak = dTx
-		}
-		r.ThroughputBPS = uint64((float64(peak) * 8) / dt)
+		r, f := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
 		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
 			util[model.PCIeLinkID(n.ID)] = u
 		}
-		// A counter is differenced only against a sample read from the same
-		// sources: one that could not be read, or that reads again after a
-		// gap, yields no ratio or delta on this poll, never one against 0.
-		if pauseState == sourceKnown && p.PauseSources == c.PauseSources {
-			r.PauseKnown = true
-			dPause := counterDelta(c.TxPauseDurationUs, p.TxPauseDurationUs)
-			r.PauseDurationRatio = (float64(dPause) / 1e6) / dt
-			if r.PauseDurationRatio < 0 || math.IsNaN(r.PauseDurationRatio) {
-				r.PauseDurationRatio = 0
-			}
-		}
-		if dropState == sourceKnown && p.DropSources == c.DropSources {
-			r.DropKnown = true
-			r.DropDelta = counterDelta(c.RxDrops, p.RxDrops) + counterDelta(c.TxDrops, p.TxDrops)
+		if r.DropKnown {
 			drops[n.ID] = r.DropDelta
 		}
-		if (!r.PauseKnown && pauseState != sourceNotApplicable) || (!r.DropKnown && dropState != sourceNotApplicable) {
-			// Unread ≠ no pauses and no drops; do not start a full-mesh run.
-			allIdle = false
+		if f.unread {
 			unread = append(unread, n.ID)
 		}
-		if n.LineRate == 0 {
-			// Unknown line rate ≠ idle; do not start a full-mesh run.
-			r.Idle = false
-			allIdle = false
-		} else {
-			thLow := uint64(float64(n.LineRate) * m.Cfg.ThpLowFraction)
-			r.Idle = r.ThroughputBPS < thLow
-			if !r.Idle {
-				allIdle = false
-				busy[n.ID] = true
-			}
-		}
-		if r.PauseDurationRatio > m.Cfg.PFCHigh {
-			pfc = true
-			// A paused RNIC is often below Thplow; it is still loaded (§4.2).
+		if f.busy {
 			busy[n.ID] = true
-			allIdle = false
 		}
-		if r.DropDelta > 0 {
-			sawDrop = true
-			busy[n.ID] = true
-			allIdle = false
-		}
+		host.merge(f)
 		rates = append(rates, r)
 	}
 
@@ -342,42 +279,17 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	gpuIdle := true
-	gpuUnknown := false
-	var busyGPUs []string
-	var modes map[string]string
-	for _, g := range gpus {
-		if g.ComputeMode != "" {
-			if modes == nil {
-				modes = map[string]string{}
-			}
-			modes[g.ID] = g.ComputeMode
-		}
-		if g.Unknown {
-			gpuUnknown = true
-			gpuIdle = false
-			continue
-		}
-		if !g.Idle {
-			gpuIdle = false
-			allIdle = false
-			busyGPUs = append(busyGPUs, g.ID)
-		}
-	}
+	gpuIdle, gpuUnknown, busyGPUs, modes := gpuVerdict(gpus)
 
 	cpu, cpuKnown := m.pollCPU(ctx)
 
-	lineRateKnown := true
-	for _, n := range m.Graph.RNICs {
-		if n.LineRate == 0 {
-			lineRateKnown = false
-			break
-		}
-	}
+	// Every RNIC of a ready poll went through rnicRates, so the flag covers
+	// every line rate; a poll that is not ready knows nothing anyway.
+	lineRateKnown := !host.lineRateUnknown
 	// Unknown CPU load, like an unknown GPU, is not idle: the paths through
 	// a loaded package would be judged against idle baselines.
 	cpuUnknown := ready && !cpuKnown
-	hostIdle := ready && allIdle && gpuIdle && !gpuUnknown && !cpuUnknown
+	hostIdle := ready && host.idle() && gpuIdle && !gpuUnknown && !cpuUnknown
 	idleKnown := ready && !gpuUnknown && lineRateKnown && len(unread) == 0 && !cpuUnknown
 	d := Decision{BusyRNICs: busy, Rates: rates, HostIdle: hostIdle, DropDelta: drops, Ready: ready, IdleKnown: idleKnown, UnreadCounters: unread, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
 	if !ready {
@@ -387,86 +299,254 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if len(util) > 0 {
 		d.Util = util
 	}
-	if m.lastPeriodic.IsZero() {
+	d.Run, d.Trigger, d.Mode = m.cad.decide(now, &m.Cfg, triggerInputs{
+		pfc: host.pfc, drop: host.drop, hostIdle: hostIdle, lineRateKnown: lineRateKnown, alarm: m.MutualAlarm,
+	})
+	return d, nil
+}
+
+// sampleInterval is the seconds between two counter samples of one RNIC, or
+// the metric interval (at least 1 s) when the clock did not move.
+func (m *Monitor) sampleInterval(prev, cur model.RNICCounters) float64 {
+	dt := cur.Timestamp.Sub(prev.Timestamp).Seconds()
+	if dt <= 0 {
+		dt = m.Cfg.MetricInterval.Seconds()
+		if dt <= 0 {
+			dt = 1
+		}
+	}
+	return dt
+}
+
+// rnicFlags is what one RNIC's counter delta says about the host; merged over
+// every RNIC, it is what all of them say.
+type rnicFlags struct {
+	// busy: at or above Thplow, paused above PFCHigh, or dropping (§4.2).
+	busy bool
+	// pfc and drop are the paper's two busy triggers.
+	pfc, drop bool
+	// unread: a PFC pause or drop counter that has a source was not measured
+	// on this poll. Unread ≠ no pauses and no drops.
+	unread bool
+	// lineRateUnknown: the RNIC cannot be classified against Thplow.
+	// Unknown ≠ idle.
+	lineRateUnknown bool
+}
+
+func (f *rnicFlags) merge(o rnicFlags) {
+	f.busy = f.busy || o.busy
+	f.pfc = f.pfc || o.pfc
+	f.drop = f.drop || o.drop
+	f.unread = f.unread || o.unread
+	f.lineRateUnknown = f.lineRateUnknown || o.lineRateUnknown
+}
+
+// idle reports whether nothing the RNICs show keeps the host from an idle
+// run: no load, every counter read, every line rate known.
+func (f rnicFlags) idle() bool { return !f.busy && !f.unread && !f.lineRateUnknown }
+
+// rnicRates is one RNIC's rates over the dt seconds between prev and cur,
+// with the pause and drop counter states trackSource gave this poll, and the
+// verdicts those rates carry. It is pure: it reads no monitor state.
+func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, drop sourceState, thpLowFraction, pfcHigh float64) (model.RNICRates, rnicFlags) {
+	r := model.RNICRates{Device: n.ID}
+	var f rnicFlags
+	dRx := counterDelta(cur.RxBytes, prev.RxBytes)
+	dTx := counterDelta(cur.TxBytes, prev.TxBytes)
+	// Unidirectional line-rate comparison (NSDI Thplow).
+	peak := dRx
+	if dTx > peak {
+		peak = dTx
+	}
+	r.ThroughputBPS = uint64((float64(peak) * 8) / dt)
+	// A counter is differenced only against a sample read from the same
+	// sources: one that could not be read, or that reads again after a
+	// gap, yields no ratio or delta on this poll, never one against 0.
+	if pause == sourceKnown && prev.PauseSources == cur.PauseSources {
+		r.PauseKnown = true
+		dPause := counterDelta(cur.TxPauseDurationUs, prev.TxPauseDurationUs)
+		r.PauseDurationRatio = (float64(dPause) / 1e6) / dt
+		if r.PauseDurationRatio < 0 || math.IsNaN(r.PauseDurationRatio) {
+			r.PauseDurationRatio = 0
+		}
+	}
+	if drop == sourceKnown && prev.DropSources == cur.DropSources {
+		r.DropKnown = true
+		r.DropDelta = counterDelta(cur.RxDrops, prev.RxDrops) + counterDelta(cur.TxDrops, prev.TxDrops)
+	}
+	if (!r.PauseKnown && pause != sourceNotApplicable) || (!r.DropKnown && drop != sourceNotApplicable) {
+		// Unread ≠ no pauses and no drops; do not start a full-mesh run.
+		f.unread = true
+	}
+	if n.LineRate == 0 {
+		// Unknown line rate ≠ idle; do not start a full-mesh run.
+		r.Idle = false
+		f.lineRateUnknown = true
+	} else {
+		thLow := uint64(float64(n.LineRate) * thpLowFraction)
+		r.Idle = r.ThroughputBPS < thLow
+		if !r.Idle {
+			f.busy = true
+		}
+	}
+	if r.PauseDurationRatio > pfcHigh {
+		f.pfc = true
+		// A paused RNIC is often below Thplow; it is still loaded (§4.2).
+		f.busy = true
+	}
+	if r.DropDelta > 0 {
+		f.drop = true
+		f.busy = true
+	}
+	return r, f
+}
+
+// gpuVerdict reads the sampled GPUs: idle is every GPU idle and read; unknown
+// is set when any could not be read; busy lists the busy ones and modes maps
+// the compute mode of each GPU that reported one, both in sampler order.
+func gpuVerdict(gpus []model.GPUStatus) (idle, unknown bool, busy []string, modes map[string]string) {
+	idle = true
+	for _, g := range gpus {
+		if g.ComputeMode != "" {
+			if modes == nil {
+				modes = map[string]string{}
+			}
+			modes[g.ID] = g.ComputeMode
+		}
+		if g.Unknown {
+			unknown = true
+			idle = false
+			continue
+		}
+		if !g.Idle {
+			idle = false
+			busy = append(busy, g.ID)
+		}
+	}
+	return idle, unknown, busy, modes
+}
+
+// cadence is when each trigger last started a run; it decides which trigger,
+// if any, a ready poll starts.
+type cadence struct {
+	lastIdle time.Time
+	lastBusy time.Time
+	// lastPeriodic is the reference for Config.BusyInterval: the last engine
+	// run of any trigger (idle, PFC/drops, periodic, or a MarkRun), or the
+	// first ready poll when none has run yet.
+	lastPeriodic time.Time
+	// periodicBefore is lastPeriodic before the last poll that started a
+	// run, for SkipRun.
+	periodicBefore time.Time
+	lastAlarm      time.Time
+}
+
+// triggerInputs is what a ready poll measured, as the triggers see it.
+type triggerInputs struct {
+	// pfc and drop: a PFC pause ratio above PFCHigh, a drop delta above 0.
+	pfc, drop bool
+	// hostIdle is the Decision's HostIdle.
+	hostIdle bool
+	// lineRateKnown: every RNIC can be classified against Thplow.
+	lineRateKnown bool
+	// alarm is Monitor.MutualAlarm, nil without a mutual probe.
+	alarm func() bool
+}
+
+// markRun is MarkRun: the busy cooldown and the --busy-interval are measured
+// from the end of the run.
+func (c *cadence) markRun(t time.Time) {
+	c.lastBusy = t
+	c.lastPeriodic = t
+}
+
+// skipRun is SkipRun: the --busy-interval keeps counting from the run before.
+func (c *cadence) skipRun() { c.lastPeriodic = c.periodicBefore }
+
+// decide picks the trigger a ready poll at now starts, if any, and records it.
+// The triggers are tried in priority order: PFC/drops, mutual alarm, idle,
+// periodic.
+func (c *cadence) decide(now time.Time, cfg *config.Config, in triggerInputs) (run bool, trig model.Trigger, mode model.RunMode) {
+	if c.lastPeriodic.IsZero() {
 		// The periodic interval starts at the first ready poll, so a daemon
 		// that starts on a loaded host waits one --busy-interval like any
 		// other: the flag bounds probe overhead, it does not ask for a run.
-		m.lastPeriodic = now
+		c.lastPeriodic = now
 	}
-	busyCooled := m.lastBusy.IsZero() || now.Sub(m.lastBusy) >= m.Cfg.BusyCooldown
+	busyCooled := c.lastBusy.IsZero() || now.Sub(c.lastBusy) >= cfg.BusyCooldown
 	switch {
-	case pfc || sawDrop:
+	case in.pfc || in.drop:
 		// Rate-limit: the previous run's probe traffic can keep PFC/drop
 		// counters moving, which would otherwise re-trigger on every poll.
 		if busyCooled {
-			d.Trigger = model.TriggerDrops
-			if pfc {
-				d.Trigger = model.TriggerPFC
+			trig = model.TriggerDrops
+			if in.pfc {
+				trig = model.TriggerPFC
 			}
-			d.Run, d.Mode = true, model.ModeBusy
-			m.lastBusy = now
+			run, mode = true, model.ModeBusy
+			c.lastBusy = now
 		}
-	case m.alarmDue(now, hostIdle, lineRateKnown):
+	case c.alarmDue(now, cfg, in):
 		// ToN'24 §IV-A-2: the mutual probe runs continuously and a pair that
 		// times out above Timeout_th is diagnosed now, not at the next idle
 		// or PFC run. The mode follows the host as for any other trigger.
-		d.Run, d.Trigger, d.Mode = true, model.TriggerMutualTimeout, model.ModeIdle
-		if !hostIdle {
-			d.Mode = model.ModeBusy
+		run, trig, mode = true, model.TriggerMutualTimeout, model.ModeIdle
+		if !in.hostIdle {
+			mode = model.ModeBusy
 		}
-		m.lastAlarm = now
-		m.lastBusy = now
-	case hostIdle && (m.lastIdle.IsZero() || now.Sub(m.lastIdle) >= m.Cfg.IdleInterval):
-		d.Run, d.Trigger, d.Mode = true, model.TriggerIdle, model.ModeIdle
-		m.lastIdle = now
-	case m.periodicDue(now, hostIdle, lineRateKnown) && busyCooled:
+		c.lastAlarm = now
+		c.lastBusy = now
+	case in.hostIdle && (c.lastIdle.IsZero() || now.Sub(c.lastIdle) >= cfg.IdleInterval):
+		run, trig, mode = true, model.TriggerIdle, model.ModeIdle
+		c.lastIdle = now
+	case c.periodicDue(now, cfg, in) && busyCooled:
 		// Extension beyond NSDI'23 §4.2: a loaded host whose bottleneck does
 		// not overflow the RNIC receive buffer never raises PFC or drops, and
 		// is never idle, so neither paper trigger would measure it. Busy mode
 		// keeps the probe set to the §4.3 reduced one on the RNICs classified
 		// above (ThroughputBPS ≥ Thp_low), the same set a manual diagnose uses.
-		d.Run, d.Trigger, d.Mode = true, model.TriggerPeriodic, model.ModeBusy
-		m.lastBusy = now
+		run, trig, mode = true, model.TriggerPeriodic, model.ModeBusy
+		c.lastBusy = now
 	}
-	if d.Run {
+	if run {
 		// Any run just measured the host, so the periodic interval restarts:
 		// --busy-interval only fills the gaps the other triggers leave.
-		m.periodicBefore = m.lastPeriodic
-		m.lastPeriodic = now
+		c.periodicBefore = c.lastPeriodic
+		c.lastPeriodic = now
 	}
-	return d, nil
+	return run, trig, mode
 }
 
 // alarmDue reports whether the mutual probe asks for a run now. Each alarm run
 // is at least one MutualWindow after the last, so one bad window is diagnosed
 // once rather than on every poll, and never inside BusyCooldown. A busy-mode
 // alarm run needs every line rate, for the same reason as periodicDue.
-func (m *Monitor) alarmDue(now time.Time, hostIdle, lineRateKnown bool) bool {
-	if m.MutualAlarm == nil || (!hostIdle && !lineRateKnown) {
+func (c *cadence) alarmDue(now time.Time, cfg *config.Config, in triggerInputs) bool {
+	if in.alarm == nil || (!in.hostIdle && !in.lineRateKnown) {
 		return false
 	}
-	gap := m.Cfg.MutualWindow
-	if m.Cfg.BusyCooldown > gap {
-		gap = m.Cfg.BusyCooldown
+	gap := cfg.MutualWindow
+	if cfg.BusyCooldown > gap {
+		gap = cfg.BusyCooldown
 	}
-	if !m.lastAlarm.IsZero() && now.Sub(m.lastAlarm) < gap {
+	if !c.lastAlarm.IsZero() && now.Sub(c.lastAlarm) < gap {
 		return false
 	}
-	if !m.lastBusy.IsZero() && now.Sub(m.lastBusy) < m.Cfg.BusyCooldown {
+	if !c.lastBusy.IsZero() && now.Sub(c.lastBusy) < cfg.BusyCooldown {
 		return false
 	}
-	return m.MutualAlarm()
+	return in.alarm()
 }
 
 // periodicDue reports whether --busy-interval asks for a busy run now. It is
 // off by default, never fires on an idle host (the idle run covers it), and
 // needs every line rate: without one the busy RNIC set cannot be classified,
 // and an unclassified loaded RNIC would be judged against the idle baseline.
-func (m *Monitor) periodicDue(now time.Time, hostIdle, lineRateKnown bool) bool {
-	if m.Cfg.BusyInterval <= 0 || hostIdle || !lineRateKnown {
+func (c *cadence) periodicDue(now time.Time, cfg *config.Config, in triggerInputs) bool {
+	if cfg.BusyInterval <= 0 || in.hostIdle || !in.lineRateKnown {
 		return false
 	}
-	return now.Sub(m.lastPeriodic) >= m.Cfg.BusyInterval
+	return now.Sub(c.lastPeriodic) >= cfg.BusyInterval
 }
 
 // counterDelta is wrap-safe for 64-bit and 32-bit sysfs counters.

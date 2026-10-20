@@ -499,16 +499,26 @@ func synthesizeDiscoveredLinks(sysroot string, g Graph, rnicCh, gpuCh map[string
 }
 
 func synthesizeDiscoveredPaths(g Graph, rnicCh, gpuCh map[string]pciChain) []model.Path {
+	return enumeratePaths(g, rnicCh, gpuCh, upiID)
+}
+
+// upiNamer names the UPI link between two sockets. Discovery uses upiID;
+// Fig2 keeps its single link's historical name.
+type upiNamer func(a, b int) string
+
+// enumeratePaths builds one path per RNIC × endpoint, in that order, from
+// the devices' PCI chains (a memory endpoint has none).
+func enumeratePaths(g Graph, rnicCh, gpuCh map[string]pciChain, upi upiNamer) []model.Path {
 	var paths []model.Path
 	for _, n := range g.RNICs {
 		for _, e := range g.Endpoints {
-			paths = append(paths, pathRNICToEndpoint(n, e, rnicCh[n.ID], gpuCh[e.ID]))
+			paths = append(paths, pathRNICToEndpoint(n, e, rnicCh[n.ID], gpuCh[e.ID], upi))
 		}
 	}
 	return paths
 }
 
-func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.Path {
+func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain, upi upiNamer) model.Path {
 	p := model.Path{RNIC: n.ID, Endpoint: e.ID, LinkIDs: []string{model.PCIeLinkID(n.ID)}}
 	// Climbing away from the RNIC visits its switches device-near first.
 	up := reverse(rc.Switches)
@@ -550,7 +560,7 @@ func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.P
 		default:
 			p.Distance = model.DistanceCrossSocket
 			p.LinkIDs = append(p.LinkIDs, up...)
-			p.LinkIDs = append(p.LinkIDs, n.RootPort, upiID(n.Socket, e.Socket), e.RootPort)
+			p.LinkIDs = append(p.LinkIDs, n.RootPort, upi(n.Socket, e.Socket), e.RootPort)
 			p.LinkIDs = append(p.LinkIDs, ec.Switches...)
 			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
 		}
@@ -568,7 +578,7 @@ func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.P
 			p.LinkIDs = append(p.LinkIDs, n.RootPort, meshID(n.NUMA, e.NUMA), mem)
 		default:
 			p.Distance = model.DistanceRemoteMem
-			p.LinkIDs = append(p.LinkIDs, n.RootPort, upiID(n.Socket, e.Socket), mem)
+			p.LinkIDs = append(p.LinkIDs, n.RootPort, upi(n.Socket, e.Socket), mem)
 		}
 	}
 	return p
