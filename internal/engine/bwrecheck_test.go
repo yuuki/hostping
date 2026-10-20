@@ -14,45 +14,6 @@ import (
 	"github.com/yuuki/hostping/internal/topology"
 )
 
-// bwWindowProber reads every path from the simulator and scales its bandwidth
-// by scale(rnic, ep, n), where n counts the path's reads in the run so far (0
-// is the sweep, 1 and up the rechecks). fail, when set, may fail a read
-// instead.
-type bwWindowProber struct {
-	SimProber
-	scale func(rnic, ep string, n int) float64
-	fail  func(rnic, ep string, n int) error
-	calls map[string]int
-}
-
-func newBWWindowProber(w *sim.World, scale func(rnic, ep string, n int) float64) *bwWindowProber {
-	return &bwWindowProber{SimProber: SimProber{World: w}, scale: scale, calls: map[string]int{}}
-}
-
-func (p *bwWindowProber) Loopback(ctx context.Context, rnic model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	key := rnic.ID + "->" + ep.ID
-	n := p.calls[key]
-	p.calls[key] = n + 1
-	if p.fail != nil {
-		if err := p.fail(rnic.ID, ep.ID, n); err != nil {
-			return model.PathMeasurement{}, err
-		}
-	}
-	m, err := p.SimProber.Loopback(ctx, rnic, ep, small, large)
-	if err == nil && p.scale != nil {
-		m.BandwidthBPS = uint64(float64(m.BandwidthBPS) * p.scale(rnic.ID, ep.ID, n))
-	}
-	return m, err
-}
-
-func (p *bwWindowProber) total() int {
-	t := 0
-	for _, n := range p.calls {
-		t += n
-	}
-	return t
-}
-
 // windowDrop is the share of its level a memory path keeps in a slow window:
 // well past --abnormal-th.
 const windowDrop = 0.6
@@ -84,20 +45,19 @@ func idleSweep(g topology.Graph) int {
 	return n
 }
 
+// runBW runs a fresh one-shot engine once, as hostpingctl diagnose does, and
+// returns its report and log lines.
 func runBW(t *testing.T, g topology.Graph, p Prober, req RunRequest) (model.Report, []string) {
 	t.Helper()
 	e := New(config.Defaults(), g, p)
-	var logs []string
-	e.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	var sink logSink
+	e.Logf = sink.logf
 	e.OneShot = true
 	if req.Mode == "" {
 		req.Mode = model.ModeIdle
 	}
-	rep, err := e.Run(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep, logs
+	rep := runWith(t, e, req)
+	return rep, sink.lines
 }
 
 // sweepCauses is what the analyzer reports from the sweep's readings alone,
@@ -145,7 +105,7 @@ func TestBWRecheckClearsSlowWindow(t *testing.T) {
 			t.Errorf("%s->%s still abnormal", m.RNIC, m.Endpoint)
 		}
 	}
-	got := pathStatus(t, rep, "rnic0", "mem0")
+	got := pathOf(t, rep, "rnic0", "mem0")
 	r := got.BWRecheck
 	if got.Status != model.PathNormal || r == nil || r.Outcome != model.BWRecheckCleared {
 		t.Fatalf("rnic0->mem0 = %+v recheck %+v, want normal and cleared", got, r)
@@ -158,7 +118,7 @@ func TestBWRecheckClearsSlowWindow(t *testing.T) {
 		t.Errorf("recheck medians missing: %+v", r)
 	}
 	// The remote-memory group has its own recheck, against remote memory.
-	if rr := pathStatus(t, rep, "rnic0", "mem1").BWRecheck; rr == nil || rr.Path != "rnic0->mem1" || strings.Join(rr.Refs, ",") != "rnic2->mem0,rnic3->mem0" {
+	if rr := pathOf(t, rep, "rnic0", "mem1").BWRecheck; rr == nil || rr.Path != "rnic0->mem1" || strings.Join(rr.Refs, ",") != "rnic2->mem0,rnic3->mem0" {
 		t.Errorf("rnic0->mem1 recheck = %+v, want its own against remote memory", rr)
 	}
 	// Four groups (two RNICs × local and remote memory), each re-reading its
@@ -191,7 +151,7 @@ func TestBWRecheckHostShift(t *testing.T) {
 	rep, _ := runBW(t, g, p, RunRequest{Mode: model.ModeIdle})
 	for _, rnic := range []string{"rnic0", "rnic1"} {
 		for _, ep := range []string{"mem0", "mem1"} {
-			got := pathStatus(t, rep, rnic, ep)
+			got := pathOf(t, rep, rnic, ep)
 			if got.Status != model.PathUncertain || got.UncertainReason != model.UncertainHostShift || got.BWRecheck == nil || got.BWRecheck.Outcome != model.BWRecheckHostShift {
 				t.Errorf("%s->%s = %+v recheck %+v, want uncertain/host_shift", rnic, ep, got, got.BWRecheck)
 			}
@@ -209,7 +169,7 @@ func TestBWRecheckConfirmsDegradedRootPort(t *testing.T) {
 	g := topology.Fig2()
 	p := newBWWindowProber(sim.New(g), memWindow(func(int) bool { return true }, "rnic0"))
 	rep, _ := runBW(t, g, p, RunRequest{Mode: model.ModeIdle})
-	got := pathStatus(t, rep, "rnic0", "mem0")
+	got := pathOf(t, rep, "rnic0", "mem0")
 	if got.Status != model.PathAbnormal || got.BWRecheck == nil || got.BWRecheck.Outcome != model.BWRecheckConfirmed {
 		t.Fatalf("rnic0->mem0 = %+v recheck %+v, want abnormal and confirmed", got, got.BWRecheck)
 	}
@@ -237,7 +197,7 @@ func TestBWRecheckBusyRunUnloadedRNICs(t *testing.T) {
 	if sc := sweepCauses(g, rep, req); len(sc) == 0 {
 		t.Fatal("precondition: the sweep alone should report a cause")
 	}
-	got := pathStatus(t, rep, "rnic0", "mem0")
+	got := pathOf(t, rep, "rnic0", "mem0")
 	r := got.BWRecheck
 	if got.Status != model.PathNormal || r == nil || r.Outcome != model.BWRecheckCleared {
 		t.Fatalf("rnic0->mem0 = %+v recheck %+v, want normal and cleared", got, r)
@@ -281,8 +241,8 @@ func TestBWRecheckCap(t *testing.T) {
 		t.Fatalf("cleared %d kept %d, want %d and %d", cleared, kept, analyzer.BWRecheckMaxGroups, flagged-analyzer.BWRecheckMaxGroups)
 	}
 	// One reference (the only unflagged RNIC) per group.
-	if want := len(g.Paths) + analyzer.BWRecheckMaxGroups*analyzer.BWRecheckRounds*2; totalCalls(p) != want {
-		t.Errorf("%d loopback probes, want %d", totalCalls(p), want)
+	if want := len(g.Paths) + analyzer.BWRecheckMaxGroups*analyzer.BWRecheckRounds*2; p.total() != want {
+		t.Errorf("%d loopback probes, want %d", p.total(), want)
 	}
 }
 
@@ -298,7 +258,7 @@ func TestBWRecheckProbeErrorKeepsVerdict(t *testing.T) {
 		return nil
 	}
 	rep, logs := runBW(t, g, p, RunRequest{Mode: model.ModeIdle})
-	got := pathStatus(t, rep, "rnic0", "mem0")
+	got := pathOf(t, rep, "rnic0", "mem0")
 	if got.Status != model.PathAbnormal || got.BWRecheck != nil {
 		t.Fatalf("rnic0->mem0 = %+v, want the sweep's abnormal verdict and no recheck", got)
 	}
@@ -306,7 +266,7 @@ func TestBWRecheckProbeErrorKeepsVerdict(t *testing.T) {
 		t.Errorf("abandonment not logged: %q", logs)
 	}
 	// The other group of the RNIC was rechecked and cleared.
-	if r := pathStatus(t, rep, "rnic0", "mem1").BWRecheck; r == nil || r.Outcome != model.BWRecheckCleared {
+	if r := pathOf(t, rep, "rnic0", "mem1").BWRecheck; r == nil || r.Outcome != model.BWRecheckCleared {
 		t.Errorf("rnic0->mem1 recheck = %+v, want cleared", r)
 	}
 }
@@ -326,8 +286,7 @@ func TestBWRecheckHonoursCancel(t *testing.T) {
 		}
 		return nil
 	}
-	e := New(config.Defaults(), g, inner)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, inner)
 	_, err := e.Run(ctx, RunRequest{Mode: model.ModeIdle})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
@@ -342,20 +301,16 @@ func TestBWRecheckHonoursCancel(t *testing.T) {
 func TestBWRecheckSkipped(t *testing.T) {
 	g := topology.Fig2()
 	p := newBWWindowProber(sim.New(g), memWindow(sweepOnly, "rnic0"))
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 	e.SkipBWRecheck = true
 	e.SkipLatencyRecheck = true
-	rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 	for k, n := range p.calls {
 		if n != 1 {
 			t.Errorf("%s read %d times with the recheck skipped, want once", k, n)
 		}
 	}
-	if got := pathStatus(t, rep, "rnic0", "mem0"); got.Status != model.PathAbnormal || got.BWRecheck != nil {
+	if got := pathOf(t, rep, "rnic0", "mem0"); got.Status != model.PathAbnormal || got.BWRecheck != nil {
 		t.Errorf("rnic0->mem0 = %+v, want the sweep's abnormal verdict", got)
 	}
 }

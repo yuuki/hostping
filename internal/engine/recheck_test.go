@@ -16,45 +16,6 @@ import (
 	"github.com/yuuki/hostping/internal/topology"
 )
 
-// windowProber reads every path from the simulator and adds bump(rnic, ep, n)
-// to its small-message latency, where n counts the path's reads in the run so
-// far (0 is the sweep, 1 and up the recheck). fail, when set, may fail a read
-// instead.
-type windowProber struct {
-	SimProber
-	bump  func(rnic, ep string, n int) uint64
-	fail  func(rnic, ep string, n int) error
-	calls map[string]int
-}
-
-func newWindowProber(g topology.Graph, bump func(rnic, ep string, n int) uint64) *windowProber {
-	return &windowProber{SimProber: SimProber{World: sim.New(g)}, bump: bump, calls: map[string]int{}}
-}
-
-func (p *windowProber) Loopback(ctx context.Context, rnic model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	key := rnic.ID + "->" + ep.ID
-	n := p.calls[key]
-	p.calls[key] = n + 1
-	if p.fail != nil {
-		if err := p.fail(rnic.ID, ep.ID, n); err != nil {
-			return model.PathMeasurement{}, err
-		}
-	}
-	m, err := p.SimProber.Loopback(ctx, rnic, ep, small, large)
-	if err == nil && p.bump != nil {
-		m.SmallLatNsP50 += p.bump(rnic.ID, ep.ID, n)
-	}
-	return m, err
-}
-
-func (p *windowProber) total() int {
-	t := 0
-	for _, n := range p.calls {
-		t += n
-	}
-	return t
-}
-
 // slowBump is a latency rise well past --abnormal-th and the sibling floor.
 const slowBump = 2000
 
@@ -76,18 +37,13 @@ func firstReadSlow(rnics ...string) func(string, string, int) uint64 {
 func runEngine(t *testing.T, cfg config.Config, g topology.Graph, p Prober, mode model.RunMode, skip bool) model.Report {
 	t.Helper()
 	e := New(cfg, g, p)
-	e.Logf = func(string, ...any) {}
 	e.SkipLatencyRecheck = skip
 	e.OneShot = true
 	req := RunRequest{Mode: mode}
 	if mode == model.ModeBusy {
 		req.BusyRNICs = map[string]bool{"rnic1": true}
 	}
-	rep, err := e.Run(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep
+	return runWith(t, e, req)
 }
 
 func latencyCausesOf(rep model.Report) []model.RootCause {
@@ -364,8 +320,7 @@ func TestLatencyRecheckHonoursCancel(t *testing.T) {
 		}
 		return nil
 	}
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 	reread := 0
 	_, err := e.Run(ctx, RunRequest{Mode: model.ModeIdle})
 	if !errors.Is(err, context.Canceled) {
@@ -396,19 +351,14 @@ func TestLatencyStreakAcrossDaemonRuns(t *testing.T) {
 		}
 		return 0
 	})
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 	run := func(mode model.RunMode) model.Report {
 		t.Helper()
 		req := RunRequest{Mode: mode}
 		if mode == model.ModeBusy {
 			req.BusyRNICs = map[string]bool{"rnic1": true}
 		}
-		rep, err := e.Run(context.Background(), req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return rep
+		return runWith(t, e, req)
 	}
 
 	first := run(model.ModeIdle)
@@ -473,7 +423,7 @@ func TestRestoreStreaksPrunesUnknownPaths(t *testing.T) {
 // daemon run: the prober's read counts restart, so read 0 is that run's sweep.
 func sweepSlow(p *windowProber, slow func(rnic, ep string, n int) uint64) func() {
 	p.bump = slow
-	return func() { p.calls = map[string]int{} }
+	return p.reset
 }
 
 // Two RNICs fall into a slow window on every run, flagging more
@@ -486,17 +436,13 @@ func TestLatencyRecheckCapRotatesAcrossDaemonRuns(t *testing.T) {
 	g := topology.Fig2()
 	p := newWindowProber(g, nil)
 	reset := sweepSlow(p, firstReadSlow("rnic0", "rnic2"))
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 
 	rechecked := map[string]bool{}
 	flagged := map[string]bool{}
 	for run := range 4 {
 		reset()
-		rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-		if err != nil {
-			t.Fatal(err)
-		}
+		rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 		if lc := latencyCausesOf(rep); len(lc) != 0 {
 			t.Fatalf("run %d reported %+v from a slow window", run, lc)
 		}
@@ -550,17 +496,13 @@ func TestLatencyRecheckCapReportsPersistentFault(t *testing.T) {
 		}
 		return b
 	})
-	e := New(config.Defaults(), g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(config.Defaults(), g, p)
 
 	reportedAt, cappedSeen, heldChecked := -1, false, false
 	for run := range 6 {
 		prev := e.Latency[key]
 		reset()
-		rep, err := e.Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-		if err != nil {
-			t.Fatal(err)
-		}
+		rep := runWith(t, e, RunRequest{Mode: model.ModeIdle})
 		m := pathOf(t, rep, "rnic2", fault)
 		named := false
 		for _, c := range latencyCausesOf(rep) {

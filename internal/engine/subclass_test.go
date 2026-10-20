@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,31 +12,6 @@ import (
 	"github.com/yuuki/hostping/internal/sim"
 	"github.com/yuuki/hostping/internal/topology"
 )
-
-// degradeProber reads one path at a fixed bandwidth and every other path
-// from the simulator: a transit fault that touches that path alone.
-type degradeProber struct {
-	SimProber
-	rnic, ep string
-	bps      uint64
-}
-
-func (p degradeProber) Loopback(ctx context.Context, rnic model.RNIC, ep model.Endpoint, small, large uint32) (model.PathMeasurement, error) {
-	m, err := p.SimProber.Loopback(ctx, rnic, ep, small, large)
-	if err == nil && rnic.ID == p.rnic && ep.ID == p.ep {
-		m.BandwidthBPS = p.bps
-	}
-	return m, err
-}
-
-func runIdle(t *testing.T, cfg config.Config, g topology.Graph, p Prober) model.Report {
-	t.Helper()
-	rep, err := New(cfg, g, p).Run(context.Background(), RunRequest{Mode: model.ModeIdle})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep
-}
 
 // A two-level distance end to end in the simulator: Fig.2 with the P2P route between
 // rp.0 and rp.1 at full rate, so cross_root reads at two levels. Calibrate
@@ -97,7 +71,7 @@ func TestSubClassCalibrateThenDiagnose(t *testing.T) {
 	}
 
 	// One fast path falls to the slow level: the blind spot of one baseline per distance.
-	deg := degradeProber{SimProber: SimProber{World: w}, rnic: "rnic0", ep: "gpu2", bps: slow}
+	deg := degradeProber(w, "rnic0", "gpu2", slow)
 	noFile := config.Defaults()
 	if m := pathOf(t, runIdle(t, noFile, g, deg), "rnic0", "gpu2"); m.Status == model.PathAbnormal {
 		t.Fatalf("precondition: without the sub-class the path should hide at the slow level, got %+v", m)
@@ -123,15 +97,4 @@ func TestSubClassCalibrateThenDiagnose(t *testing.T) {
 			t.Errorf("%s->%s = %+v, want abnormal bandwidth and latency", ep.rnic, ep.ep, m)
 		}
 	}
-}
-
-func pathOf(t *testing.T, rep model.Report, rnic, ep string) model.PathMeasurement {
-	t.Helper()
-	for _, m := range rep.Paths {
-		if m.RNIC == rnic && m.Endpoint == ep {
-			return m
-		}
-	}
-	t.Fatalf("no path %s->%s", rnic, ep)
-	return model.PathMeasurement{}
 }

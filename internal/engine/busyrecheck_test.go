@@ -48,11 +48,13 @@ func lowSweep(cfg config.Config) []uint64 {
 	return append(out, busyFlat)
 }
 
+// runBusyOn runs a fresh engine once with every RNIC of g loaded in busy
+// mode, and returns its report and log lines.
 func runBusyOn(t *testing.T, g topology.Graph, cfg config.Config, p Prober, mode model.RunMode) (model.Report, []string) {
 	t.Helper()
 	e := New(cfg, g, p)
-	var logs []string
-	e.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	var sink logSink
+	e.Logf = sink.logf
 	req := RunRequest{Mode: mode}
 	if mode == model.ModeBusy {
 		req.BusyRNICs = map[string]bool{}
@@ -60,11 +62,8 @@ func runBusyOn(t *testing.T, g topology.Graph, cfg config.Config, p Prober, mode
 			req.BusyRNICs[n.ID] = true
 		}
 	}
-	rep, err := e.Run(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return rep, logs
+	rep := runWith(t, e, req)
+	return rep, sink.lines
 }
 
 // One path's sweep readings land in the low tail on a healthy
@@ -84,7 +83,7 @@ func TestBusyRecheckClearsNoisySweep(t *testing.T) {
 		t.Fatalf("precondition: the sweep should flag rnic0->mem2: %+v", m)
 	}
 
-	got := pathStatus(t, rep, "rnic0", "mem2")
+	got := pathOf(t, rep, "rnic0", "mem2")
 	r := got.BusyRecheck
 	if got.Status != model.PathUncertain || got.UncertainReason != model.UncertainRNICBusy || r == nil || r.Confirmed {
 		t.Fatalf("rnic0->mem2 = %+v recheck %+v, want uncertain/rnic_busy and a cleared recheck", got, r)
@@ -131,7 +130,7 @@ func TestBusyRecheckConfirmsDegradedPath(t *testing.T) {
 	cfg := config.Defaults()
 	p := &seqProber{flat: busyFlat, bw: map[string][]uint64{"rnic0->mem2": {busyLow}}}
 	rep, _ := runBusyOn(t, g, cfg, p, model.ModeBusy)
-	got := pathStatus(t, rep, "rnic0", "mem2")
+	got := pathOf(t, rep, "rnic0", "mem2")
 	if got.Status != model.PathAbnormal || got.BusyRecheck == nil || !got.BusyRecheck.Confirmed {
 		t.Fatalf("rnic0->mem2 = %+v recheck %+v, want abnormal and confirmed", got, got.BusyRecheck)
 	}
@@ -158,7 +157,7 @@ func TestBusyRecheckClearsPairFlaggedByHighSibling(t *testing.T) {
 	p := &seqProber{flat: busyFlat, bw: map[string][]uint64{"rnic0->mem1": high}}
 	rep, _ := runBusyOn(t, g, cfg, p, model.ModeBusy)
 	for _, ep := range []string{"mem2", "mem3"} {
-		got := pathStatus(t, rep, "rnic0", ep)
+		got := pathOf(t, rep, "rnic0", ep)
 		if got.Status != model.PathUncertain || got.BusyRecheck == nil || got.BusyRecheck.Confirmed {
 			t.Errorf("rnic0->%s = %+v recheck %+v, want rechecked and cleared", ep, got, got.BusyRecheck)
 		}
@@ -177,12 +176,12 @@ func TestBusyRecheckConfirmsTwoOfThreeDegraded(t *testing.T) {
 	p := &seqProber{flat: busyFlat, bw: map[string][]uint64{"rnic0->mem2": {low}, "rnic0->mem3": {low}}}
 	rep, _ := runBusyOn(t, g, cfg, p, model.ModeBusy)
 	for _, ep := range []string{"mem2", "mem3"} {
-		got := pathStatus(t, rep, "rnic0", ep)
+		got := pathOf(t, rep, "rnic0", ep)
 		if got.Status != model.PathAbnormal || got.BusyRecheck == nil || !got.BusyRecheck.Confirmed {
 			t.Errorf("rnic0->%s = %+v recheck %+v, want abnormal and confirmed", ep, got, got.BusyRecheck)
 		}
 	}
-	if got := pathStatus(t, rep, "rnic0", "mem1"); got.Status == model.PathAbnormal {
+	if got := pathOf(t, rep, "rnic0", "mem1"); got.Status == model.PathAbnormal {
 		t.Errorf("the healthy path was flagged: %+v", got)
 	}
 }
@@ -213,7 +212,7 @@ func TestBusyRecheckCap(t *testing.T) {
 	sweep := len(g.Paths) * busySampleCount(cfg)
 	// Each rechecked path reads itself and its two siblings once per round.
 	want := sweep + analyzer.BusyRecheckMaxPaths*analyzer.BusyRecheckRounds*3
-	if got := totalCalls(p); got != want {
+	if got := p.total(); got != want {
 		t.Errorf("%d loopback probes, want %d", got, want)
 	}
 }
@@ -229,29 +228,13 @@ func TestBusyRecheckProbeErrorKeepsVerdict(t *testing.T) {
 		loopErr: map[string]error{"rnic0->mem2": fmt.Errorf("%w: setup failed", model.ErrProbe)},
 	}
 	rep, logs := runBusyOn(t, g, cfg, p, model.ModeBusy)
-	got := pathStatus(t, rep, "rnic0", "mem2")
+	got := pathOf(t, rep, "rnic0", "mem2")
 	if got.Status != model.PathAbnormal || got.BusyRecheck != nil {
 		t.Fatalf("rnic0->mem2 = %+v, want the sweep's abnormal verdict and no recheck", got)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "busy recheck of rnic0->mem2 abandoned") {
 		t.Errorf("abandonment not logged: %q", logs)
 	}
-}
-
-// cancelOnRecheck cancels the run's context on the first recheck read.
-type cancelOnRecheck struct {
-	*seqProber
-	after  int
-	cancel context.CancelFunc
-	n      int
-}
-
-func (c *cancelOnRecheck) Loopback(ctx context.Context, n model.RNIC, ep model.Endpoint, s, l uint32) (model.PathMeasurement, error) {
-	c.n++
-	if c.n == c.after {
-		c.cancel()
-	}
-	return c.seqProber.Loopback(ctx, n, ep, s, l)
 }
 
 // Cancelling the run during the recheck ends the run with the context error.
@@ -261,13 +244,13 @@ func TestBusyRecheckHonoursCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sweep := len(g.Paths) * busySampleCount(cfg)
-	p := &cancelOnRecheck{
-		seqProber: &seqProber{flat: busyFlat, bw: map[string][]uint64{"rnic0->mem2": lowSweep(cfg)}},
-		after:     sweep + 1,
-		cancel:    cancel,
+	// Cancel on the first recheck read.
+	p := &cancelAfter{
+		Prober: &seqProber{flat: busyFlat, bw: map[string][]uint64{"rnic0->mem2": lowSweep(cfg)}},
+		after:  sweep + 1,
+		cancel: cancel,
 	}
-	e := New(cfg, g, p)
-	e.Logf = func(string, ...any) {}
+	e := quietEngine(cfg, g, p)
 	_, err := e.Run(ctx, RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{"rnic0": true}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
@@ -303,12 +286,4 @@ func findPath(ms []model.PathMeasurement, rnic, ep string) model.PathMeasurement
 		}
 	}
 	return model.PathMeasurement{}
-}
-
-func totalCalls(p *seqProber) int {
-	t := 0
-	for _, n := range p.calls {
-		t += n
-	}
-	return t
 }

@@ -26,14 +26,14 @@ func (p *blockingProber) Loopback(_ context.Context, n model.RNIC, ep model.Endp
 	p.loops.Add(1)
 	time.Sleep(p.block)
 	p.onRun()
-	return model.PathMeasurement{RNIC: n.ID, Endpoint: ep.ID, BandwidthBPS: 197_000_000_000, SmallLatNsP50: 1000}, nil
+	return flatMeasurement(n, ep), nil
 }
 
 func (p *blockingProber) Mutual(_ context.Context, src, dst model.RNIC) (model.MutualMeasurement, error) {
 	p.muts.Add(1)
 	time.Sleep(p.block)
 	p.onRun()
-	return model.MutualMeasurement{Src: src.ID, Dst: dst.ID, Connected: true}, nil
+	return connected(src, dst), nil
 }
 
 func TestEngineAbortsLoopbackLoopOnCancel(t *testing.T) {

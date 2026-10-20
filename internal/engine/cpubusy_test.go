@@ -54,7 +54,7 @@ func TestCPUBusySocketIsNotARootPortFailure(t *testing.T) {
 
 	// Without the CPU load the drops are confirmed and paged.
 	rep, _ := runBW(t, g, newBWWindowProber(sim.New(g), scale), RunRequest{Mode: model.ModeIdle})
-	if !reportHas(rep, model.CauseCPURootPortFailure) {
+	if !hasCause(rep, model.CauseCPURootPortFailure) {
 		t.Fatalf("the reproduction raised no %s without CPU load: %+v", model.CauseCPURootPortFailure, rep.Causes)
 	}
 
@@ -77,10 +77,10 @@ func TestCPUBusySocketIsNotARootPortFailure(t *testing.T) {
 			t.Errorf("%s->%s latency abnormal through a loaded package", p.RNIC, p.Endpoint)
 		}
 	}
-	if got := pathStatus(t, rep, "rnic2", "mem1"); got.Status != model.PathUncertain || got.UncertainReason != model.UncertainCPUBusy {
+	if got := pathOf(t, rep, "rnic2", "mem1"); got.Status != model.PathUncertain || got.UncertainReason != model.UncertainCPUBusy {
 		t.Errorf("rnic2->mem1 = %+v, want uncertain/cpu_busy", got)
 	}
-	if got := pathStatus(t, rep, "rnic0", "mem0"); got.Status != model.PathNormal {
+	if got := pathOf(t, rep, "rnic0", "mem0"); got.Status != model.PathNormal {
 		t.Errorf("rnic0->mem0 does not transit the loaded package: %+v, want normal", got)
 	}
 	if len(rep.CPULoad) != 2 || !rep.CPULoad[1].High {
@@ -94,22 +94,13 @@ func TestCPUBusyOtherSocketKeepsRootPortFailure(t *testing.T) {
 	g := topology.Fig2()
 	p := newBWWindowProber(sim.New(g), memWindow(func(int) bool { return true }, "rnic0"))
 	rep, _ := runBW(t, g, p, RunRequest{Mode: model.ModeIdle, CPULoad: cpuLoad(g, 1)})
-	if got := pathStatus(t, rep, "rnic0", "mem0"); got.Status != model.PathAbnormal {
+	if got := pathOf(t, rep, "rnic0", "mem0"); got.Status != model.PathAbnormal {
 		t.Fatalf("rnic0->mem0 = %+v, want abnormal", got)
 	}
-	if got := pathStatus(t, rep, "rnic0", "mem1"); got.Status != model.PathUncertain || got.UncertainReason != model.UncertainCPUBusy {
+	if got := pathOf(t, rep, "rnic0", "mem1"); got.Status != model.PathUncertain || got.UncertainReason != model.UncertainCPUBusy {
 		t.Errorf("rnic0->mem1 crosses into the loaded package: %+v, want uncertain/cpu_busy", got)
 	}
-	if !reportHas(rep, model.CauseCPURootPortFailure) {
+	if !hasCause(rep, model.CauseCPURootPortFailure) {
 		t.Fatalf("a real drop on an unloaded package raised no %s: %+v", model.CauseCPURootPortFailure, rep.Causes)
 	}
-}
-
-func reportHas(rep model.Report, code string) bool {
-	for _, c := range rep.Causes {
-		if c.Code == code {
-			return true
-		}
-	}
-	return false
 }
