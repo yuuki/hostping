@@ -21,6 +21,11 @@ func newFakeClock() *fakeClock {
 
 const smiOut = "00000000:17:00.0, 42\n00000000:65:00.0, 3\n"
 
+// get is the utilization half of sample, which is all these tests look at.
+func (c *gpuUtilCache) get(ctx context.Context, every time.Duration) map[string]float64 {
+	return c.sample(ctx, every).util
+}
+
 func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
 	clk := newFakeClock()
 	calls := 0

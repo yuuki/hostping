@@ -570,8 +570,8 @@ func assertSwitchHopsAssumed(t *testing.T, g Graph) {
 	}
 	for _, id := range ids {
 		l, _ := g.Link(id)
-		if l.CapacityBPS != discoverPCIeCap || !l.CapacityAssumed || l.NegotiatedBPS != 0 {
-			t.Errorf("%s: capacity %d assumed %v negotiated %d, want %d assumed with none", id, l.CapacityBPS, l.CapacityAssumed, l.NegotiatedBPS, discoverPCIeCap)
+		if l.CapacityBPS != pcieGen4x16 || !l.CapacityAssumed || l.NegotiatedBPS != 0 {
+			t.Errorf("%s: capacity %d assumed %v negotiated %d, want %d assumed with none", id, l.CapacityBPS, l.CapacityAssumed, l.NegotiatedBPS, pcieGen4x16)
 		}
 	}
 }
@@ -581,8 +581,8 @@ func assertSwitchHopsAssumed(t *testing.T, g Graph) {
 // hop claims a negotiated rate above its capacity.
 func assertLocalMemCeiling(t *testing.T, g Graph) {
 	t.Helper()
-	if discoverPCIeCap != baseline.Fig4BusBPS {
-		t.Fatalf("discoverPCIeCap %d drifted from the Fig.4 bus %d", discoverPCIeCap, baseline.Fig4BusBPS)
+	if pcieGen4x16 != baseline.Fig4BusBPS {
+		t.Fatalf("pcieGen4x16 %d drifted from the Fig.4 bus %d", pcieGen4x16, baseline.Fig4BusBPS)
 	}
 	var found bool
 	for _, p := range g.Paths {
@@ -737,8 +737,8 @@ func TestDiscoverPCIeCapacityFallback(t *testing.T) {
 	for _, l := range g.Links {
 		switch l.Kind {
 		case "pcie_rnic", "root_port":
-			if l.CapacityBPS != discoverPCIeCap || l.NegotiatedBPS != 0 {
-				t.Errorf("%s: capacity %d negotiated %d, want the %d fallback and none", l.ID, l.CapacityBPS, l.NegotiatedBPS, discoverPCIeCap)
+			if l.CapacityBPS != pcieGen4x16 || l.NegotiatedBPS != 0 {
+				t.Errorf("%s: capacity %d negotiated %d, want the %d fallback and none", l.ID, l.CapacityBPS, l.NegotiatedBPS, pcieGen4x16)
 			}
 			if !l.CapacityAssumed {
 				t.Errorf("%s: fallback capacity not marked assumed", l.ID)

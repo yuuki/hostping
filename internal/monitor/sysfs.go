@@ -38,8 +38,8 @@ func (s SysfsSampler) RNIC(ctx context.Context, n model.RNIC) (model.RNICCounter
 	return ReadRNICSysfs(ctx, n)
 }
 
-// ReadRNICSysfs is the single RNIC counter reader: the hardware sampler and
-// the --sim-less agent both go through it.
+// ReadRNICSysfs reads n's counters from the live /sys; SysfsSampler.RNIC, the
+// hardware sampler, goes through it.
 func ReadRNICSysfs(ctx context.Context, n model.RNIC) (model.RNICCounters, error) {
 	return ReadRNICSysfsFrom(ctx, "/sys", n)
 }

@@ -32,27 +32,37 @@ func AncestryBDFs(resolved string) []string {
 	return hops
 }
 
-// PCIeType is the PCI Express device/port type, or -1 if unknown.
+// PCI Express device/port types as PCIeType reports them: the Device/Port
+// Type field of the PCI Express Capabilities register, as sysfs pcie_type
+// spells it. PCIeTypeUnknown stands for an unreadable or unparsable one.
+const (
+	PCIeTypeUnknown    = -1
+	PCIeTypeRootPort   = 4
+	PCIeTypeUpstream   = 5 // upstream port of a switch
+	PCIeTypeDownstream = 6 // downstream port of a switch
+)
+
+// PCIeType is the PCI Express device/port type, or PCIeTypeUnknown.
 func PCIeType(sysroot, bdf string) int {
 	s := strings.ToLower(strings.TrimSpace(readFile(filepath.Join(sysroot, "bus/pci/devices", bdf, "pcie_type"))))
 	if s == "" {
-		return -1
+		return PCIeTypeUnknown
 	}
 	switch {
 	case strings.Contains(s, "root_port") || strings.HasPrefix(s, "4"):
-		return 4
+		return PCIeTypeRootPort
 	case strings.Contains(s, "upstream") || strings.HasPrefix(s, "5"):
-		return 5
+		return PCIeTypeUpstream
 	case strings.Contains(s, "downstream") || strings.HasPrefix(s, "6"):
-		return 6
+		return PCIeTypeDownstream
 	}
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
-		return -1
+		return PCIeTypeUnknown
 	}
 	n, err := strconv.Atoi(strings.TrimRight(fields[0], ":"))
 	if err != nil {
-		return -1
+		return PCIeTypeUnknown
 	}
 	return n
 }
@@ -65,24 +75,31 @@ func IsPCIBridge(class string) bool {
 	return class == "0x060400" || class == "0x060401"
 }
 
-// Role classifies a BDF on a device's ancestry (index 0 = closest to the host).
-// "root_port", "switch", or "" (endpoint / unknown).
+// Roles Role assigns to the BDFs of a device's ancestry.
+const (
+	RoleRootPort = "root_port"
+	RoleSwitch   = "switch" // an upstream or downstream port of a switch
+	RoleEndpoint = ""       // the endpoint itself, or a BDF whose role is unknown
+)
+
+// Role classifies a BDF on a device's ancestry (index 0 = closest to the host):
+// RoleRootPort, RoleSwitch, or RoleEndpoint (endpoint / unknown).
 func Role(sysroot, bdf string, hostNearIndex int) string {
 	t := PCIeType(sysroot, bdf)
 	class := Class(sysroot, bdf)
 	switch t {
-	case 4:
-		return "root_port"
-	case 5, 6:
-		return "switch"
+	case PCIeTypeRootPort:
+		return RoleRootPort
+	case PCIeTypeUpstream, PCIeTypeDownstream:
+		return RoleSwitch
 	}
 	if IsPCIBridge(class) {
 		if hostNearIndex == 0 {
-			return "root_port"
+			return RoleRootPort
 		}
-		return "switch"
+		return RoleSwitch
 	}
-	return ""
+	return RoleEndpoint
 }
 
 // Caps holds ACS/ATS enablement parsed from PCI config space.

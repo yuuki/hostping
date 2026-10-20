@@ -13,13 +13,15 @@ import (
 	"github.com/yuuki/hostping/internal/pci"
 )
 
+// Nominal link capacities. Fig.2 carries them on every hop; discovery gives
+// them to the hops whose sysfs says nothing (capacity assumed).
 const (
-	// discoverPCIeCap is the Gen4 x16 capacity a PCIe hop falls back to when
+	// pcieGen4x16 is the Gen4 x16 capacity a PCIe hop falls back to when
 	// sysfs does not say what its link can train to, and the capacity every
 	// switch hop carries (see pcieLink).
-	discoverPCIeCap = uint64(252_000_000_000)
-	discoverMemCap  = uint64(400_000_000_000)
-	discoverUPICap  = uint64(300_000_000_000)
+	pcieGen4x16 = uint64(252_000_000_000)
+	memCap      = uint64(400_000_000_000)
+	upiCap      = uint64(300_000_000_000)
 )
 
 // DiscoverOptions adjusts what sysfs discovery keeps.
@@ -80,19 +82,26 @@ func DiscoverWith(sysroot string, opts DiscoverOptions) (Graph, error) {
 // switch is identified by its upstream port BDF: every device behind any of
 // its downstream ports carries the same sw.{upstream} ID. Switches therefore
 // holds one entry per physical switch traversed, host-near → device-near, and
-// Switch is the device-nearest one. A bridge whose PCIe type is unreadable
-// falls back to being its own switch.
+// deviceSwitch is the device-nearest one. A bridge whose PCIe type is
+// unreadable falls back to being its own switch.
 //
 // RootLinkBDF is the function directly beneath the root port, whose sysfs link
 // attributes describe the root-port link: reading a link from its lower end
 // also yields the upper end's max_link_* through pci.ReadLink. Switch hops
 // have no such BDF; see pcieLink for why their links are not read.
 type pciChain struct {
-	Hops        []string // host-near → device, including the endpoint BDF
 	RootPort    string   // rp.{bdf}
 	RootLinkBDF string   // BDF at the lower end of the root-port link
-	Switch      string   // sw.{upstream port bdf} of the device-nearest switch, if any
 	Switches    []string // host-near → device-near switch IDs
+}
+
+// deviceSwitch is the sw.{upstream port bdf} of the device-nearest switch, or
+// "" when the device hangs off the root port.
+func (c pciChain) deviceSwitch() string {
+	if len(c.Switches) == 0 {
+		return ""
+	}
+	return c.Switches[len(c.Switches)-1]
 }
 
 // ancestors returns the hops above the device, host-near → device-near:
@@ -155,7 +164,7 @@ func discoverRNICs(sysroot string, socks sockets, exclude []string) ([]model.RNI
 			Socket:   socks.of(numa),
 			NUMA:     numa,
 			RootPort: ch.RootPort,
-			Switch:   ch.Switch,
+			Switch:   ch.deviceSwitch(),
 			PCIeBDF:  bdf,
 			LineRate: readRate(sysroot, dev),
 			Fabric:   fabricKey(sysroot, dev),
@@ -308,7 +317,7 @@ func discoverGPUs(sysroot string, socks sockets) ([]model.Endpoint, map[string]p
 		numa := readInt(filepath.Join(sysroot, "bus/pci/devices", bdf, "numa_node"), 0)
 		ep := model.Endpoint{
 			ID: fmt.Sprintf("gpu%d", idx), Kind: model.EndpointGPU, Index: idx,
-			Socket: socks.of(numa), RootPort: ch.RootPort, Switch: ch.Switch, NUMA: numa, PCIeBDF: bdf,
+			Socket: socks.of(numa), RootPort: ch.RootPort, Switch: ch.deviceSwitch(), NUMA: numa, PCIeBDF: bdf,
 		}
 		out = append(out, ep)
 		chains[ep.ID] = ch
@@ -329,30 +338,28 @@ func walkPCI(sysroot, bdf string) (pciChain, error) {
 	if len(hops) == 0 {
 		return pciChain{}, fmt.Errorf("no PCI ancestry for %s", bdf)
 	}
-	ch := pciChain{Hops: hops}
+	var ch pciChain
 	inSwitch := false // already inside a switch whose ID we recorded
 	for i, hop := range hops {
 		if hop == bdf {
 			continue
 		}
 		switch pci.Role(sysroot, hop, i) {
-		case "root_port":
+		case pci.RoleRootPort:
 			if ch.RootPort == "" {
 				ch.RootPort = "rp." + hop
 				// hop != bdf, so something sits below it on the chain.
 				ch.RootLinkBDF = hops[i+1]
 			}
 			inSwitch = false
-		case "switch":
+		case pci.RoleSwitch:
 			t := pci.PCIeType(sysroot, hop)
-			if t == 6 && inSwitch {
+			if t == pci.PCIeTypeDownstream && inSwitch {
 				// Downstream port of the switch we just recorded.
 				continue
 			}
-			id := "sw." + hop
-			ch.Switches = append(ch.Switches, id)
-			ch.Switch = id
-			inSwitch = t == 5 || t == 6
+			ch.Switches = append(ch.Switches, "sw."+hop)
+			inSwitch = t == pci.PCIeTypeUpstream || t == pci.PCIeTypeDownstream
 		}
 	}
 	if ch.RootPort == "" {
@@ -364,13 +371,13 @@ func walkPCI(sysroot, bdf string) (pciChain, error) {
 // pcieLink reads what the PCIe link whose lower end is bdf can train to and
 // what it trained to. The capacity is the capability (min of the device and
 // upstream port max_link_*), never the negotiated value: a down-trained link
-// must not become its own healthy baseline. It falls back to discoverPCIeCap
+// must not become its own healthy baseline. It falls back to pcieGen4x16
 // when sysfs does not state both maxima, and reports that capacity as assumed
 // so no utilization is computed against it.
 //
 // Only links whose two ends hostping can attribute are read this way: the
 // link attaching an RNIC or GPU (the device and the port it hangs off) and the
-// link below a root port. A switch hop keeps discoverPCIeCap, assumed, with no
+// link below a root port. A switch hop keeps pcieGen4x16, assumed, with no
 // negotiated value (switchLink), because sysfs does not describe its link
 // reliably:
 //
@@ -388,24 +395,24 @@ func walkPCI(sysroot, bdf string) (pciChain, error) {
 // degraded path pass as normal.
 func pcieLink(sysroot, bdf string) (capBPS, negBPS uint64, assumed bool) {
 	if bdf == "" {
-		return discoverPCIeCap, 0, true
+		return pcieGen4x16, 0, true
 	}
 	c, err := pci.ReadLink(sysroot, bdf)
 	if err != nil {
-		return discoverPCIeCap, 0, true
+		return pcieGen4x16, 0, true
 	}
 	capBPS = pci.CapacityBPS(c)
 	if capBPS == 0 {
-		return discoverPCIeCap, pci.NegotiatedBPS(c), true
+		return pcieGen4x16, pci.NegotiatedBPS(c), true
 	}
 	return capBPS, pci.NegotiatedBPS(c), false
 }
 
-// switchLink is a switch hop at the nominal discoverPCIeCap. Its sysfs link is
+// switchLink is a switch hop at the nominal pcieGen4x16. Its sysfs link is
 // not read (see pcieLink), so the capacity is assumed and no negotiated value
 // is recorded.
 func switchLink(id string, socket int, rootPort, upstream string) model.Link {
-	return model.Link{ID: id, Kind: "pcie_switch", Device: id, Socket: socket, RootPort: rootPort, Upstream: upstream, CapacityBPS: discoverPCIeCap, CapacityAssumed: true}
+	return model.Link{ID: id, Kind: model.LinkKindPCIeSwitch, Device: id, Socket: socket, RootPort: rootPort, Upstream: upstream, CapacityBPS: pcieGen4x16, CapacityAssumed: true}
 }
 
 // upstream is the node a device or switch hangs off: the switch above it in
@@ -450,19 +457,19 @@ func synthesizeDiscoveredLinks(sysroot string, g Graph, rnicCh, gpuCh map[string
 	}
 	for _, n := range g.RNICs {
 		ch := rnicCh[n.ID]
-		pcie(model.Link{ID: "pcie." + n.ID, Kind: "pcie_rnic", Device: n.ID, Socket: n.Socket, RootPort: n.RootPort, Upstream: ch.deviceUpstream()}, n.PCIeBDF)
-		pcie(model.Link{ID: n.RootPort, Kind: "root_port", Socket: n.Socket, RootPort: n.RootPort}, ch.RootLinkBDF)
+		pcie(model.Link{ID: model.PCIeLinkID(n.ID), Kind: model.LinkKindPCIeRNIC, Device: n.ID, Socket: n.Socket, RootPort: n.RootPort, Upstream: ch.deviceUpstream()}, n.PCIeBDF)
+		pcie(model.Link{ID: n.RootPort, Kind: model.LinkKindRootPort, Socket: n.Socket, RootPort: n.RootPort}, ch.RootLinkBDF)
 		addSwitchLinks(add, ch, n.Socket)
 	}
 	for _, e := range g.Endpoints {
 		switch e.Kind {
 		case model.EndpointGPU:
 			ch := gpuCh[e.ID]
-			pcie(model.Link{ID: "pcie." + e.ID, Kind: "pcie_gpu", Device: e.ID, Socket: e.Socket, RootPort: e.RootPort, Upstream: ch.deviceUpstream()}, e.PCIeBDF)
-			pcie(model.Link{ID: e.RootPort, Kind: "root_port", Socket: e.Socket, RootPort: e.RootPort}, ch.RootLinkBDF)
+			pcie(model.Link{ID: model.PCIeLinkID(e.ID), Kind: model.LinkKindPCIeGPU, Device: e.ID, Socket: e.Socket, RootPort: e.RootPort, Upstream: ch.deviceUpstream()}, e.PCIeBDF)
+			pcie(model.Link{ID: e.RootPort, Kind: model.LinkKindRootPort, Socket: e.Socket, RootPort: e.RootPort}, ch.RootLinkBDF)
 			addSwitchLinks(add, ch, e.Socket)
 		case model.EndpointMemory:
-			add(model.Link{ID: fmt.Sprintf("mem.%d", e.Index), Kind: "memory", Device: e.ID, Socket: e.Socket, CapacityBPS: discoverMemCap, CapacityAssumed: true})
+			add(model.Link{ID: fmt.Sprintf("mem.%d", e.Index), Kind: model.LinkKindMemory, Device: e.ID, Socket: e.Socket, CapacityBPS: memCap, CapacityAssumed: true})
 		}
 	}
 	sockets := map[int]bool{}
@@ -479,7 +486,7 @@ func synthesizeDiscoveredLinks(sysroot string, g Graph, rnicCh, gpuCh map[string
 	sort.Ints(socks)
 	for i := 0; i < len(socks); i++ {
 		for j := i + 1; j < len(socks); j++ {
-			add(model.Link{ID: upiID(socks[i], socks[j]), Kind: model.LinkKindUPI, CapacityBPS: discoverUPICap, CapacityAssumed: true})
+			add(model.Link{ID: upiID(socks[i], socks[j]), Kind: model.LinkKindUPI, CapacityBPS: upiCap, CapacityAssumed: true})
 		}
 	}
 	// Under sub-NUMA clustering the NUMA nodes of one package are joined by
@@ -502,7 +509,7 @@ func synthesizeDiscoveredPaths(g Graph, rnicCh, gpuCh map[string]pciChain) []mod
 }
 
 func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.Path {
-	p := model.Path{RNIC: n.ID, Endpoint: e.ID, LinkIDs: []string{"pcie." + n.ID}}
+	p := model.Path{RNIC: n.ID, Endpoint: e.ID, LinkIDs: []string{model.PCIeLinkID(n.ID)}}
 	// Climbing away from the RNIC visits its switches device-near first.
 	up := reverse(rc.Switches)
 	switch e.Kind {
@@ -527,7 +534,7 @@ func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.P
 			p.LinkIDs = append(p.LinkIDs, reverse(ra[k:])...)
 			p.LinkIDs = append(p.LinkIDs, ra[k-1])
 			p.LinkIDs = append(p.LinkIDs, ea[k:]...)
-			p.LinkIDs = append(p.LinkIDs, "pcie."+e.ID)
+			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
 		case e.Socket == n.Socket:
 			// Within one package; under sub-NUMA clustering the root ports
 			// may sit on different NUMA nodes, joined by the package mesh.
@@ -539,13 +546,13 @@ func pathRNICToEndpoint(n model.RNIC, e model.Endpoint, rc, ec pciChain) model.P
 			}
 			p.LinkIDs = append(p.LinkIDs, e.RootPort)
 			p.LinkIDs = append(p.LinkIDs, ec.Switches...)
-			p.LinkIDs = append(p.LinkIDs, "pcie."+e.ID)
+			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
 		default:
 			p.Distance = model.DistanceCrossSocket
 			p.LinkIDs = append(p.LinkIDs, up...)
 			p.LinkIDs = append(p.LinkIDs, n.RootPort, upiID(n.Socket, e.Socket), e.RootPort)
 			p.LinkIDs = append(p.LinkIDs, ec.Switches...)
-			p.LinkIDs = append(p.LinkIDs, "pcie."+e.ID)
+			p.LinkIDs = append(p.LinkIDs, model.PCIeLinkID(e.ID))
 		}
 	case model.EndpointMemory:
 		p.LinkIDs = append(p.LinkIDs, up...)

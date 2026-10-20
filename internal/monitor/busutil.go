@@ -61,7 +61,7 @@ func utilCapacity(g topology.Graph, linkID string) (uint64, bool) {
 // A lower bound can miss an overload but never invents one, which is the safe
 // direction for a rule that turns a failure into "overloaded".
 func rnicUtil(g topology.Graph, rnicID string, throughputBPS uint64) (float64, bool) {
-	c, ok := utilCapacity(g, "pcie."+rnicID)
+	c, ok := utilCapacity(g, model.PCIeLinkID(rnicID))
 	if !ok {
 		return 0, false
 	}
@@ -80,7 +80,7 @@ func gpuPCIeUtil(g topology.Graph, rate map[string]float64) map[string]float64 {
 		if !ok {
 			continue
 		}
-		id := "pcie." + e.ID
+		id := model.PCIeLinkID(e.ID)
 		c, ok := utilCapacity(g, id)
 		if !ok {
 			continue

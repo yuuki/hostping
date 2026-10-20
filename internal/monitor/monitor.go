@@ -286,7 +286,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		}
 		r.ThroughputBPS = uint64((float64(peak) * 8) / dt)
 		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
-			util["pcie."+n.ID] = u
+			util[model.PCIeLinkID(n.ID)] = u
 		}
 		// A counter is differenced only against a sample read from the same
 		// sources: one that could not be read, or that reads again after a

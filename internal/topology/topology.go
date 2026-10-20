@@ -35,10 +35,10 @@ func (g *Graph) setRNICPCIeCaps() {
 			continue
 		}
 		for _, l := range g.Links {
-			if l.Kind != "pcie_rnic" {
+			if l.Kind != model.LinkKindPCIeRNIC {
 				continue
 			}
-			if l.Device == n.ID || l.ID == "pcie."+n.ID {
+			if l.Device == n.ID || l.ID == model.PCIeLinkID(n.ID) {
 				n.PCIeCapBPS = l.CapacityBPS
 				break
 			}
