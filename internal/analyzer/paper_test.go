@@ -362,7 +362,7 @@ func TestTONMutualProbing(t *testing.T) {
 			for _, c := range rep.Causes {
 				switch c.Code {
 				case model.CauseRNICConnectFailure, model.CauseRNICIntermittent, model.CauseToRSwitchAnomaly:
-					got = append(got, c.Code+"["+strings.Join(c.RNICs, ",")+"]/"+c.Confidence)
+					got = append(got, c.Code+"["+strings.Join(c.RNICs, ",")+"]/"+string(c.Confidence))
 				}
 			}
 			want := tc.code + "[" + tc.rnics + "]/" + tc.conf

@@ -143,7 +143,7 @@ func rnicPCIeUndersized(n model.RNIC, cfg model.PCIeConfig) (model.RootCause, bo
 	}, true
 }
 
-func downTrainConfidence(symptom bool) string {
+func downTrainConfidence(symptom bool) model.Confidence {
 	if symptom {
 		return "high"
 	}

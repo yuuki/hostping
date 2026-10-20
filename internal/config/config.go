@@ -164,7 +164,6 @@ type Config struct {
 	// RNICs can turn it off; the probes still time the verbs, and the report
 	// and the gpu_slow_mr_reg diagnosis keep using them.
 	MetricsVerbDurations bool
-	ServiceName          string
 
 	// MetricsSet / OTLPSet record that the user asked for an exporter explicitly
 	// (--metrics / --otlp, or OTEL_EXPORTER_OTLP_ENDPOINT). One-shot runs only
@@ -231,7 +230,6 @@ func Defaults() Config {
 		MutualWindow:         20 * time.Second,
 		PrometheusAddr:       ":9464",
 		MetricsVerbDurations: true,
-		ServiceName:          "hostping",
 		TopologyName:         "fig2",
 		OTLPEndpoint:         os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		OTLPSet:              os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",

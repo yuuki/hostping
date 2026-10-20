@@ -160,7 +160,7 @@ func Analyze(in Input) Result {
 	causes = append(causes, diagnoseLatency(in.Graph, paths, causes, in.Cfg.AbnormalTh, in.OneShot)...)
 	// high, medium, low — rank explicitly. Ties break on the cause's identity
 	// fields so the order never depends on map iteration.
-	rank := map[string]int{"high": 0, "medium": 1, "low": 2}
+	rank := map[model.Confidence]int{model.ConfidenceHigh: 0, model.ConfidenceMedium: 1, model.ConfidenceLow: 2}
 	subject := func(c model.RootCause) string {
 		return strings.Join(c.RNICs, ",") + "\x00" +
 			strings.Join(c.Links, ",") + "\x00" +

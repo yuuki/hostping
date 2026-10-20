@@ -101,7 +101,7 @@ func TestRNICDownTrainedUndersizedKeepsConfidence(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		ms   []model.PathMeasurement
-		want string
+		want model.Confidence
 	}{
 		{"abnormal paths", abnormalRNIC0(g), "high"},
 		{"config space only", gen5Measurements(g, 270*gbps, 273*gbps), "medium"},

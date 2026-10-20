@@ -345,9 +345,9 @@ func intermittentTimeouts(in Input, pairs []pairTimeout, of map[string][]int, id
 		if explained {
 			continue
 		}
-		conf := "high"
+		conf := model.ConfidenceHigh
 		if crossOnly {
-			conf = "medium"
+			conf = model.ConfidenceMedium
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseRNICIntermittent, Summary: "RNIC mutual probes time out intermittently (flapping suspected)",

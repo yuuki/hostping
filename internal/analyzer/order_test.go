@@ -35,7 +35,7 @@ func multiATSInput() analyzer.Input {
 func causeOrder(causes []model.RootCause) []string {
 	out := make([]string, 0, len(causes))
 	for _, c := range causes {
-		out = append(out, c.Confidence+"/"+c.Code+"/"+strings.Join(c.RNICs, ",")+
+		out = append(out, string(c.Confidence)+"/"+c.Code+"/"+strings.Join(c.RNICs, ",")+
 			"/"+strings.Join(c.Links, ",")+"/"+strings.Join(c.Endpoints, ","))
 	}
 	return out
@@ -67,7 +67,7 @@ func TestAnalyzeCausesSortByConfidenceThenSubject(t *testing.T) {
 		t.Fatalf("ats_disabled causes want %v, got %v", want, rnics)
 	}
 
-	rank := map[string]int{"high": 0, "medium": 1, "low": 2}
+	rank := map[model.Confidence]int{model.ConfidenceHigh: 0, model.ConfidenceMedium: 1, model.ConfidenceLow: 2}
 	for i := 1; i < len(causes); i++ {
 		if rank[causes[i-1].Confidence] > rank[causes[i].Confidence] {
 			t.Fatalf("confidence out of rank order at %d: %v", i, causeOrder(causes))

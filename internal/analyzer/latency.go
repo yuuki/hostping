@@ -378,14 +378,14 @@ func tallyAdd[K comparable](m map[K]*latencyTally, k K, abn bool) {
 }
 
 func latencyCause(ms []model.PathMeasurement, scope string, th float64) model.RootCause {
-	conf := "medium"
+	conf := model.ConfidenceMedium
 	ev := make([]string, 0, len(ms))
 	var rnics, eps []string
 	for _, m := range ms {
 		rnics = append(rnics, m.RNIC)
 		eps = append(eps, m.Endpoint)
 		if m.LatencyReason != model.LatencyByBaseline {
-			conf = "low"
+			conf = model.ConfidenceLow
 		}
 		notes := []string{m.LatencyReason.String()}
 		if r := m.LatencyRecheck; r != nil && r.Confirmed {

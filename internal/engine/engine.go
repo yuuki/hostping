@@ -101,16 +101,12 @@ func New(cfg config.Config, g topology.Graph, p Prober) *Engine {
 	return &Engine{Cfg: cfg, Graph: g, Prober: p, Gray: map[string]int{}, SlowMR: map[string]int{}, Latency: map[string]int{}}
 }
 
-// GrayState is a copy of the engine's per-link consecutive-gray counters
-// (NSDI'23 §4.3 flapping).
-type GrayState map[string]int
-
 // Streaks is a copy of the evidence the engine carries from run to run, taken
 // by SnapshotStreaks: the per-link consecutive-gray counters, the per-GPU
 // count of consecutive idle runs with slow memory registration, and the
 // per-path count of consecutive idle runs latency-abnormal against siblings.
 type Streaks struct {
-	Gray    GrayState
+	Gray    map[string]int
 	SlowMR  map[string]int
 	Latency map[string]int
 }
@@ -118,7 +114,7 @@ type Streaks struct {
 // SnapshotStreaks returns a deep copy of the engine's streaks, so a run whose
 // report is later thrown away can be undone with RestoreStreaks.
 func (e *Engine) SnapshotStreaks() Streaks {
-	return Streaks{Gray: GrayState(cloneCounts(e.Gray)), SlowMR: cloneCounts(e.SlowMR), Latency: cloneCounts(e.Latency)}
+	return Streaks{Gray: cloneCounts(e.Gray), SlowMR: cloneCounts(e.SlowMR), Latency: cloneCounts(e.Latency)}
 }
 
 // RestoreStreaks puts back streaks taken by SnapshotStreaks, so a discarded

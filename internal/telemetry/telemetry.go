@@ -69,6 +69,11 @@ type Telemetry struct {
 	monIdle     metric.Int64Gauge
 }
 
+// serviceName is the OpenTelemetry service.name of both binaries. The
+// OTEL_SERVICE_NAME environment variable, read by resource.WithFromEnv,
+// still overrides it.
+const serviceName = "hostping"
+
 // Values of hostping.engine.run.failed's stage attribute.
 const (
 	// FailedEngine: the engine run returned an error.
@@ -166,7 +171,7 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 	}
 	res, err := resource.New(ctx,
 		resource.WithFromEnv(),
-		resource.WithAttributes(semconv.ServiceName(cfg.ServiceName)),
+		resource.WithAttributes(semconv.ServiceName(serviceName)),
 	)
 	if err != nil {
 		return nil, err
@@ -777,7 +782,7 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 	}
 	t.recordMutual(ctx, rep.Mutual)
 	for _, c := range rep.Causes {
-		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", c.Confidence)))
+		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", string(c.Confidence))))
 	}
 }
 

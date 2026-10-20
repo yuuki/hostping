@@ -595,6 +595,21 @@ func (p Path) ContainsLink(id string) bool {
 // LinkKindRootPort is the Link.Kind of a CPU root-port hop.
 const LinkKindRootPort = "root_port"
 
+// Link kinds of the PCIe hops and the memory channels. LinkKindPCIeRNIC and
+// LinkKindPCIeGPU are the device's own PCIe link (ID "pcie.<device>", see
+// PCIeLinkID), LinkKindPCIeSwitch an upstream switch port, LinkKindMemory a
+// NUMA node's memory channel.
+const (
+	LinkKindPCIeRNIC   = "pcie_rnic"
+	LinkKindPCIeGPU    = "pcie_gpu"
+	LinkKindPCIeSwitch = "pcie_switch"
+	LinkKindMemory     = "memory"
+)
+
+// PCIeLinkID is the link ID of a device's own PCIe hop: "pcie." followed by
+// the device (RNIC or GPU) ID.
+func PCIeLinkID(device string) string { return "pcie." + device }
+
 // Link kinds of the buses between NUMA nodes. LinkKindUPI joins two CPU
 // packages (UPI, xGMI). LinkKindSNCMesh joins two NUMA nodes of one package
 // under sub-NUMA clustering (Intel SNC, AMD NPS > 1): traffic between them
@@ -854,14 +869,31 @@ func (l LinkState) UtilEvidence() string {
 
 // RootCause is a diagnosed intra-host / RNIC problem.
 type RootCause struct {
-	Code       string   `json:"code"`
-	Summary    string   `json:"summary"`
-	Links      []string `json:"links,omitempty"`
-	RNICs      []string `json:"rnics,omitempty"`
-	Endpoints  []string `json:"endpoints,omitempty"`
-	Confidence string   `json:"confidence"` // high, medium, low
-	Evidence   string   `json:"evidence"`
+	Code       string     `json:"code"`
+	Summary    string     `json:"summary"`
+	Links      []string   `json:"links,omitempty"`
+	RNICs      []string   `json:"rnics,omitempty"`
+	Endpoints  []string   `json:"endpoints,omitempty"`
+	Confidence Confidence `json:"confidence"`
+	Evidence   string     `json:"evidence"`
 }
+
+// Confidence is how far a RootCause's evidence supports it. It is a string
+// so the JSON report prints it as is.
+type Confidence string
+
+const (
+	ConfidenceHigh   Confidence = "high"
+	ConfidenceMedium Confidence = "medium"
+	ConfidenceLow    Confidence = "low"
+)
+
+// RNIC hints the --sim world passes to the analyzer (RNICHints), naming a
+// fault the live host cannot tell apart from an RNIC PCIe failure.
+const (
+	HintSlowStart = "slow_start"
+	HintTxWindow  = "tx_window"
+)
 
 // Known bottleneck codes from NSDI'23 §6 and ToN'24 RNIC mutual probing.
 const (
@@ -971,13 +1003,6 @@ func (m MutualMeasurement) TimeoutRatio() (ratio float64, ok bool) {
 		return 0, true
 	}
 	return 1 - float64(m.Recv)/float64(m.Sent), true
-}
-
-// BusSample is vendor-neutral bus utilization for a named link.
-type BusSample struct {
-	LinkID      string
-	Utilization float64
-	Timestamp   time.Time
 }
 
 // RNICCounters is one poll of throughput / PFC / drop counters.
