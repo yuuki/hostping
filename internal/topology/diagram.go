@@ -142,9 +142,19 @@ func titleOr(prefix, bdf, id string) string {
 	return prefix + " " + id
 }
 
+// build adds the nodes, then the edges, in the order the JSON arrays carry
+// them: CPU packages and NUMA nodes, memory nodes, root ports and switches,
+// RNICs and GPUs; then one edge per link, then the structural package→NUMA
+// edges.
 func (d *diagram) build() {
-	g := d.g
-	// CPU packages and, under SNC, their NUMA nodes.
+	d.addCPUNodes()
+	devOf, rpOf, memOf := d.addDeviceNodes()
+	d.addLinkEdges(devOf, rpOf, memOf)
+	d.addPackageEdges()
+}
+
+// addCPUNodes adds the CPU packages and, under SNC, their NUMA nodes.
+func (d *diagram) addCPUNodes() {
 	for _, s := range d.sockets() {
 		numa := -1
 		if len(d.numas[s]) == 1 {
@@ -160,7 +170,16 @@ func (d *diagram) build() {
 			d.addNode(model.TopologyNode{ID: numaNodeID(n), Kind: model.TopoNodeNUMA, Title: fmt.Sprintf("NUMA %d", n), Socket: s, NUMA: n})
 		}
 	}
-	memOf := map[string]model.Endpoint{}
+}
+
+// addDeviceNodes adds the memory nodes, the root ports and switches in link
+// order, then the RNICs and GPUs (each with its root port). It returns what
+// the link edges need to place a device: devOf and rpOf map an RNIC or GPU ID
+// to its switch and root port, memOf a memory node's ID or mem.N link ID to
+// the endpoint.
+func (d *diagram) addDeviceNodes() (devOf, rpOf map[string]string, memOf map[string]model.Endpoint) {
+	g := d.g
+	memOf = map[string]model.Endpoint{}
 	for _, e := range g.Endpoints {
 		if e.Kind != model.EndpointMemory {
 			continue
@@ -169,7 +188,6 @@ func (d *diagram) build() {
 		memOf[fmt.Sprintf("mem.%d", e.Index)] = e
 		d.addNode(model.TopologyNode{ID: e.ID, Kind: model.TopoNodeMemory, Title: fmt.Sprintf("%s (NUMA %d)", e.ID, e.NUMA), Socket: e.Socket, NUMA: e.NUMA})
 	}
-	// Root ports and switches, in link order.
 	for _, l := range g.Links {
 		switch l.Kind {
 		case model.LinkKindRootPort:
@@ -179,8 +197,8 @@ func (d *diagram) build() {
 			d.addNode(model.TopologyNode{ID: l.ID, Kind: model.TopoNodeSwitch, Title: titleOr("switch", bdf, l.ID), Socket: l.Socket, NUMA: d.numaOfRootPort(l.RootPort, l.Socket), PCIeBDF: bdf})
 		}
 	}
-	devOf := map[string]string{} // pcie.* link device → its Switch, RootPort
-	rpOf := map[string]string{}
+	devOf = map[string]string{} // pcie.* link device → its Switch, RootPort
+	rpOf = map[string]string{}
 	for _, n := range g.RNICs {
 		d.addRootPort(n.RootPort, n.Socket)
 		title := n.Device
@@ -202,23 +220,20 @@ func (d *diagram) build() {
 		d.addNode(model.TopologyNode{ID: e.ID, Kind: model.TopoNodeGPU, Title: title, Socket: e.Socket, NUMA: e.NUMA, PCIeBDF: e.PCIeBDF})
 		devOf[e.ID], rpOf[e.ID] = e.Switch, e.RootPort
 	}
+	return devOf, rpOf, memOf
+}
 
-	for _, l := range g.Links {
+// addLinkEdges adds one edge per link, in link order, between the two nodes
+// it joins; a link whose ends cannot be placed gets none.
+func (d *diagram) addLinkEdges(devOf, rpOf map[string]string, memOf map[string]model.Endpoint) {
+	for _, l := range d.g.Links {
 		switch l.Kind {
 		case model.LinkKindRootPort:
 			d.addEdge(l, d.cpuNode(l.Socket, d.numaOfRootPort(l.ID, l.Socket)), l.ID)
 		case model.LinkKindPCIeSwitch:
 			d.addEdge(l, d.upstream(l, "", l.RootPort), l.ID)
 		case model.LinkKindPCIeRNIC, model.LinkKindPCIeGPU:
-			dev := l.Device
-			if dev == "" {
-				dev = strings.TrimPrefix(l.ID, "pcie.")
-			}
-			rp := rpOf[dev]
-			if rp == "" {
-				rp = l.RootPort
-			}
-			d.addEdge(l, d.upstream(l, devOf[dev], rp), dev)
+			d.addDeviceEdge(l, devOf, rpOf)
 		case model.LinkKindMemory:
 			e, ok := memOf[l.Device]
 			if !ok {
@@ -237,6 +252,25 @@ func (d *diagram) build() {
 			}
 		}
 	}
+}
+
+// addDeviceEdge adds the edge of a pcie.* link into its RNIC or GPU, from the
+// node the device hangs off: the link names the device, or the ID does.
+func (d *diagram) addDeviceEdge(l model.Link, devOf, rpOf map[string]string) {
+	dev := l.Device
+	if dev == "" {
+		dev = strings.TrimPrefix(l.ID, "pcie.")
+	}
+	rp := rpOf[dev]
+	if rp == "" {
+		rp = l.RootPort
+	}
+	d.addEdge(l, d.upstream(l, devOf[dev], rp), dev)
+}
+
+// addPackageEdges adds the structural package→NUMA edges (link "none") of
+// every package under sub-NUMA clustering.
+func (d *diagram) addPackageEdges() {
 	for _, s := range d.sockets() {
 		if !d.snc(s) {
 			continue

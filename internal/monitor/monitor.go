@@ -229,47 +229,10 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if bp, ok := m.Sampler.(BusPoller); ok {
 		bp.PollBus(ctx, reset)
 	}
-	var rates []model.RNICRates
-	busy := map[string]bool{}
-	drops := map[string]uint64{}
-	util := map[string]float64{}
-	var host rnicFlags
-	var unread []string
 	now := m.now()
-	ready := true
-	for _, n := range m.Graph.RNICs {
-		c, err := m.Sampler.RNIC(ctx, n)
-		if err == nil {
-			err = ctx.Err()
-		}
-		if err != nil {
-			return Decision{}, err
-		}
-		c.Timestamp = now
-		pauseState := m.trackSource(m.pauseSrc, n.ID, pauseFamily, c.PauseSources, c.PauseGap)
-		dropState := m.trackSource(m.dropSrc, n.ID, dropFamily, c.DropSources, c.DropGap)
-		p, ok := m.prev[n.ID]
-		m.prev[n.ID] = c
-		if !ok {
-			ready = false
-			rates = append(rates, model.RNICRates{Device: n.ID})
-			continue
-		}
-		r, f := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
-		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
-			util[model.PCIeLinkID(n.ID)] = u
-		}
-		if r.DropKnown {
-			drops[n.ID] = r.DropDelta
-		}
-		if f.unread {
-			unread = append(unread, n.ID)
-		}
-		if f.busy {
-			busy[n.ID] = true
-		}
-		host.merge(f)
-		rates = append(rates, r)
+	rn, err := m.pollRNICs(ctx, now)
+	if err != nil {
+		return Decision{}, err
 	}
 
 	gpus, err := m.Sampler.GPUs(ctx)
@@ -285,24 +248,80 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 
 	// Every RNIC of a ready poll went through rnicRates, so the flag covers
 	// every line rate; a poll that is not ready knows nothing anyway.
-	lineRateKnown := !host.lineRateUnknown
+	lineRateKnown := !rn.host.lineRateUnknown
 	// Unknown CPU load, like an unknown GPU, is not idle: the paths through
 	// a loaded package would be judged against idle baselines.
-	cpuUnknown := ready && !cpuKnown
-	hostIdle := ready && host.idle() && gpuIdle && !gpuUnknown && !cpuUnknown
-	idleKnown := ready && !gpuUnknown && lineRateKnown && len(unread) == 0 && !cpuUnknown
-	d := Decision{BusyRNICs: busy, Rates: rates, HostIdle: hostIdle, DropDelta: drops, Ready: ready, IdleKnown: idleKnown, UnreadCounters: unread, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
-	if !ready {
+	cpuUnknown := rn.ready && !cpuKnown
+	hostIdle := rn.ready && rn.host.idle() && gpuIdle && !gpuUnknown && !cpuUnknown
+	idleKnown := rn.ready && !gpuUnknown && lineRateKnown && len(rn.unread) == 0 && !cpuUnknown
+	d := Decision{BusyRNICs: rn.busy, Rates: rn.rates, HostIdle: hostIdle, DropDelta: rn.drops, Ready: rn.ready, IdleKnown: idleKnown, UnreadCounters: rn.unread, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
+	if !rn.ready {
 		return d, nil
 	}
 	d.CPULoad = cpu
-	if len(util) > 0 {
-		d.Util = util
+	if len(rn.util) > 0 {
+		d.Util = rn.util
 	}
 	d.Run, d.Trigger, d.Mode = m.cad.decide(now, &m.Cfg, triggerInputs{
-		pfc: host.pfc, drop: host.drop, hostIdle: hostIdle, lineRateKnown: lineRateKnown, alarm: m.MutualAlarm,
+		pfc: rn.host.pfc, drop: rn.host.drop, hostIdle: hostIdle, lineRateKnown: lineRateKnown, alarm: m.MutualAlarm,
 	})
 	return d, nil
+}
+
+// rnicPoll is what one Poll read from the RNICs, in graph order.
+type rnicPoll struct {
+	rates  []model.RNICRates
+	busy   map[string]bool
+	drops  map[string]uint64
+	util   map[string]float64
+	unread []string
+	// host is what every RNIC's delta says about the host, merged.
+	host rnicFlags
+	// ready is false when an RNIC had no previous sample to take a delta
+	// from (the first poll, or the one after a run): no rates, no trigger.
+	ready bool
+}
+
+// pollRNICs samples every RNIC at now, tracks each one's counter sources,
+// and takes the delta against the previous sample it keeps. An RNIC that
+// cannot be read, or a context done meanwhile, is the poll's error.
+func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error) {
+	rn := rnicPoll{busy: map[string]bool{}, drops: map[string]uint64{}, util: map[string]float64{}, ready: true}
+	for _, n := range m.Graph.RNICs {
+		c, err := m.Sampler.RNIC(ctx, n)
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			return rnicPoll{}, err
+		}
+		c.Timestamp = now
+		pauseState := m.trackSource(m.pauseSrc, n.ID, pauseFamily, c.PauseSources, c.PauseGap)
+		dropState := m.trackSource(m.dropSrc, n.ID, dropFamily, c.DropSources, c.DropGap)
+		p, ok := m.prev[n.ID]
+		m.prev[n.ID] = c
+		if !ok {
+			rn.ready = false
+			rn.rates = append(rn.rates, model.RNICRates{Device: n.ID})
+			continue
+		}
+		r, f := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
+		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
+			rn.util[model.PCIeLinkID(n.ID)] = u
+		}
+		if r.DropKnown {
+			rn.drops[n.ID] = r.DropDelta
+		}
+		if f.unread {
+			rn.unread = append(rn.unread, n.ID)
+		}
+		if f.busy {
+			rn.busy[n.ID] = true
+		}
+		rn.host.merge(f)
+		rn.rates = append(rn.rates, r)
+	}
+	return rn, nil
 }
 
 // sampleInterval is the seconds between two counter samples of one RNIC, or
