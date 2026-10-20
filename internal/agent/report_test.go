@@ -20,14 +20,13 @@ var testReportTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 func testReporter(t *testing.T, format config.ReportFormat, file string, stdout io.Writer) *reporter {
 	t.Helper()
-	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	return &reporter{
 		format: format,
 		file:   file,
 		stdout: stdout,
 		build:  buildinfo.Info{Version: "1.2.3", Commit: "abc1234"},
 		now:    func() time.Time { return testReportTime },
+		logf:   nolog,
 	}
 }
 

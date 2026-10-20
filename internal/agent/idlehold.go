@@ -106,17 +106,44 @@ func discardReason(d monitor.Decision) string {
 	return telemetry.DiscardHostBusy
 }
 
+// unknownIdleKind is why a Ready poll could not tell idle from busy
+// (Decision.IdleKnown false).
+type unknownIdleKind int
+
+const (
+	// countersUnread: a PFC pause or drop counter could not be read on the
+	// RNICs the detail names (comma-separated).
+	countersUnread unknownIdleKind = iota
+	// cpuUnread: the CPU load could not be read.
+	cpuUnread
+	// gpuOrRateUnread: GPU utilization or an RNIC line rate is unknown.
+	gpuOrRateUnread
+)
+
+// unknownIdleCause classifies why d could not classify the host, and names
+// the RNICs for countersUnread. Each caller words its own message.
+func unknownIdleCause(d monitor.Decision) (unknownIdleKind, string) {
+	if len(d.UnreadCounters) > 0 {
+		return countersUnread, strings.Join(d.UnreadCounters, ",")
+	}
+	if d.CPUUnknown {
+		return cpuUnread, ""
+	}
+	return gpuOrRateUnread, ""
+}
+
 // idleVerdict reports whether a Ready poll still finds the host idle, and if
 // not, briefly what was busy.
 func idleVerdict(d monitor.Decision) (bool, string) {
 	if !d.IdleKnown {
-		if len(d.UnreadCounters) > 0 {
-			return false, "idle state could not be read (PFC pause or drop counters unread on " + strings.Join(d.UnreadCounters, ",") + ")"
-		}
-		if d.CPUUnknown {
+		switch kind, rnics := unknownIdleCause(d); kind {
+		case countersUnread:
+			return false, "idle state could not be read (PFC pause or drop counters unread on " + rnics + ")"
+		case cpuUnread:
 			return false, "idle state could not be read (CPU load unknown)"
+		default:
+			return false, "idle state could not be read (GPU utilization or RNIC line rate unknown)"
 		}
-		return false, "idle state could not be read (GPU utilization or RNIC line rate unknown)"
 	}
 	if d.HostIdle {
 		return true, ""

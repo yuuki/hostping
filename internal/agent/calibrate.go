@@ -71,7 +71,7 @@ type runner interface {
 // drawn from a host that does not stay idle.
 func Calibrate(cfg config.Config, opt CalibrateOptions) (CalibrateResult, error) {
 	cfg.Once = true
-	rt, err := newRig(cfg)
+	rt, err := newRig(cfg, log.Printf)
 	if err != nil {
 		return CalibrateResult{}, err
 	}

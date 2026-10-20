@@ -68,6 +68,7 @@ func newTestDaemon(t *testing.T, prober engine.Prober) *testDaemon {
 	td := &testDaemon{counters: map[string]model.RNICCounters{}, clk: time.Unix(1_700_000_000, 0)}
 	s := flakySampler{StaticSampler: monitor.StaticSampler{Counters: td.counters, GPU: idleGPUs(g, nil)}, fail: &td.failPoll}
 	mon := monitor.New(cfg, g, s)
+	mon.Logf = nolog
 
 	td.reader = sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(td.reader))
@@ -77,11 +78,11 @@ func newTestDaemon(t *testing.T, prober engine.Prober) *testDaemon {
 		t.Fatal(err)
 	}
 	td.daemon = &daemon{
-		g: g, eng: eng, sampler: s, mon: mon, tel: tel,
+		rig:  &rig{g: g, eng: eng, sampler: s, mon: mon, logf: nolog},
+		tel:  tel,
 		live: telemetry.NewLiveness(cfg.MetricInterval, func() time.Time { return td.clk }),
-		rp:   &reporter{format: config.ReportFormatJSON, stdout: io.Discard, now: time.Now},
+		rp:   &reporter{format: config.ReportFormatJSON, stdout: io.Discard, now: time.Now, logf: nolog},
 	}
-	t.Cleanup(quiet(t))
 	return td
 }
 

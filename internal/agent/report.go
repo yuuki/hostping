@@ -40,6 +40,8 @@ type reporter struct {
 	stdout io.Writer
 	build  buildinfo.Info
 	now    func() time.Time
+	// logf receives the baselines, diagnoses and write failures.
+	logf func(format string, args ...any)
 }
 
 // newReporter checks that the report file can be opened for appending, so a
@@ -51,6 +53,7 @@ func newReporter(cfg config.Config, stdout io.Writer, build buildinfo.Info) (*re
 		stdout: stdout,
 		build:  build,
 		now:    time.Now,
+		logf:   log.Printf,
 	}
 	if r.file != "" {
 		f, err := openReportFile(r.file)
@@ -80,7 +83,7 @@ func (r *reporter) emit(rep model.Report) error {
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
-		log.Printf("hostping: report json: %v", err)
+		r.logf("hostping: report json: %v", err)
 		return err
 	}
 	line = append(line, '\n')
@@ -94,7 +97,7 @@ func (r *reporter) emit(rep model.Report) error {
 	switch r.format {
 	case config.ReportFormatJSON:
 		if _, err := r.stdout.Write(line); err != nil {
-			log.Printf("hostping: report stdout: %v", err)
+			r.logf("hostping: report stdout: %v", err)
 			keep(err)
 		}
 	case config.ReportFormatPretty:
@@ -102,26 +105,26 @@ func (r *reporter) emit(rep model.Report) error {
 		if err := json.Indent(&buf, line, "", "  "); err != nil {
 			keep(err)
 		} else if _, err := r.stdout.Write(buf.Bytes()); err != nil {
-			log.Printf("hostping: report stdout: %v", err)
+			r.logf("hostping: report stdout: %v", err)
 			keep(err)
 		}
 	}
 	if r.file != "" {
 		if err := appendLine(r.file, line); err != nil {
-			log.Printf("hostping: report file: %v", err)
+			r.logf("hostping: report file: %v", err)
 			keep(err)
 		}
 	}
 
 	for _, t := range rep.Baselines {
-		log.Printf("hostping baseline %s", baseline.FormatTable(t))
+		r.logf("hostping baseline %s", baseline.FormatTable(t))
 	}
 	if len(rep.Causes) == 0 {
-		log.Printf("hostping: no intra-host bottleneck (trigger=%s mode=%s paths=%d%s)", rep.Trigger, rep.Mode, len(rep.Paths), skippedSuffix(rep))
+		r.logf("hostping: no intra-host bottleneck (trigger=%s mode=%s paths=%d%s)", rep.Trigger, rep.Mode, len(rep.Paths), skippedSuffix(rep))
 		return firstErr
 	}
 	for _, c := range rep.Causes {
-		log.Printf("hostping diagnosis [%s] %s (%s): %s", c.Confidence, c.Code, c.Summary, c.Evidence)
+		r.logf("hostping diagnosis [%s] %s (%s): %s", c.Confidence, c.Code, c.Summary, c.Evidence)
 	}
 	return firstErr
 }
