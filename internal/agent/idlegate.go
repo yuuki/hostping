@@ -111,27 +111,38 @@ func runIdleGate(ctx context.Context, path string, timeout time.Duration) idleGa
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = idleGateWaitDelay
 	killProcessGroup(cmd)
+	// exec calls Cancel only while it still waits for the gate itself, and
+	// Run returns after that call, so reading killed after Run is safe. A
+	// kill that failed, for example because the gate had just exited, leaves
+	// the gate's own exit to decide.
+	killed := false
+	kill := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := kill()
+		killed = err == nil
+		return err
+	}
 	err := cmd.Run()
 	reapProcessGroup(cmd)
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The gate exited 0, but a child it left behind kept stderr open
-		// past WaitDelay; the child is gone now. The answer stands.
-		err = nil
-	}
-	if err == nil {
-		return idleGateOutcome{}
-	}
+	// The gate's own exit decides whenever it exited before we killed it,
+	// even if the deadline passed afterwards while a child it left behind
+	// held stderr open: the gate answered in time, and err then only says so
+	// about the child (exec.ErrWaitDelay). A killed gate answered nothing,
+	// whatever its status: on Windows the kill itself is exit status 1.
+	state := cmd.ProcessState
+	answered := state != nil && state.Exited() && !killed
 	var out idleGateOutcome
-	var exit *exec.ExitError
 	switch {
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		out = idleGateOutcome{reason: telemetry.GateTimeout, detail: fmt.Sprintf("no exit within %v", timeout)}
-	case errors.As(err, &exit) && exit.ExitCode() == idleGateDenyExit:
-		out = idleGateOutcome{reason: telemetry.GateDenied, detail: err.Error()}
-	case exit != nil && exit.Exited():
+	case answered && state.ExitCode() == 0:
+		return idleGateOutcome{}
+	case answered && state.ExitCode() == idleGateDenyExit:
+		out = idleGateOutcome{reason: telemetry.GateDenied, detail: state.String()}
+	case answered:
 		// The gate ran but reports that it could not decide (exit 2 and up,
 		// or a shell's 126/127 for a missing interpreter or command).
-		out = idleGateOutcome{reason: telemetry.GateError, detail: err.Error() + " (could not decide)"}
+		out = idleGateOutcome{reason: telemetry.GateError, detail: state.String() + " (could not decide)"}
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		out = idleGateOutcome{reason: telemetry.GateTimeout, detail: fmt.Sprintf("no exit within %v", timeout)}
 	default:
 		// Could not start (missing, not executable), killed by a signal, or
 		// canceled by shutdown.
