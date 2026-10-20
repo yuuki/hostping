@@ -1,0 +1,162 @@
+{
+  "trigger": "pfc",
+  "mode": "busy",
+  "host": "gpu-node-01",
+  "started": "2026-01-02T03:04:05.000000006Z",
+  "elapsed_ns": 1500000000,
+  "paths": [
+    {
+      "rnic": "rnic0",
+      "endpoint": "gpu0",
+      "endpoint_kind": "gpu",
+      "small_lat_ns_p50": 1800,
+      "small_lat_ns_p99": 2500,
+      "large_lat_ns_p50": 64000,
+      "bandwidth_bps": 24000000000,
+      "status": "uncertain",
+      "uncertain_reason": "host_shift",
+      "busy_recheck": {
+        "path_bps": 23000000000,
+        "sibling_bps": 24500000000,
+        "siblings": [
+          "rnic0-\u003egpu1",
+          "rnic0-\u003egpu2"
+        ],
+        "rounds": 3,
+        "confirmed": true
+      },
+      "bw_recheck": {
+        "path": "rnic0-\u003egpu0",
+        "path_bps": 23500000000,
+        "ref_bps": 23600000000,
+        "baseline_bps": 24800000000,
+        "refs": [
+          "rnic1-\u003egpu4",
+          "rnic2-\u003egpu6"
+        ],
+        "rounds": 2,
+        "outcome": "host_shift"
+      },
+      "latency_status": "abnormal",
+      "latency_reason": "siblings",
+      "latency_ref_ns": 1500,
+      "latency_recheck": {
+        "path_ns_p50": 1790,
+        "sibling_ns_p50": 1510,
+        "siblings": [
+          "rnic1-\u003egpu4"
+        ],
+        "confirmed": true
+      },
+      "latency_recheck_skipped": "cap",
+      "latency_locality": {
+        "numa": 1,
+        "ref_ns": 1700,
+        "rnics": [
+          "rnic1",
+          "rnic2"
+        ]
+      },
+      "latency_streak": 3,
+      "baseline_class": "cross_root/fast",
+      "verb_ns": {
+        "gpu_alloc": 100,
+        "mr_reg": 200,
+        "qp_setup": 300,
+        "mem_warmup": 400
+      }
+    }
+  ],
+  "skipped_endpoints": [
+    {
+      "kind": "gpu",
+      "reason": "NoGDR: no cuda",
+      "endpoints": [
+        "gpu7"
+      ],
+      "probes": 2
+    }
+  ],
+  "links": [
+    {
+      "id": "pcie.rnic0",
+      "status": "gray",
+      "abnormal_count": 2,
+      "utilization": 0.42
+    }
+  ],
+  "causes": [
+    {
+      "code": "rnic_pcie_failure",
+      "summary": "rnic0 PCIe link degraded",
+      "links": [
+        "pcie.rnic0"
+      ],
+      "rnics": [
+        "rnic0"
+      ],
+      "endpoints": [
+        "gpu0"
+      ],
+      "confidence": "high",
+      "evidence": "util=0.42"
+    }
+  ],
+  "mutual": [
+    {
+      "src": "rnic0",
+      "dst": "rnic1",
+      "connected": true,
+      "rtt_ns_p50": 5000,
+      "rtt_ns_p99": 9000,
+      "loss_ratio": 0.25,
+      "sent": 8,
+      "recv": 6,
+      "reliable": true,
+      "counter_drops": 3,
+      "cross_rail": true
+    }
+  ],
+  "host_idle": true,
+  "abnormal_rnics": [
+    "rnic0"
+  ],
+  "baselines": [
+    {
+      "line_rate_bps": 400000000000,
+      "pcie_capacity_bps": 252000000000,
+      "derived_from_bps": 252000000000,
+      "section": "400g",
+      "entries": [
+        {
+          "distance": "cross_root",
+          "bandwidth_bps": 24800000000,
+          "latency_ns": 1500,
+          "bandwidth_source": "default",
+          "latency_source": "user",
+          "sub_classes": [
+            {
+              "name": "fast",
+              "bandwidth_bps": 25000000000,
+              "latency_ns": 1400,
+              "root_port_pairs": [
+                [
+                  "rp.0",
+                  "rp.1"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cpu_load": [
+    {
+      "numa": 1,
+      "socket": 1,
+      "busy": 0.93,
+      "high": true
+    }
+  ]
+}
