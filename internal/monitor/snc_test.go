@@ -96,22 +96,47 @@ func TestMapSNCBoxesFindsInterleavedBoxes(t *testing.T) {
 		t.Fatal(err)
 	}
 	table := map[string]perfReading{}
-	open := fakeOpener(table, nil)
-	// Open once so the table knows every counter before the touch runs.
-	for _, ev := range evs {
-		if _, err := open(ev); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The table knows every counter before the touch runs.
+	seedTable(table, evs)
+	fds := &fakeFDs{}
 	// Host traffic during the mapping lands on every box alike.
 	stubTouch(t, touchMoves(table, sncBoxNode, sncTouchBytes, sncTouchBytes/10))
-	got, err := mapSNCBoxes("0/0", []int{0, 1}, evs, open)
+	got, err := mapSNCBoxes("0/0", []int{0, 1}, evs, fds.opener(table, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(got) != fmt.Sprint(sncBoxNode) {
 		t.Fatalf("boxes %v, want %v", got, sncBoxNode)
 	}
+	// The measurement opens die 0/0's counters only (4 boxes × read/write)
+	// and closes every one of them.
+	if len(fds.all) != 8 {
+		t.Fatalf("%d counters opened, want 8", len(fds.all))
+	}
+	fds.check(t, nil)
+}
+
+func TestMapSNCBoxesClosesWhatItOpenedOnFailure(t *testing.T) {
+	root := sncHost(t)
+	evs, _ := discoverIMCEvents(root, false)
+	table := map[string]perfReading{}
+	seedTable(table, evs)
+	stubTouch(t, touchMoves(table, sncBoxNode, sncTouchBytes, 0))
+	fds := &fakeFDs{}
+	// Boxes 0 and 1 open before box 2 is denied.
+	_, err := mapSNCBoxes("0/0", []int{0, 1}, evs, fds.opener(table, func(ev uncoreEvent) error {
+		if ev.PMU == "uncore_imc_2" {
+			return errors.New("perf_event_open denied")
+		}
+		return nil
+	}))
+	if err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("a denied box must fail the measurement: %v", err)
+	}
+	if len(fds.all) != 4 {
+		t.Fatalf("%d counters opened, want 4 (boxes 0 and 1, read and write)", len(fds.all))
+	}
+	fds.check(t, nil)
 }
 
 func TestMapSNCBoxesRefusesUnclearReadings(t *testing.T) {
@@ -135,27 +160,29 @@ func TestMapSNCBoxesRefusesUnclearReadings(t *testing.T) {
 		},
 	} {
 		table := map[string]perfReading{}
-		open := fakeOpener(table, nil)
-		for _, ev := range evs {
-			_, _ = open(ev)
-		}
+		seedTable(table, evs)
+		fds := &fakeFDs{}
 		stubTouch(t, touch(table))
-		if got, err := mapSNCBoxes("0/0", []int{0, 1}, evs, open); err == nil {
+		if got, err := mapSNCBoxes("0/0", []int{0, 1}, evs, fds.opener(table, nil)); err == nil {
 			t.Errorf("%s: mapped %v, want an error", name, got)
 		}
+		// Whatever the reason, the counters opened for the measurement are
+		// closed.
+		if len(fds.all) != 8 {
+			t.Errorf("%s: %d counters opened, want 8", name, len(fds.all))
+		}
+		fds.check(t, nil)
 	}
 }
 
 func TestUncoreReadsMemoryUnderSubNUMAClustering(t *testing.T) {
 	root := sncHost(t)
 	table := map[string]perfReading{}
-	open := fakeOpener(table, nil)
 	evs, _ := discoverIMCEvents(root, false)
-	for _, ev := range evs {
-		_, _ = open(ev)
-	}
+	seedTable(table, evs)
+	fds := &fakeFDs{}
 	stubTouch(t, touchMoves(table, sncBoxNode, sncTouchBytes, 0))
-	u, err := newUncore(sncGraph(), root, "", UncoreOptions{}, open)
+	u, err := newUncore(sncGraph(), root, "", UncoreOptions{}, fds.opener(table, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +193,16 @@ func TestUncoreReadsMemoryUnderSubNUMAClustering(t *testing.T) {
 	if got := u.SNCBoxes["0/0"]; got != "node0=uncore_imc_0,uncore_imc_2 node1=uncore_imc_1,uncore_imc_3" {
 		t.Errorf("SNC boxes %q", got)
 	}
+	// The measurement opened and closed die 0/0's 8 counters; the 16 opened
+	// for reading (both dies, 4 boxes × read/write) are all kept, die 0/0's
+	// under their node's group.
+	if len(fds.all) != 24 || len(u.ctrs) != 16 {
+		t.Fatalf("%d counters opened, %d kept, want 24 and 16", len(fds.all), len(u.ctrs))
+	}
+	if n := fds.closed(t, func(ev uncoreEvent) bool { return ev.Group == "0/0" }); n != 8 {
+		t.Errorf("%d of the measurement's counters closed, want 8", n)
+	}
+	fds.check(t, u)
 	now := time.Unix(0, 0)
 	u.now = func() time.Time { return now }
 	u.Poll(false)

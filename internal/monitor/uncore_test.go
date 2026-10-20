@@ -237,13 +237,16 @@ func TestEventBytes(t *testing.T) {
 	}
 }
 
-// fakeCounter reads from a shared table the test advances.
+// fakeCounter reads from a shared table the test advances, and counts how
+// often it was closed: a real counter is a perf fd, closed exactly once.
 type fakeCounter struct {
-	key   string
-	table map[string]perfReading
+	ev     uncoreEvent
+	key    string
+	table  map[string]perfReading
+	closes int
 }
 
-func (f fakeCounter) Read() (uint64, uint64, uint64, error) {
+func (f *fakeCounter) Read() (uint64, uint64, uint64, error) {
 	r := f.table[f.key]
 	if !r.ok {
 		return 0, 0, 0, errors.New("read failed")
@@ -251,11 +254,25 @@ func (f fakeCounter) Read() (uint64, uint64, uint64, error) {
 	return r.count, r.enabled, r.running, nil
 }
 
-func (fakeCounter) Close() error { return nil }
+func (f *fakeCounter) Close() error {
+	f.closes++
+	return nil
+}
+
+func (f *fakeCounter) String() string {
+	return fmt.Sprintf("%s/%s on cpu%d (%s)", f.ev.PMU, f.ev.Name, f.ev.CPU, f.ev.Group)
+}
 
 func counterKey(ev uncoreEvent) string { return ev.PMU + "/" + ev.Name + "/" + ev.Group }
 
-func fakeOpener(table map[string]perfReading, fail func(uncoreEvent) error) perfOpener {
+// fakeFDs records every counter its opener handed out, in order, so a test
+// can check which ones newUncore (or mapSNCBoxes) closed. An open the fail
+// hook refuses hands out nothing, as perf_event_open returns no fd.
+type fakeFDs struct {
+	all []*fakeCounter
+}
+
+func (r *fakeFDs) opener(table map[string]perfReading, fail func(uncoreEvent) error) perfOpener {
 	return func(ev uncoreEvent) (perfCounter, error) {
 		if fail != nil {
 			if err := fail(ev); err != nil {
@@ -266,7 +283,75 @@ func fakeOpener(table map[string]perfReading, fail func(uncoreEvent) error) perf
 		if _, ok := table[k]; !ok {
 			table[k] = perfReading{ok: true}
 		}
-		return fakeCounter{key: k, table: table}, nil
+		c := &fakeCounter{ev: ev, key: k, table: table}
+		r.all = append(r.all, c)
+		return c, nil
+	}
+}
+
+// check fails the test unless every counter handed out that u does not hold
+// was closed exactly once, and every counter u holds is still open. With u
+// nil (newUncore failed, or u was closed) every counter must be closed once.
+func (r *fakeFDs) check(t *testing.T, u *Uncore) {
+	t.Helper()
+	mine := map[*fakeCounter]bool{}
+	for _, c := range r.all {
+		mine[c] = true
+	}
+	live := map[*fakeCounter]bool{}
+	if u != nil {
+		for _, c := range u.ctrs {
+			fc, ok := c.c.(*fakeCounter)
+			if !ok {
+				t.Fatalf("live counter %T is not a fake", c.c)
+			}
+			if !mine[fc] {
+				t.Fatalf("live counter %s was not handed out by this opener", fc)
+			}
+			live[fc] = true
+		}
+	}
+	for _, c := range r.all {
+		switch {
+		case live[c] && c.closes != 0:
+			t.Errorf("live counter %s closed %d times", c, c.closes)
+		case !live[c] && c.closes != 1:
+			t.Errorf("counter %s not kept, closed %d times, want 1 (fd leak or double close)", c, c.closes)
+		}
+	}
+}
+
+// closed is how many of the counters handed out for which ev holds were
+// closed exactly once; the test fails if one of them was closed more often.
+func (r *fakeFDs) closed(t *testing.T, which func(uncoreEvent) bool) int {
+	t.Helper()
+	n := 0
+	for _, c := range r.all {
+		if !which(c.ev) {
+			continue
+		}
+		if c.closes > 1 {
+			t.Errorf("counter %s closed %d times", c, c.closes)
+		}
+		if c.closes == 1 {
+			n++
+		}
+	}
+	return n
+}
+
+// fakeOpener is an opener whose counters' closes the test does not check.
+func fakeOpener(table map[string]perfReading, fail func(uncoreEvent) error) perfOpener {
+	return (&fakeFDs{}).opener(table, fail)
+}
+
+// seedTable gives the table a reading for every event, as opening them
+// would, so a touch that walks the table sees them before anything is open.
+func seedTable(table map[string]perfReading, evs []uncoreEvent) {
+	for _, ev := range evs {
+		if k := counterKey(ev); !table[k].ok {
+			table[k] = perfReading{ok: true}
+		}
 	}
 }
 
@@ -293,11 +378,17 @@ func TestUncoreUtilizationOverThePollInterval(t *testing.T) {
 	const capBPS = 1_000_000_000_000 // 1 Tb/s
 	g := memGraph(capBPS, false)
 	table := map[string]perfReading{}
-	u, err := newUncore(g, root, "", UncoreOptions{}, fakeOpener(table, nil))
+	fds := &fakeFDs{}
+	u, err := newUncore(g, root, "", UncoreOptions{}, fds.opener(table, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer u.Close()
+	// 2 PMUs × 2 dies × {read, write}, every one kept open.
+	if len(fds.all) != 8 || len(u.ctrs) != 8 {
+		t.Fatalf("%d counters opened, %d kept, want 8 and 8", len(fds.all), len(u.ctrs))
+	}
+	fds.check(t, u)
 	now := time.Unix(1000, 0)
 	u.now = func() time.Time { return now }
 
@@ -358,6 +449,35 @@ func TestUncoreUtilizationOverThePollInterval(t *testing.T) {
 	}
 }
 
+func TestUncoreCloseReleasesEveryCounter(t *testing.T) {
+	root := fakeHost(t, map[int]string{0: "0-3", 1: "4-7"})
+	fds := &fakeFDs{}
+	u, err := newUncore(memGraph(1e12, false), root, "", UncoreOptions{}, fds.opener(map[string]perfReading{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fds.all) != 8 {
+		t.Fatalf("%d counters opened, want 8", len(fds.all))
+	}
+	fds.check(t, u)
+	u.Close()
+	// Every counter closed exactly once, and none is kept.
+	if len(u.ctrs) != 0 {
+		t.Fatalf("%d counters still held after Close", len(u.ctrs))
+	}
+	fds.check(t, nil)
+	// Close drops the counters it released, so a second Close (the engine
+	// shutting down twice, or Close after a failed start) closes nothing
+	// again.
+	u.Close()
+	fds.check(t, nil)
+	// Polling a closed reader reads nothing rather than a closed fd.
+	u.Poll(false)
+	if got := u.Util(); got != nil {
+		t.Fatalf("closed reader yielded %v", got)
+	}
+}
+
 func TestUncoreNeedsCapacity(t *testing.T) {
 	root := fakeHost(t, map[int]string{0: "0-3", 1: "4-7"})
 	opened := 0
@@ -381,7 +501,8 @@ func TestUncoreSubNUMAClusteringStaysUnknown(t *testing.T) {
 	g := memGraph(1e12, false)
 	g.Endpoints = append(g.Endpoints, model.Endpoint{ID: "mem2", Kind: model.EndpointMemory, Index: 2, Socket: 2, NUMA: 2})
 	g.Links = append(g.Links, model.Link{ID: "mem.2", Kind: "memory", Device: "mem2", Socket: 2, CapacityBPS: 1e12})
-	u, err := newUncore(g, root, "", UncoreOptions{}, fakeOpener(map[string]perfReading{}, nil))
+	fds := &fakeFDs{}
+	u, err := newUncore(g, root, "", UncoreOptions{}, fds.opener(map[string]perfReading{}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,16 +514,34 @@ func TestUncoreSubNUMAClusteringStaysUnknown(t *testing.T) {
 			t.Errorf("%s skip reason %q", id, u.Skipped[id])
 		}
 	}
+	// The measurement opened die 0/0's 4 counters and closed them; die 0/0 is
+	// then not wanted, so only die 1/0's 4 are opened for reading and kept.
+	if len(fds.all) != 8 || len(u.ctrs) != 4 {
+		t.Fatalf("%d counters opened, %d kept, want 8 and 4", len(fds.all), len(u.ctrs))
+	}
+	if n := fds.closed(t, func(ev uncoreEvent) bool { return ev.Die == "0/0" }); n != 4 {
+		t.Errorf("%d of the SNC measurement's counters closed, want 4", n)
+	}
+	fds.check(t, u)
+	u.Close()
+	fds.check(t, nil)
 }
 
 func TestUncoreOpenFailure(t *testing.T) {
 	root := fakeHost(t, map[int]string{0: "0-3", 1: "4-7"})
 	denied := errors.New("perf_event_open denied")
-	if _, err := newUncore(memGraph(1e12, false), root, "", UncoreOptions{}, fakeOpener(map[string]perfReading{}, func(uncoreEvent) error { return denied })); err == nil || !strings.Contains(err.Error(), "denied") {
+	all := &fakeFDs{}
+	if _, err := newUncore(memGraph(1e12, false), root, "", UncoreOptions{}, all.opener(map[string]perfReading{}, func(uncoreEvent) error { return denied })); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("denied access must be reported: %v", err)
 	}
+	// The first counter of each die fails, so the die's other counters are
+	// never tried and nothing is left to close.
+	if len(all.all) != 0 {
+		t.Fatalf("%d counters opened although every open was denied", len(all.all))
+	}
 	// One die failing drops that die only, never part of its boxes.
-	u, err := newUncore(memGraph(1e12, false), root, "", UncoreOptions{}, fakeOpener(map[string]perfReading{}, func(ev uncoreEvent) error {
+	fds := &fakeFDs{}
+	u, err := newUncore(memGraph(1e12, false), root, "", UncoreOptions{}, fds.opener(map[string]perfReading{}, func(ev uncoreEvent) error {
 		if ev.Die == "0/0" && ev.PMU == "uncore_imc_1" {
 			return denied
 		}
@@ -419,6 +558,19 @@ func TestUncoreOpenFailure(t *testing.T) {
 			t.Fatalf("counter of a dropped die left open: %+v", c.ev)
 		}
 	}
+	// Events come PMU by PMU: uncore_imc_0's read and write on die 0/0 were
+	// open when uncore_imc_1's read on it was denied, and must have been
+	// closed then; uncore_imc_1's write on die 0/0 is never tried. Die 1/0's
+	// 4 counters are kept.
+	if len(fds.all) != 6 || len(u.ctrs) != 4 {
+		t.Fatalf("%d counters opened, %d kept, want 6 and 4", len(fds.all), len(u.ctrs))
+	}
+	if n := fds.closed(t, func(ev uncoreEvent) bool { return ev.Die == "0/0" }); n != 2 {
+		t.Errorf("%d counters of the dropped die closed, want 2 (uncore_imc_0 read and write)", n)
+	}
+	fds.check(t, u)
+	u.Close()
+	fds.check(t, nil)
 }
 
 func TestSysfsSamplerBusMergesUncore(t *testing.T) {
@@ -538,10 +690,17 @@ func TestUncoreSumsGraniteRapidsSubChannels(t *testing.T) {
 	writeTree(t, root, files)
 	const capBPS = 1_000_000_000_000
 	table := map[string]perfReading{}
-	u, err := newUncore(memGraph(capBPS, false), root, filepath.Join(root, "cpuinfo"), UncoreOptions{}, fakeOpener(table, nil))
+	fds := &fakeFDs{}
+	u, err := newUncore(memGraph(capBPS, false), root, filepath.Join(root, "cpuinfo"), UncoreOptions{}, fds.opener(table, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer u.Close()
+	// 1 PMU × 2 dies × {read, write} × 2 sub-channels, every one kept.
+	if len(fds.all) != 8 || len(u.ctrs) != 8 {
+		t.Fatalf("%d counters opened, %d kept, want 8 and 8", len(fds.all), len(u.ctrs))
+	}
+	fds.check(t, u)
 	now := time.Unix(0, 0)
 	u.now = func() time.Time { return now }
 	u.Poll(false)
