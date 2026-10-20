@@ -106,7 +106,7 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 		if all {
 			return []model.RootCause{{
 				Code: model.CauseToRSwitchAnomaly, Summary: "every RNIC on the host times out on its mutual probes (ToR switch anomaly suspected)",
-				RNICs: ids, Confidence: "medium",
+				RNICs: ids, Confidence: model.ConfidenceMedium,
 				Evidence: fmt.Sprintf("all %d RNICs time out on all %d pairs", len(ids), len(pairs)),
 			}}
 		}
@@ -123,7 +123,7 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseRNICConnectFailure, Summary: "RNIC unreachable: every mutual probe timed out",
-			RNICs: []string{id}, Confidence: "high",
+			RNICs: []string{id}, Confidence: model.ConfidenceHigh,
 			Evidence: fmt.Sprintf("%s timeout_ratio=1 on every pair (%s)", id, strings.Join(peers, ", ")),
 		})
 	}
@@ -133,7 +133,7 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 		if p.ratio == 1 && !p.m.CrossRail && !down[p.m.Src] && !down[p.m.Dst] {
 			out = append(out, model.RootCause{
 				Code: model.CauseRNICConnectFailure, Summary: "RNIC mutual probe failed to connect",
-				RNICs: []string{p.m.Src, p.m.Dst}, Confidence: "high",
+				RNICs: []string{p.m.Src, p.m.Dst}, Confidence: model.ConfidenceHigh,
 				Evidence: p.evidence(),
 			})
 		}
@@ -209,7 +209,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			Code:       model.CauseRNICCrossRailUnreachable,
 			Summary:    "no RNIC of this host reaches another across subnets (isolated rails by design, or a ToR/fabric routing fault)",
 			RNICs:      sortedKeys(involved),
-			Confidence: "low",
+			Confidence: model.ConfidenceLow,
 			Evidence:   fmt.Sprintf("all %d cross-rail pairs time out: %s", len(dead), joinLimited(ev, 8)),
 		}}
 	}
@@ -240,7 +240,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			out = append(out, model.RootCause{
 				Code:    model.CauseRNICCrossRailUnreachable,
 				Summary: "RNIC pair cannot reach each other across subnets while both reach other RNICs (route between their subnets suspected)",
-				RNICs:   []string{p.m.Src, p.m.Dst}, Confidence: "medium",
+				RNICs:   []string{p.m.Src, p.m.Dst}, Confidence: model.ConfidenceMedium,
 				Evidence: p.evidence(),
 			})
 			continue
@@ -267,7 +267,7 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			Code:       model.CauseRNICCrossRailUnreachable,
 			Summary:    "RNICs reach no RNIC outside their group across subnets while other RNICs do (cabled onto an isolated subnet suspected)",
 			RNICs:      g,
-			Confidence: "medium",
+			Confidence: model.ConfidenceMedium,
 			Evidence:   fmt.Sprintf("group [%s] times out to every RNIC outside it: %s", strings.Join(g, " "), joinLimited(ev, 8)),
 		})
 	}

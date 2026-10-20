@@ -43,7 +43,7 @@ type PathRef struct {
 	RNIC, Endpoint string
 }
 
-func (p PathRef) String() string { return p.RNIC + "->" + p.Endpoint }
+func (p PathRef) String() string { return pathKey(p.RNIC, p.Endpoint) }
 
 // LatencyRecheckPlan is one path to recheck and the siblings to read
 // interleaved with it: Siblings[i] is read right after the path's i-th re-read.
@@ -259,7 +259,7 @@ func applyLatencyRecheck(paths []model.PathMeasurement, rc map[string]model.Late
 		if m.LatencyStatus != model.LatencyAbnormal || m.LatencyReason != model.LatencyBySiblings {
 			continue
 		}
-		r, ok := rc[m.RNIC+"->"+m.Endpoint]
+		r, ok := rc[pathKey(m.RNIC, m.Endpoint)]
 		if !ok {
 			continue
 		}

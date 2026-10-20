@@ -190,7 +190,7 @@ func siblingLatencyHigh(lat, ref uint64, cfg config.Config) bool {
 }
 
 // latencyKey keys a path in the latency streaks, as "rnic->endpoint".
-func latencyKey(m model.PathMeasurement) string { return m.RNIC + "->" + m.Endpoint }
+func latencyKey(m model.PathMeasurement) string { return pathKey(m.RNIC, m.Endpoint) }
 
 // latencyStreaks updates Input.LatencyHits from this run's verdicts, as left
 // by the recheck and the locality shift, and sets each path's LatencyStreak.
@@ -362,7 +362,7 @@ type latencyTally struct{ judged, abnormal int }
 
 // whole reports a group of at least two judged paths that are all abnormal.
 func (t *latencyTally) whole() bool {
-	return t != nil && t.judged >= 2 && t.abnormal == t.judged
+	return t.judged >= 2 && t.abnormal == t.judged
 }
 
 func tallyAdd[K comparable](m map[K]*latencyTally, k K, abn bool) {

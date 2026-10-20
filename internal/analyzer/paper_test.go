@@ -34,12 +34,12 @@ func runFault(t *testing.T, fault string, mode model.RunMode) model.Report {
 	}
 	for id, ok := range w.SlowStart {
 		if ok {
-			req.Hints[id] = "slow_start"
+			req.Hints[id] = model.HintSlowStart
 		}
 	}
 	for id, ok := range w.TxWindow {
 		if ok {
-			req.Hints[id] = "tx_window"
+			req.Hints[id] = model.HintTxWindow
 		}
 	}
 	rep, err := e.Run(context.Background(), req)

@@ -89,23 +89,6 @@ type Result struct {
 }
 
 func Analyze(in Input) Result {
-	if in.BusyRNICs == nil {
-		in.BusyRNICs = map[string]bool{}
-	}
-	if in.Util == nil {
-		in.Util = map[string]float64{}
-	}
-	if in.GrayHits == nil {
-		in.GrayHits = map[string]int{}
-	}
-	if in.DropDelta == nil {
-		in.DropDelta = map[string]uint64{}
-	}
-
-	if in.RNICHints == nil {
-		in.RNICHints = map[string]string{}
-	}
-
 	paths := ClassifyPaths(in.Graph, in.Measurements, in.Mode, in.BusyRNICs, in.Cfg, in.Bases)
 	// Applied before anything reads the bandwidth verdicts, so the links,
 	// gray streaks and causes all see the confirmed ones only. The two touch
@@ -192,7 +175,7 @@ func diagnoseMisconfig(in Input, paths []model.PathMeasurement) []model.RootCaus
 			if e.Kind != model.EndpointGPU {
 				continue
 			}
-			m, ok := pm[n.ID+"->"+e.ID]
+			m, ok := pm[pathKey(n.ID, e.ID)]
 			if !ok || m.Status != model.PathAbnormal {
 				continue
 			}
@@ -214,14 +197,14 @@ func diagnoseMisconfig(in Input, paths []model.PathMeasurement) []model.RootCaus
 	if acsHits > 0 {
 		out = append(out, model.RootCause{
 			Code: model.CauseACSEnabled, Summary: "ACS redirects GDR through the CPU root complex",
-			Endpoints: unique(acsEps), Confidence: "high",
+			Endpoints: unique(acsEps), Confidence: model.ConfidenceHigh,
 			Evidence: fmt.Sprintf("%d affinitive GPU paths have high latency with ACS enabled", acsHits),
 		})
 	}
 	for rnic, eps := range atsByRNIC {
 		out = append(out, model.RootCause{
 			Code: model.CauseATSDisabled, Summary: "ATS disabled; GDR address translation hairpins to the CPU",
-			RNICs: []string{rnic}, Endpoints: unique(eps), Confidence: "high",
+			RNICs: []string{rnic}, Endpoints: unique(eps), Confidence: model.ConfidenceHigh,
 			Evidence: "same-root-port GPU latency high while ATS is off",
 		})
 	}
@@ -332,7 +315,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		seen := 0
 		var eps []string
 		for _, e := range aff {
-			m, ok := pm[n.ID+"->"+e.ID]
+			m, ok := pm[pathKey(n.ID, e.ID)]
 			if !ok {
 				continue // skipped (NoGDR / no device); not evidence of health
 			}
@@ -346,32 +329,32 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if !allAbn || seen == 0 {
 			continue
 		}
-		pcieID := "pcie." + n.ID
+		pcieID := model.PCIeLinkID(n.ID)
 		ls := st[pcieID]
 		cfg := in.PCIe[n.ID]
 		switch {
 		case ls.UtilAtLeast(in.Cfg.UtilHigh):
 			causes = append(causes, model.RootCause{
 				Code: model.CauseOverloadedRNICPCIe, Summary: "RNIC PCIe link overloaded (loopback contention)",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("all affinitive paths abnormal; %s", ls.UtilEvidence()),
 			})
 		case rnicPCIeDegraded(cfg, n.LineRate):
 			causes = append(causes, model.RootCause{
 				Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link failed or down-trained",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("PCIe %s trained below its maximum; all affinitive endpoints abnormal", pcieEvidence(cfg)),
 			})
-		case in.RNICHints[n.ID] == "tx_window":
+		case in.RNICHints[n.ID] == model.HintTxWindow:
 			causes = append(causes, model.RootCause{
 				Code: model.CauseRNICTxWindow, Summary: "RNIC Tx window too small",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: model.ConfidenceHigh,
 				Evidence: "RNIC-wide bandwidth cap with Tx window configuration",
 			})
-		case in.RNICHints[n.ID] == "slow_start":
+		case in.RNICHints[n.ID] == model.HintSlowStart:
 			causes = append(causes, model.RootCause{
 				Code: model.CauseRNICSlowStart, Summary: "RNIC-wide bandwidth cap (slow start or small Tx window)",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: "medium",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: model.ConfidenceMedium,
 				Evidence: "device config shows RNIC-wide throttle (slow start); not inferred from equal BWs alone",
 			})
 		default:
@@ -384,7 +367,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 			// above never fire there and the throttle cannot be excluded.
 			causes = append(causes, model.RootCause{
 				Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link likely failed",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: "medium",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Endpoints: eps, Confidence: model.ConfidenceMedium,
 				Evidence: "all affinitive paths from this RNIC are abnormal; " + noPCIeEvidence(cfg, n.LineRate) +
 					"; an RNIC-wide throttle (slow start / Tx window, NSDI'23 #9/#10) was not ruled out",
 			})
@@ -395,7 +378,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if e.Kind != model.EndpointGPU {
 			continue
 		}
-		id := "pcie." + e.ID
+		id := model.PCIeLinkID(e.ID)
 		ls := st[id]
 		if ls.Status != model.LinkAbnormal {
 			continue
@@ -403,7 +386,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		affRNIC := affinitiveRNIC(g, e)
 		latAbn := false
 		if affRNIC != "" {
-			if m, ok := pm[affRNIC+"->"+e.ID]; ok {
+			if m, ok := pm[pathKey(affRNIC, e.ID)]; ok {
 				n, _ := g.RNIC(affRNIC)
 				base := baseline.ForPath(in.Bases.Effective(n), model.DistanceSameSwitch)
 				latAbn = latencyHigh(m.SmallLatNsP50, base.LatencyNs, in.Cfg.AbnormalTh)
@@ -416,25 +399,25 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		case ls.UtilAtLeast(in.Cfg.UtilHigh):
 			causes = append(causes, model.RootCause{
 				Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link overloaded",
-				Links: []string{id}, Endpoints: []string{e.ID}, Confidence: "medium",
+				Links: []string{id}, Endpoints: []string{e.ID}, Confidence: model.ConfidenceMedium,
 				Evidence: ls.UtilEvidence(),
 			})
 		default:
 			causes = append(causes, model.RootCause{
 				Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link failed",
-				Links: []string{id}, Endpoints: []string{e.ID}, Confidence: "high",
+				Links: []string{id}, Endpoints: []string{e.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: "GPU PCIe hop abnormal without a matching latency increase",
 			})
 		}
 	}
 	causes = append(causes, diagnoseGPUFromSiblings(g, pm, st, in)...)
 
-	for _, l := range g.LinksByKind("memory") {
+	for _, l := range g.LinksByKind(model.LinkKindMemory) {
 		ls := st[l.ID]
 		if flapping(ls, gray, in.Cfg.FlapWindow) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseMemoryChannelFlapping, Summary: "memory channel flapping",
-				Links: []string{l.ID}, Confidence: "high",
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
 			})
 			continue
@@ -447,14 +430,14 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if ls.UtilAtLeast(in.Cfg.UtilHigh) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseOverloadedMemory, Summary: "memory channel overloaded",
-				Links: []string{l.ID}, Confidence: "high",
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
 			})
 			continue
 		}
 		causes = append(causes, model.RootCause{
 			Code: model.CauseMemoryChannelFailure, Summary: "memory channel failed",
-			Links: []string{l.ID}, Confidence: "high",
+			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
 		})
 	}
@@ -466,7 +449,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if flapping(ls, gray, in.Cfg.FlapWindow) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseUPIFailure, Summary: "inter-socket bus flapping",
-				Links: []string{l.ID}, Confidence: "high",
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
 			})
 			continue
@@ -479,14 +462,14 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if ls.UtilAtLeast(in.Cfg.UtilHigh) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseOverloadedUPI, Summary: "inter-socket bus overloaded",
-				Links: []string{l.ID}, Confidence: "high",
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("abnormal_cnt=%d %s", ls.AbnormalCount, ls.UtilEvidence()),
 			})
 			continue
 		}
 		causes = append(causes, model.RootCause{
 			Code: model.CauseUPIFailure, Summary: "inter-socket bus (UPI/xGMI) failed",
-			Links: []string{l.ID}, Confidence: "high",
+			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: fmt.Sprintf("status=%s abnormal_cnt=%d", ls.Status, ls.AbnormalCount),
 		})
 	}
@@ -499,7 +482,7 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		if flapping(ls, gray, in.Cfg.FlapWindow) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseSNCMeshFailure, Summary: "intra-package mesh between NUMA nodes flapping",
-				Links: []string{l.ID}, Confidence: "high",
+				Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("gray in %d consecutive loopback tests", gray[l.ID]),
 			})
 			continue
@@ -509,19 +492,19 @@ func diagnose(in Input, paths []model.PathMeasurement, links []model.LinkState, 
 		}
 		causes = append(causes, model.RootCause{
 			Code: model.CauseSNCMeshFailure, Summary: "intra-package mesh between NUMA nodes (sub-NUMA clustering) failed",
-			Links: []string{l.ID}, Confidence: "high",
+			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: fmt.Sprintf("status=%s abnormal_cnt=%d %s", ls.Status, ls.AbnormalCount, ls.UtilEvidence()),
 		})
 	}
 
-	causes = append(causes, diagnoseRootPorts(g, paths, st, in)...)
+	causes = append(causes, diagnoseRootPorts(g, paths, st)...)
 	causes = append(causes, diagnoseBusyEqualRNIC(in, paths, st, causes)...)
 
 	if len(causes) == 0 {
 		if anyAbnormalPath(paths) {
 			causes = append(causes, model.RootCause{
 				Code: model.CauseUnknown, Summary: "abnormal paths without a unique hop",
-				Confidence: "low", Evidence: "tomography left only gray/uncertain links",
+				Confidence: model.ConfidenceLow, Evidence: "tomography left only gray/uncertain links",
 			})
 		}
 	}
@@ -537,7 +520,7 @@ func diagnoseGPUFromSiblings(g topology.Graph, pm map[string]model.PathMeasureme
 		if e.Kind != model.EndpointGPU {
 			continue
 		}
-		id := "pcie." + e.ID
+		id := model.PCIeLinkID(e.ID)
 		if st[id].Status == model.LinkAbnormal {
 			continue
 		}
@@ -545,7 +528,7 @@ func diagnoseGPUFromSiblings(g topology.Graph, pm map[string]model.PathMeasureme
 		if aff == "" {
 			continue
 		}
-		m, ok := pm[aff+"->"+e.ID]
+		m, ok := pm[pathKey(aff, e.ID)]
 		if !ok || m.Status != model.PathAbnormal {
 			continue
 		}
@@ -558,7 +541,7 @@ func diagnoseGPUFromSiblings(g topology.Graph, pm map[string]model.PathMeasureme
 			if sib.ID == e.ID {
 				continue
 			}
-			sm, ok := pm[aff+"->"+sib.ID]
+			sm, ok := pm[pathKey(aff, sib.ID)]
 			if ok && sm.Status != model.PathAbnormal {
 				siblingOK = true
 				break
@@ -569,7 +552,7 @@ func diagnoseGPUFromSiblings(g topology.Graph, pm map[string]model.PathMeasureme
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link failed",
-			Links: []string{id}, Endpoints: []string{e.ID}, Confidence: "high",
+			Links: []string{id}, Endpoints: []string{e.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: "affinitive GPU path abnormal while sibling affinitive paths are not",
 		})
 	}
@@ -581,10 +564,10 @@ func mustRNIC(g topology.Graph, id string) model.RNIC {
 	return n
 }
 
-func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[string]model.LinkState, in Input) []model.RootCause {
+func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[string]model.LinkState) []model.RootCause {
 	pm := pathMap(paths)
 	var out []model.RootCause
-	for _, l := range g.LinksByKind("root_port") {
+	for _, l := range g.LinksByKind(model.LinkKindRootPort) {
 		// Gray sibling RPs are Algorithm 1 conflicts, not isolated #5 faults.
 		if st[l.ID].Status != model.LinkAbnormal {
 			continue
@@ -601,7 +584,7 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 			}
 		}
 		memAbn := false
-		for _, ml := range g.LinksByKind("memory") {
+		for _, ml := range g.LinksByKind(model.LinkKindMemory) {
 			if ml.Socket != l.Socket {
 				continue
 			}
@@ -625,14 +608,14 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 				continue
 			}
 			aff := affinitiveRNIC(g, e)
-			am, okAff := pm[aff+"->"+e.ID]
+			am, okAff := pm[pathKey(aff, e.ID)]
 			if aff == "" || !okAff || am.Status != model.PathNormal {
 				continue
 			}
-			m, ok := pm[p.RNIC+"->"+p.Endpoint]
+			m, ok := pm[pathKey(p.RNIC, p.Endpoint)]
 			if ok && m.Status == model.PathAbnormal {
 				crossGPUAbn = true
-				trans = append(trans, p.RNIC+"->"+p.Endpoint)
+				trans = append(trans, pathKey(p.RNIC, p.Endpoint))
 			}
 		}
 		// #5: isolated RP, healthy P2P, and either a healthy dest GPU fails
@@ -649,15 +632,15 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 				if !p.ContainsLink(l.ID) {
 					continue
 				}
-				if m, ok := pm[p.RNIC+"->"+p.Endpoint]; ok && m.Status == model.PathAbnormal {
-					failing = append(failing, p.RNIC+"->"+p.Endpoint)
+				if m, ok := pm[pathKey(p.RNIC, p.Endpoint)]; ok && m.Status == model.PathAbnormal {
+					failing = append(failing, pathKey(p.RNIC, p.Endpoint))
 				}
 			}
 			ev = fmt.Sprintf("P2P under %s is healthy and no memory link on socket %d is abnormal; paths through it fail (%s)", l.ID, l.Socket, joinLimited(failing, 4))
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseCPURootPortFailure, Summary: "CPU root port bandwidth degraded for transit traffic",
-			Links: []string{l.ID}, Confidence: "high",
+			Links: []string{l.ID}, Confidence: model.ConfidenceHigh,
 			Evidence: ev,
 		})
 	}
@@ -669,7 +652,7 @@ func rnicLocalGPUsHealthy(g topology.Graph, n model.RNIC, pm map[string]model.Pa
 		if e.Kind != model.EndpointGPU || e.RootPort != n.RootPort {
 			continue
 		}
-		m, ok := pm[n.ID+"->"+e.ID]
+		m, ok := pm[pathKey(n.ID, e.ID)]
 		if !ok || m.Status != model.PathNormal {
 			return false
 		}
@@ -718,7 +701,7 @@ func diagnoseDrops(in Input) []model.RootCause {
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseRNICPacketDrops, Summary: "packet drops on RNIC hardware counters",
-			RNICs: []string{id}, Confidence: "high",
+			RNICs: []string{id}, Confidence: model.ConfidenceHigh,
 			Evidence: ev,
 		})
 	}
@@ -763,7 +746,7 @@ func dropCauses(pairs []model.MutualMeasurement, summary string, evidence func(m
 			for i, m := range g.pairs {
 				out = append(out, model.RootCause{
 					Code: model.CauseRNICPacketDrops, Summary: summary,
-					RNICs: []string{m.Src, m.Dst}, Confidence: "high",
+					RNICs: []string{m.Src, m.Dst}, Confidence: model.ConfidenceHigh,
 					Evidence: ev[i],
 				})
 			}
@@ -771,7 +754,7 @@ func dropCauses(pairs []model.MutualMeasurement, summary string, evidence func(m
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseRNICPacketDrops, Summary: summary,
-			RNICs: g.rnics, Confidence: "high",
+			RNICs: g.rnics, Confidence: model.ConfidenceHigh,
 			Evidence: strings.Join(ev, "; "),
 		})
 	}
@@ -1010,32 +993,32 @@ func diagnoseBusyEqualRNIC(in Input, paths []model.PathMeasurement, st map[strin
 		if !allAffinitivePresentUncertain(aff, n.ID, pm) {
 			continue
 		}
-		pcieID := "pcie." + n.ID
+		pcieID := model.PCIeLinkID(n.ID)
 		ls := st[pcieID]
 		cfg := in.PCIe[n.ID]
 		switch {
 		case ls.UtilAtLeast(in.Cfg.UtilHigh):
 			out = append(out, model.RootCause{
 				Code: model.CauseOverloadedRNICPCIe, Summary: "RNIC PCIe link overloaded (loopback contention)",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("busy equal-throttle fallback; %s", ls.UtilEvidence()),
 			})
-		case in.RNICHints[n.ID] == "tx_window":
+		case in.RNICHints[n.ID] == model.HintTxWindow:
 			out = append(out, model.RootCause{
 				Code: model.CauseRNICTxWindow, Summary: "RNIC Tx window too small",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: "busy equal-throttle fallback with Tx window configuration",
 			})
-		case in.RNICHints[n.ID] == "slow_start":
+		case in.RNICHints[n.ID] == model.HintSlowStart:
 			out = append(out, model.RootCause{
 				Code: model.CauseRNICSlowStart, Summary: "RNIC-wide bandwidth cap (slow start)",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "medium",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceMedium,
 				Evidence: "busy equal-throttle fallback with slow-start configuration",
 			})
 		case rnicPCIeDegraded(cfg, n.LineRate):
 			out = append(out, model.RootCause{
 				Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link failed or down-trained",
-				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: "high",
+				Links: []string{pcieID}, RNICs: []string{n.ID}, Confidence: model.ConfidenceHigh,
 				Evidence: fmt.Sprintf("busy equal-throttle fallback; PCIe %s trained below its maximum", pcieEvidence(cfg)),
 			})
 		}
@@ -1049,7 +1032,7 @@ func allAffinitivePresentUncertain(aff []model.Endpoint, rnic string, pm map[str
 	}
 	seen := 0
 	for _, e := range aff {
-		m, ok := pm[rnic+"->"+e.ID]
+		m, ok := pm[pathKey(rnic, e.ID)]
 		if !ok {
 			continue
 		}
@@ -1082,9 +1065,6 @@ func hasRNICCause(causes []model.RootCause, rnic string) bool {
 }
 
 func acsEnabledOnPath(pcie map[string]model.PCIeConfig, n model.RNIC, e model.Endpoint) bool {
-	if pcie == nil {
-		return false
-	}
 	for _, key := range []string{e.ID, n.ID, e.RootPort, n.RootPort, e.Switch, n.Switch} {
 		if key == "" {
 			continue
