@@ -264,14 +264,15 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	e.Latency = res.LatencyHits
 
 	abn := abnormalRNICs(res.Paths)
+	elapsed := time.Since(started)
 
 	return model.Report{
 		Trigger:          req.Trigger,
 		Mode:             req.Mode,
 		Host:             host,
 		Started:          started,
-		Elapsed:          time.Since(started),
-		ElapsedNs:        time.Since(started).Nanoseconds(),
+		Elapsed:          elapsed,
+		ElapsedNs:        elapsed.Nanoseconds(),
 		Paths:            res.Paths,
 		SkippedEndpoints: skippedEndpoints(groups),
 		Links:            res.Links,

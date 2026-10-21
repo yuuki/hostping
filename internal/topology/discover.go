@@ -699,44 +699,17 @@ func v4RailKey(ibdev, netdev string, ip net.IP) string {
 	return "v4:" + network.String() + "/" + strconv.Itoa(ones)
 }
 
-// firstActiveIBPort is the first ACTIVE port of ibdev, by port number, or
-// the lowest-numbered port when none is ACTIVE; "" when the ports directory
-// cannot be read, which fabricKey and rnicLinkLayer turn into "unknown".
-//
-// The monitor has its own firstActiveIBPort (monitor/sysfs.go) that is NOT
-// this one: it tries the fixed port names "1".."4" without listing the
-// directory, falls back to "1", and never returns "". The two agree on every
-// device with ports 1..4; they differ for a port numbered 5 or more, a
-// non-numeric port name, and an unreadable ports directory. Discovery's
-// result ends up in the graph (rate, link layer, rail key), the monitor's in
-// the counters, and the two have been kept separate on purpose: unifying them
-// would move the rail key or the counter source of such a device.
+// firstActiveIBPort is sysfs.FirstActiveIBPort for ibdev: the first ACTIVE
+// port by port number, or the lowest-numbered port when none is ACTIVE; ""
+// when the ports directory cannot be read or is empty, which fabricKey and
+// rnicLinkLayer turn into "unknown". The monitor picks the port it reads
+// counters from the same way, so the two never disagree on a device.
 func firstActiveIBPort(sysroot, ibdev string) string {
-	ents, err := os.ReadDir(filepath.Join(sysroot, "class/infiniband", ibdev, "ports"))
-	if err != nil {
+	port, ok := sysfs.FirstActiveIBPort(sysroot, ibdev)
+	if !ok {
 		return ""
 	}
-	var names []string
-	for _, e := range ents {
-		names = append(names, e.Name())
-	}
-	sort.Slice(names, func(i, j int) bool {
-		a, ea := strconv.Atoi(names[i])
-		b, eb := strconv.Atoi(names[j])
-		if ea == nil && eb == nil {
-			return a < b
-		}
-		return names[i] < names[j]
-	})
-	for _, name := range names {
-		if sysfs.PortActive(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", name)) {
-			return name
-		}
-	}
-	if len(names) > 0 {
-		return names[0]
-	}
-	return "1"
+	return port
 }
 
 func gidRoCEv2(portDir string, idx int) bool {

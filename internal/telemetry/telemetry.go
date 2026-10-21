@@ -363,9 +363,9 @@ func (t *Telemetry) initInstruments() error {
 		{&t.cpuBusy, "hostping.cpu.busy", "", "CPU busy fraction of a NUMA node over the monitor poll interval, from /proc/stat"},
 		{&t.bus, "hostping.bus.utilization", "", "Intra-host bus utilization"},
 		// One summary value per RNIC pair per run, same as loopback latency.
-		{&t.mutualR, "hostping.mutual.rtt", "us", "Same-rail RNIC-to-RNIC RTT p50"},
-		{&t.mutualL, "hostping.mutual.loss_ratio", "", "Same-rail RNIC-to-RNIC loss ratio"},
-		{&t.mutualT, "hostping.mutual.timeout_ratio", "", "Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent"},
+		{&t.mutualR, "hostping.mutual.rtt", "us", "Mutual probe RNIC-to-RNIC RTT p50 (same-rail pairs, or every pair with --mutual-scope=host)"},
+		{&t.mutualL, "hostping.mutual.loss_ratio", "", "Mutual probe RNIC-to-RNIC loss ratio (same-rail pairs, or every pair with --mutual-scope=host)"},
+		{&t.mutualT, "hostping.mutual.timeout_ratio", "", "Mutual probe RNIC-to-RNIC timeout ratio, 1 - recv/sent (same-rail pairs, or every pair with --mutual-scope=host)"},
 		// Like loopback latency, one value per path per run: the probe calls
 		// each setup verb once, so a histogram would bucket runs rather than
 		// calls.

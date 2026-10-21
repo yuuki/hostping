@@ -137,6 +137,8 @@ func TestCanonicalBDF(t *testing.T) {
 		{"0000:3C:00.1", "0000:3c:00.1"},
 		{"00010000:18:00.0", ""}, // domain > 0xffff must not be truncated to 0000
 		{"0001:18:00.0", "0001:18:00.0"},
+		{"00000001:3C:00.0", "0001:3c:00.0"},    // nvidia-smi's 8-digit domain, non-zero
+		{" 00000000:3C:00.0\n", "0000:3c:00.0"}, // trimmed, lower-cased
 		{"rp.0", ""},
 		{"", ""},
 	}
@@ -144,5 +146,13 @@ func TestCanonicalBDF(t *testing.T) {
 		if got := CanonicalBDF(tc.in); got != tc.want {
 			t.Errorf("CanonicalBDF(%q)=%q want %q", tc.in, got, tc.want)
 		}
+	}
+	// One spelling per function: every form of a domain-0 address meets,
+	// and the same bus:dev.fn in another domain stays apart.
+	if a, b := CanonicalBDF("00000000:3C:00.0"), CanonicalBDF("3c:00.0"); a != b {
+		t.Errorf("domain 0 spellings differ: %q vs %q", a, b)
+	}
+	if a, b := CanonicalBDF("0000:3c:00.0"), CanonicalBDF("0001:3c:00.0"); a == b {
+		t.Errorf("domains 0 and 1 collide on %q", a)
 	}
 }

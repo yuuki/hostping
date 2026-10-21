@@ -3,6 +3,7 @@ package mutual
 import (
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
@@ -20,6 +21,18 @@ type SimTransport struct {
 
 	start  time.Time
 	queued []Reply
+
+	// done is closed by Interrupt (and Close) so that a Wait asleep on an
+	// empty queue returns at once; the Loop interrupts it when its context
+	// is cancelled, instead of waiting out the simulated block.
+	initOnce  sync.Once
+	closeOnce sync.Once
+	done      chan struct{}
+}
+
+func (t *SimTransport) doneCh() chan struct{} {
+	t.initOnce.Do(func() { t.done = make(chan struct{}) })
+	return t.done
 }
 
 func (t *SimTransport) clock() uint64 {
@@ -49,9 +62,18 @@ func (t *SimTransport) Send(src, dst int, seq uint32) (uint64, error) {
 	return now, nil
 }
 
+// Wait returns every queued reply at once; with nothing queued it sleeps for
+// spin+block, or until Interrupt or Close cuts the sleep short.
 func (t *SimTransport) Wait(spin, block time.Duration) ([]Reply, error) {
 	if len(t.queued) == 0 {
-		time.Sleep(spin + block)
+		if d := spin + block; d > 0 {
+			tm := time.NewTimer(d)
+			defer tm.Stop()
+			select {
+			case <-tm.C:
+			case <-t.doneCh():
+			}
+		}
 		return nil, nil
 	}
 	out := t.queued
@@ -59,4 +81,11 @@ func (t *SimTransport) Wait(spin, block time.Duration) ([]Reply, error) {
 	return out, nil
 }
 
-func (t *SimTransport) Close() {}
+// Interrupt wakes a Wait that is asleep, and makes every later empty Wait
+// return at once. It may be called from any goroutine, any number of times.
+func (t *SimTransport) Interrupt() {
+	t.closeOnce.Do(func() { close(t.doneCh()) })
+}
+
+// Close releases nothing (the world is in-process); it interrupts a Wait.
+func (t *SimTransport) Close() { t.Interrupt() }

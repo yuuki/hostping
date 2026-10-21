@@ -47,14 +47,14 @@ func TestGPUUtilCacheRateLimitsNvidiaSMI(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("calls=%d, want 1", calls)
 	}
-	if got["17:00.0"] != 42 || got["65:00.0"] != 3 {
+	if got["0000:17:00.0"] != 42 || got["0000:65:00.0"] != 3 {
 		t.Fatalf("util=%v", got)
 	}
 
 	// Nine 1s polls inside the interval must not fork again.
 	for i := 0; i < 9; i++ {
 		clk.add(time.Second)
-		if u := utilOf(c, ctx, 10*time.Second)["17:00.0"]; u != 42 {
+		if u := utilOf(c, ctx, 10*time.Second)["0000:17:00.0"]; u != 42 {
 			t.Fatalf("cached util=%v, want 42", u)
 		}
 	}

@@ -1,10 +1,12 @@
 package mutual
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/sim"
 	"github.com/yuuki/hostping/internal/topology"
 )
@@ -91,10 +93,11 @@ func TestSimTransportLossDrawsFromFloat(t *testing.T) {
 }
 
 // Wait returns every queued reply at once, without sleeping, and empties
-// the queue; with nothing queued it sleeps for spin+block. It takes no
-// context, so a caller cancelling the loop waits out the sleep: that is the
-// behaviour as implemented, pinned here, not a contract to extend.
-func TestSimTransportWaitSleepsOnlyWhenEmptyAndTakesNoContext(t *testing.T) {
+// the queue; with nothing queued it sleeps for spin+block, but Close (or
+// Interrupt) from another goroutine cuts that sleep short, and every empty
+// Wait after it returns at once, so a daemon shutting down in --sim mode
+// does not wait out the simulated block.
+func TestSimTransportWaitReturnsOnClose(t *testing.T) {
 	tr, _ := simTransport(t, "")
 	for seq := uint32(1); seq <= 3; seq++ {
 		if _, err := tr.Send(0, 1, seq); err != nil {
@@ -120,5 +123,54 @@ func TestSimTransportWaitSleepsOnlyWhenEmptyAndTakesNoContext(t *testing.T) {
 	if d := time.Since(start); d < 5*time.Millisecond {
 		t.Fatalf("empty Wait returned after %v, want at least spin+block (5ms)", d)
 	}
-	tr.Close() // nothing to release; must not panic
+
+	// Close while Wait sleeps on a long block: Wait returns promptly.
+	closed := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		tr.Close()
+		tr.Close() // idempotent, from any goroutine
+		close(closed)
+	}()
+	start = time.Now()
+	reps, err = tr.Wait(0, 10*time.Second)
+	if err != nil || reps != nil {
+		t.Fatalf("interrupted Wait = %v, %v, want nil, nil", reps, err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Wait slept %v after Close, want prompt return", d)
+	}
+	<-closed
+	start = time.Now()
+	if _, err := tr.Wait(0, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("empty Wait after Close slept %v, want immediate return", d)
+	}
+}
+
+// Run on a SimTransport stops with its context: the loop interrupts the
+// transport's Wait, so cancellation does not wait out the schedule interval.
+func TestLoopRunOnSimTransportStopsWithContext(t *testing.T) {
+	tr, _ := simTransport(t, "")
+	pairs := [][2]model.RNIC{{tr.RNICs[0], tr.RNICs[1]}}
+	l := New(Config{Interval: time.Hour, Timeout: 500 * time.Millisecond, Window: time.Hour, Spin: 0, LossIsDrop: true}, tr.RNICs, pairs, tr)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.Run(ctx)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancellation (Interval is 1h)")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Run returned %v after cancellation, want prompt", d)
+	}
 }

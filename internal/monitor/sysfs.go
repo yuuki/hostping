@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/pci"
 	"github.com/yuuki/hostping/internal/sysfs"
 	"github.com/yuuki/hostping/internal/topology"
 )
@@ -261,6 +262,9 @@ func parseNvidiaGPUs(out string) nvidiaSample {
 			continue
 		}
 		bdf := normalizeBDF(parts[0])
+		if bdf == "" {
+			continue
+		}
 		if u, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil {
 			s.util[bdf] = u
 		}
@@ -291,15 +295,20 @@ func computeMode(cell string) string {
 }
 
 // drmBusy is the gpu_busy_percent of the DRM (AMD) GPU at bdf under sysroot:
-// the class/drm entry whose device link resolves to that PCI address. A GPU
-// without the file, or none at that address, is unknown.
+// the class/drm entry whose device link resolves to that PCI address, matched
+// on the full domain:bus:dev.fn so that two GPUs at the same bus:dev.fn in
+// different PCI domains are told apart. A GPU without the file, or none at
+// that address, is unknown.
 func drmBusy(sysroot, bdf string) (float64, bool) {
+	want := normalizeBDF(bdf)
+	if want == "" {
+		return 0, false
+	}
 	drm := filepath.Join(sysroot, "class/drm")
 	ents, err := os.ReadDir(drm)
 	if err != nil {
 		return 0, false
 	}
-	want := normalizeBDF(bdf)
 	for _, e := range ents {
 		dev := filepath.Join(drm, e.Name(), "device")
 		real, err := filepath.EvalSymlinks(dev)
@@ -316,42 +325,27 @@ func drmBusy(sysroot, bdf string) (float64, bool) {
 	return 0, false
 }
 
-// normalizeBDF reduces a PCI address to bus:dev.fn, dropping the domain, so
-// nvidia-smi's "00000000:3C:00.0", sysfs's "0000:3c:00.0" and a bare
-// "3c:00.0" all meet. It is NOT pci.CanonicalBDF, which keeps the domain
-// (narrowed to four digits) and rejects anything that is not a BDF: on a host
-// with more than one PCI domain two functions at the same bus:dev.fn collide
-// here and stay apart there. The GPU lookups below have always keyed on the
-// domain-less form, so this stays as it is.
+// normalizeBDF is pci.CanonicalBDF: the sysfs spelling of a PCI address,
+// lower case with a four-digit domain, so nvidia-smi's "00000000:3C:00.0",
+// sysfs's "0000:3c:00.0" and a bare "3c:00.0" (domain 0) all meet, while
+// "0001:3c:00.0" stays apart from them. It is "" for anything that is not a
+// BDF. The GPU lookups used to drop the domain, which made two GPUs at the
+// same bus:dev.fn in different PCI domains collide.
 func normalizeBDF(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	parts := strings.Split(s, ":")
-	if len(parts) >= 3 {
-		return strings.Join(parts[len(parts)-2:], ":")
-	}
-	return strings.TrimPrefix(s, "0000:")
+	return pci.CanonicalBDF(s)
 }
 
-// firstActiveIBPort is the first ACTIVE port of ibdev among the fixed port
-// names "1".."4", or "1" when none is ACTIVE; it never lists the ports
-// directory and never returns "".
-//
-// Topology discovery has its own firstActiveIBPort (topology/discover.go)
-// that is NOT this one: it lists the ports directory, sorts the names
-// numerically, falls back to the lowest-numbered port, and returns "" when
-// the directory cannot be read. The two agree on every device with ports
-// 1..4; they differ for a port numbered 5 or more, a non-numeric port name,
-// and an unreadable ports directory. Discovery's result ends up in the graph,
-// this one's in the counters, and the two have been kept separate on purpose:
-// unifying them would move the rail key or the counter source of such a
-// device.
+// firstActiveIBPort is sysfs.FirstActiveIBPort for ibdev, the port topology
+// discovery also picks (first ACTIVE by number, else the lowest-numbered),
+// so the counters are read from the port whose rate and rail key the graph
+// carries. It is "1" when the ports directory cannot be listed or is empty,
+// so the read still attempts port 1 as it always has.
 func firstActiveIBPort(sysroot, ibdev string) string {
-	for _, p := range []string{"1", "2", "3", "4"} {
-		if sysfs.PortActive(filepath.Join(sysroot, "class/infiniband", ibdev, "ports", p)) {
-			return p
-		}
+	port, ok := sysfs.FirstActiveIBPort(sysroot, ibdev)
+	if !ok {
+		return "1"
 	}
-	return "1"
+	return port
 }
 
 // looksLikePauseDuration matches the vendor *pause*duration* counters, which

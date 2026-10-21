@@ -273,6 +273,48 @@ func TestDiscoverUsesActivePortRate(t *testing.T) {
 	}
 }
 
+// An RNIC whose only ACTIVE port is 5 (ports 1..6 present) is keyed on
+// port 5: its rate and RoCEv2 rail come from there, the same port the
+// monitor now reads counters from.
+func TestDiscoverUsesActivePortAboveFour(t *testing.T) {
+	root := t.TempDir()
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0", "0x060400", "4", "", "0")
+	mkPCI(t, root, "devices/pci0000:3a/0000:3a:00.0/0000:3c:00.0", "0x020000", "0", "0x15b3", "0")
+	mkIB(t, root, "mlx5_0", "0000:3c:00.0", "0000:0000:0000:0000:0000:ffff:c0a8:0101")
+	dev := filepath.Join(root, "class/infiniband/mlx5_0/ports")
+	for i := 1; i <= 6; i++ {
+		mustWrite(t, filepath.Join(dev, strconv.Itoa(i), "state"), "1: DOWN\n")
+		mustWrite(t, filepath.Join(dev, strconv.Itoa(i), "rate"), "200 Gb/sec (4X HDR)\n")
+	}
+	mustWrite(t, filepath.Join(dev, "5/state"), "4: ACTIVE\n")
+	mustWrite(t, filepath.Join(dev, "5/rate"), "100 Gb/sec (4X EDR)\n")
+	mustWrite(t, filepath.Join(dev, "5/gids/0"), "0000:0000:0000:0000:0000:ffff:c0a8:0a01\n")
+	mustWrite(t, filepath.Join(dev, "5/gid_attrs/types/0"), "RoCE v2\n")
+	mustWrite(t, filepath.Join(root, "devices/system/node/node0"), "")
+	if got := firstActiveIBPort(root, "mlx5_0"); got != "5" {
+		t.Fatalf("firstActiveIBPort = %q, want 5", got)
+	}
+	g, err := DiscoverFrom(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.RNICs[0].LineRate != 100_000_000_000 {
+		t.Fatalf("active-port rate %d, want port 5's 100G", g.RNICs[0].LineRate)
+	}
+	if g.RNICs[0].Fabric != "v4:192.168.10.0" {
+		t.Fatalf("fabric %s, want port 5's rail", g.RNICs[0].Fabric)
+	}
+}
+
+// Discovery keeps "" for a device whose ports directory cannot be listed, so
+// fabricKey and rnicLinkLayer answer "unknown" rather than probing port 1.
+func TestFirstActiveIBPortUnreadableIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	if got := firstActiveIBPort(root, "missing"); got != "" {
+		t.Fatalf("missing ports dir: %q, want \"\"", got)
+	}
+}
+
 func TestDiscoverFailsClosedWithoutIB(t *testing.T) {
 	root := t.TempDir()
 	_, err := DiscoverFrom(root)
