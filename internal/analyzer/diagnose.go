@@ -3,8 +3,10 @@ package analyzer
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yuuki/hostping/internal/baseline"
@@ -24,7 +26,7 @@ type Input struct {
 	Mutual       []model.MutualMeasurement
 	Util         map[string]float64
 	PCIe         map[string]model.PCIeConfig // keyed by RNIC or GPU id
-	DropDelta    map[string]uint64           // hardware discard/OOB deltas; not RC loss
+	DropDelta    map[string]model.RNICDrops  // hardware discard/OOB deltas; not RC loss
 	// RNICHints maps rnic id → slow_start | tx_window from device config.
 	RNICHints map[string]string
 	// GrayHits counts consecutive gray markings per link (flapping, §4.3).
@@ -713,7 +715,8 @@ func diagnoseMutual(in Input) []model.RootCause {
 // is already per RNIC, so it never repeats per mutual pair. Probe loss is only
 // known per pair, so it is attributed with dropSuspects: one faulty RNIC shows
 // up on every pair it is probed over, and reporting the pairs as evidence keeps
-// that visible without emitting the same RNIC once per peer.
+// that visible without emitting the same RNIC once per peer. Lossy-class drops
+// (--lossless-priorities) are reported apart, as rnic_lossy_class_discards.
 func diagnoseDrops(in Input) []model.RootCause {
 	pairsOf := map[string][]string{}
 	for _, m := range in.Mutual {
@@ -733,12 +736,12 @@ func diagnoseDrops(in Input) []model.RootCause {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		d := in.DropDelta[id]
+		d := in.DropDelta[id].FaultTotal()
 		if d == 0 {
 			continue
 		}
 		counted[id] = true
-		ev := fmt.Sprintf("%s discard/OOB delta=%d", id, d)
+		ev := fmt.Sprintf("%s discard/OOB delta=%d (%s)", id, d, formatCounters(in.DropDelta[id].Fault))
 		if p := pairsOf[id]; len(p) > 0 {
 			ev += fmt.Sprintf(" on %s (RC loss_ratio ignored)", strings.Join(p, ", "))
 		}
@@ -746,6 +749,18 @@ func diagnoseDrops(in Input) []model.RootCause {
 			Code: model.CauseRNICPacketDrops, Summary: "packet drops on RNIC hardware counters",
 			RNICs: []string{id}, Confidence: model.ConfidenceHigh,
 			Evidence: ev,
+		})
+	}
+	for _, id := range ids {
+		lossy := in.DropDelta[id].Lossy
+		if len(lossy) == 0 {
+			continue
+		}
+		out = append(out, model.RootCause{
+			Code: model.CauseRNICLossyClassDiscards, Summary: "discards on RNIC priorities without PFC",
+			RNICs: []string{id}, Confidence: model.ConfidenceLow,
+			Evidence: fmt.Sprintf("%s lossy-class delta=%d (%s); lossless priorities %s",
+				id, in.DropDelta[id].LossyTotal(), formatCounters(lossy), formatPriorities(in.Cfg.LosslessPriorities)),
 		})
 	}
 
@@ -772,6 +787,25 @@ func diagnoseDrops(in Input) []model.RootCause {
 			return fmt.Sprintf("%s → %s loss=%.4f rtt_p50=%dns", m.Src, m.Dst, m.LossRatio, m.RTTnsP50)
 		})...)
 	return out
+}
+
+// formatCounters lists per-counter deltas as name=delta, by name.
+func formatCounters(m map[string]uint64) string {
+	names := slices.Sorted(maps.Keys(m))
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = fmt.Sprintf("%s=%d", n, m[n])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatPriorities is a --lossless-priorities value as it was given.
+func formatPriorities(ps []int) string {
+	parts := make([]string, len(ps))
+	for i, p := range ps {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ",")
 }
 
 // dropCauses emits one cause per suspected RNIC, or one per pair when no RNIC

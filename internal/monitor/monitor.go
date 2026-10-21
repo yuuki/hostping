@@ -39,7 +39,10 @@ type Decision struct {
 	BusyRNICs map[string]bool
 	Rates     []model.RNICRates
 	HostIdle  bool
-	DropDelta map[string]uint64
+	// DropDelta is each RNIC's drop-counter deltas on this poll, split into
+	// fault and lossy-class drops, for every RNIC whose drop counter was
+	// measured and that --drop-ignore-rnic does not name.
+	DropDelta map[string]model.RNICDrops
 	Ready     bool
 	// IdleKnown is false when GPU util, an RNIC line rate, or a PFC pause or
 	// drop counter that has a source could not be read. Live one-shot
@@ -272,7 +275,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 type rnicPoll struct {
 	rates  []model.RNICRates
 	busy   map[string]bool
-	drops  map[string]uint64
+	drops  map[string]model.RNICDrops
 	util   map[string]float64
 	unread []string
 	// host is what every RNIC's delta says about the host, merged.
@@ -286,7 +289,7 @@ type rnicPoll struct {
 // and takes the delta against the previous sample it keeps. An RNIC that
 // cannot be read, or a context done meanwhile, is the poll's error.
 func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error) {
-	rn := rnicPoll{busy: map[string]bool{}, drops: map[string]uint64{}, util: map[string]float64{}, ready: true}
+	rn := rnicPoll{busy: map[string]bool{}, drops: map[string]model.RNICDrops{}, util: map[string]float64{}, ready: true}
 	for _, n := range m.Graph.RNICs {
 		c, err := m.Sampler.RNIC(ctx, n)
 		if err == nil {
@@ -305,12 +308,16 @@ func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error
 			rn.rates = append(rn.rates, model.RNICRates{Device: n.ID})
 			continue
 		}
-		r, f := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
+		r, f, deltas := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
 		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
 			rn.util[model.PCIeLinkID(n.ID)] = u
 		}
-		if r.DropKnown {
-			rn.drops[n.ID] = r.DropDelta
+		if r.DropKnown && !m.Cfg.DropIgnored(n) {
+			// Only fault drops trigger; lossy-class and ignored drops
+			// still made the RNIC busy in rnicRates, since they are load.
+			d := splitDrops(deltas, m.Cfg.Lossless)
+			rn.drops[n.ID] = d
+			f.drop = d.FaultTotal() > 0
 		}
 		if f.unread {
 			rn.unread = append(rn.unread, n.ID)
@@ -342,7 +349,8 @@ func (m *Monitor) sampleInterval(prev, cur model.RNICCounters) float64 {
 type rnicFlags struct {
 	// busy: at or above Thplow, paused above PFCHigh, or dropping (§4.2).
 	busy bool
-	// pfc and drop are the paper's two busy triggers.
+	// pfc and drop are the paper's two busy triggers. rnicRates leaves drop
+	// to pollRNICs, which knows which drops count against the RNIC.
 	pfc, drop bool
 	// unread: a PFC pause or drop counter that has a source was not measured
 	// on this poll. Unread ≠ no pauses and no drops.
@@ -365,9 +373,10 @@ func (f *rnicFlags) merge(o rnicFlags) {
 func (f rnicFlags) idle() bool { return !f.busy && !f.unread && !f.lineRateUnknown }
 
 // rnicRates is one RNIC's rates over the dt seconds between prev and cur,
-// with the pause and drop counter states trackSource gave this poll, and the
-// verdicts those rates carry. It is pure: it reads no monitor state.
-func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, drop sourceState, thpLowFraction, pfcHigh float64) (model.RNICRates, rnicFlags) {
+// with the pause and drop counter states trackSource gave this poll, the
+// verdicts those rates carry, and each drop counter's delta when the drops
+// were measured. It is pure: it reads no monitor state.
+func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, drop sourceState, thpLowFraction, pfcHigh float64) (model.RNICRates, rnicFlags, map[string]uint64) {
 	r := model.RNICRates{Device: n.ID}
 	var f rnicFlags
 	dRx := counterDelta(cur.RxBytes, prev.RxBytes)
@@ -389,9 +398,13 @@ func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, dr
 			r.PauseDurationRatio = 0
 		}
 	}
+	var drops map[string]uint64
 	if drop == sourceKnown && prev.DropSources == cur.DropSources {
 		r.DropKnown = true
-		r.DropDelta = counterDelta(cur.RxDrops, prev.RxDrops) + counterDelta(cur.TxDrops, prev.TxDrops)
+		drops = dropDeltas(prev.Drops, cur.Drops)
+		for _, d := range drops {
+			r.DropDelta += d
+		}
 	}
 	if (!r.PauseKnown && pause != sourceNotApplicable) || (!r.DropKnown && drop != sourceNotApplicable) {
 		// Unread ≠ no pauses and no drops; do not start a full-mesh run.
@@ -414,10 +427,9 @@ func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, dr
 		f.busy = true
 	}
 	if r.DropDelta > 0 {
-		f.drop = true
 		f.busy = true
 	}
-	return r, f
+	return r, f, drops
 }
 
 // gpuVerdict reads the sampled GPUs: idle is every GPU idle and read; unknown

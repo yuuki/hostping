@@ -34,6 +34,10 @@ tests:
       # info only, never a page or a ticket.
       - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_pcie_undersized",confidence="low"}'
         values: '_x5 1x4 2x30'
+      # Discards on a priority PFC does not protect (--lossless-priorities),
+      # two runs: info only.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_lossy_class_discards",confidence="low"}'
+        values: '_x5 1x4 2x30'
       # Topology-expected on a rail-optimized host, every run: nothing.
       - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="rnic_cross_rail_unreachable",confidence="low"}'
         values: '_x5 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20'
@@ -110,6 +114,16 @@ tests:
               summary: "hostping: advisory rnic_pcie_undersized on host-a:9464"
               description: "hostping reported rnic_pcie_undersized at confidence low in 2 engine runs within 30 minutes. It changes no path or link status."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_pcie_undersized"
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-a:9464
+              code: rnic_lossy_class_discards
+              confidence: low
+            exp_annotations:
+              summary: "hostping: advisory rnic_lossy_class_discards on host-a:9464"
+              description: "hostping reported rnic_lossy_class_discards at confidence low in 2 engine runs within 30 minutes. It changes no path or link status."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_lossy_class_discards"
       # Persistence expires: the last gpu_pcie_failure change was at 10m, so
       # by 41m the 30-minute window holds no run.
       - eval_time: 41m

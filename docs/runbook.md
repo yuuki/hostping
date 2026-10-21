@@ -35,6 +35,7 @@ text says so.
 - Advisory: [`path_latency_abnormal`](#path_latency_abnormal),
   [`gpu_mr_registration_slow`](#gpu_mr_registration_slow),
   [`rnic_pcie_undersized`](#rnic_pcie_undersized),
+  [`rnic_lossy_class_discards`](#rnic_lossy_class_discards),
   [`unknown`](#unknown)
 - Agent health: [HostpingTargetDown](#hostpingtargetdown),
   [HostpingNoSuccessfulRun](#hostpingnosuccessfulrun),
@@ -174,7 +175,7 @@ code in at least two separate engine runs within 30 minutes
 | --- | --- | --- |
 | `HostpingHardwareFault` | critical (page) | At confidence `high`: `rnic_pcie_failure`, `gpu_pcie_failure`, `memory_channel_failure`, `memory_channel_flapping`, `upi_failure`, `snc_mesh_failure`, `cpu_root_port_failure`, `rnic_connectivity_failure`, `rnic_intermittent_timeout` |
 | `HostpingDiagnosis` | warning (ticket) | Every other code at `high` (`acs_enabled`, `ats_disabled`, `rnic_packet_drops`, `rnic_tx_window`, `overloaded_*`), and every non-advisory code at `medium` (including `tor_switch_anomaly` and `rnic_cross_rail_unreachable`) |
-| `HostpingAdvisoryDiagnosis` | info | `path_latency_abnormal`, `gpu_mr_registration_slow`, `rnic_pcie_undersized`, `unknown`, at any confidence |
+| `HostpingAdvisoryDiagnosis` | info | `path_latency_abnormal`, `gpu_mr_registration_slow`, `rnic_pcie_undersized`, `rnic_lossy_class_discards`, `unknown`, at any confidence |
 | none | | `rnic_cross_rail_unreachable` at `low` |
 
 Why:
@@ -781,8 +782,25 @@ this code on every drop-triggered run (at most one per `--busy-cooldown`). The
 counters include `out_of_buffer` (no receive WQE posted), `rx_missed_errors`,
 names containing `discard` and netdev `dropped` counters.
 
+The evidence names each counter that moved and its delta, for example
+`rnic9 discard/OOB delta=120 (rx_prio3_discards=120)`. The port aggregate
+`rx_discards_phy` is the sum of the per-priority `rx_prioN_discards`, so it is
+listed only for the part those counters do not account for.
+
+Two kinds of drops are left out of this code and of the drop trigger. Both
+still count as load, so the RNIC is busy and the host is not idle, and both
+stay in `hostping_rnic_drop_delta`:
+
+- Drops on an RNIC named by `--drop-ignore-rnic`.
+- With `--lossless-priorities`, per-priority counters on any other priority.
+  They are reported as
+  [`rnic_lossy_class_discards`](#rnic_lossy_class_discards) instead.
+
+See [Drops that do not count against the RNIC](design.md#drops-that-do-not-count-against-the-rnic).
+
 **Check first.** Which counter moved:
 
+- The evidence's counter list.
 - `ethtool -S <netdev>` and
   `/sys/class/infiniband/<device>/ports/1/hw_counters/` before and after a
   minute.
@@ -794,13 +812,23 @@ names containing `discard` and netdev `dropped` counters.
 
 - `out_of_buffer` usually means the receiving application does not post
   receives fast enough. That is a workload matter.
-- Physical discards with PFC misconfiguration point at the fabric's lossless
-  configuration (network team).
+- Physical discards (`rx_discards_phy`, or `rx_prioN_discards` on a
+  PFC-protected priority) mean the port overflowed although PFC should have
+  paused the sender. They point at the fabric's PFC or buffer configuration
+  (network team).
 
 Ticket.
 
 **False positives.** Most drops are caused by a workload and not by a fault.
 That is why this code tickets and does not page.
+
+- An RNIC that carries storage or front-end traffic and drops under its
+  clients' load reports this code on every drop-triggered run. Name it with
+  `--drop-ignore-rnic` (RNIC ID, IB device name or PCI address). It is still
+  probed and paired.
+- Discards on a priority PFC does not protect (TCP traffic on priority 0,
+  `rx_prio0_buf_discard`) are expected under load. Pass the PFC priorities
+  with `--lossless-priorities` (for example `3`) to report them apart.
 
 ## Advisory
 
@@ -968,6 +996,34 @@ a device at start. Do not silence the advisory for it. Exclude the device with
 sending loopback probes into that fabric's management subnet. See
 [Excluding RNICs](design.md#excluding-rnics---exclude-rnic) and
 [operations](operations.md#install).
+
+### `rnic_lossy_class_discards`
+
+**Meaning.** Drops on an RNIC priority that PFC does not protect: a
+per-priority counter (`rx_prio0_buf_discard`, `rx_prio0_discards`) on a
+priority not listed in `--lossless-priorities`. A lossy class drops when its
+receive buffer fills, by design. Advisory. It is routed to
+`HostpingAdvisoryDiagnosis` (info) and never paged. Without
+`--lossless-priorities` it is never reported: every priority counts as
+[`rnic_packet_drops`](#rnic_packet_drops).
+
+**Confidence and derivation.** `low`, once per RNIC per run, from the drop
+counters of the monitor poll that started the run. These drops start no
+busy-mode run. A loopback probe on the lossless class says nothing about
+them. The evidence names each counter and its delta, and the configured
+lossless priorities, for example
+`rnic0 lossy-class delta=300 (rx_prio0_buf_discard=300); lossless priorities 3`.
+
+**Check first.**
+
+- Which traffic runs on that priority. Kernel TCP traffic on the RDMA NICs
+  usually lands on priority 0.
+- That `--lossless-priorities` matches the PFC configuration of the port
+  (`mlnx_qos -i <netdev>` or `dcb pfc show dev <netdev>`).
+
+**Remediation.** None if the traffic on that priority is expected to be lossy.
+Otherwise move it to a protected priority or enlarge the priority's buffer.
+Silence the info alert for hosts that run such traffic by design.
 
 ### `unknown`
 

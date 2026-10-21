@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -57,11 +58,8 @@ func TestReadRNICSysfsCountsDropsAndPause(t *testing.T) {
 	if c.RxBytes != 1000 || c.TxBytes != 2000 {
 		t.Fatalf("bytes rx=%d tx=%d, want 1000/2000 (IB words are 4 bytes)", c.RxBytes, c.TxBytes)
 	}
-	if c.RxDrops != 10 {
-		t.Fatalf("RxDrops=%d, want 10 (out_of_buffer + buf_discard, no rcv/symbol errors)", c.RxDrops)
-	}
-	if c.TxDrops != 11 {
-		t.Fatalf("TxDrops=%d, want 11 (tx_discards_phy)", c.TxDrops)
+	if want := map[string]uint64{"out_of_buffer": 7, "rx_prio0_buf_discard": 3, "tx_discards_phy": 11}; !maps.Equal(c.Drops, want) {
+		t.Fatalf("Drops=%v, want %v (no rcv/symbol errors)", c.Drops, want)
 	}
 	if c.TxPauseDurationUs != 40 {
 		t.Fatalf("TxPauseDurationUs=%d, want 40 (global, not global+prio)", c.TxPauseDurationUs)
@@ -80,8 +78,8 @@ func TestReadRNICSysfsPortXmitDiscardsIsTx(t *testing.T) {
 		t.Fatal(err)
 	}
 	// counters/ is not scanned as a directory, so this must be counted once.
-	if c.TxDrops != 4 || c.RxDrops != 0 {
-		t.Fatalf("tx=%d rx=%d, want 4/0", c.TxDrops, c.RxDrops)
+	if want := map[string]uint64{"port_xmit_discards": 4}; !maps.Equal(c.Drops, want) {
+		t.Fatalf("Drops=%v, want %v", c.Drops, want)
 	}
 }
 
@@ -94,8 +92,8 @@ func TestReadRNICSysfsPicksFirstActivePort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RxDrops != 6 {
-		t.Fatalf("RxDrops=%d, want 6 from the ACTIVE port 2", c.RxDrops)
+	if c.Drops["out_of_buffer"] != 6 {
+		t.Fatalf("Drops=%v, want out_of_buffer 6 from the ACTIVE port 2", c.Drops)
 	}
 }
 
@@ -119,8 +117,8 @@ func TestReadRNICSysfsPicksActivePortAboveFour(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RxDrops != 500 || c.RxBytes != 5*4 {
-		t.Fatalf("RxDrops=%d RxBytes=%d, want 500 and 20 from the ACTIVE port 5", c.RxDrops, c.RxBytes)
+	if c.Drops["out_of_buffer"] != 500 || c.RxBytes != 5*4 {
+		t.Fatalf("Drops=%v RxBytes=%d, want out_of_buffer 500 and 20 from the ACTIVE port 5", c.Drops, c.RxBytes)
 	}
 }
 
@@ -172,11 +170,8 @@ func TestReadRNICSysfsNetdevFallback(t *testing.T) {
 	if c.RxBytes != 123 || c.TxBytes != 456 {
 		t.Fatalf("bytes rx=%d tx=%d, want 123/456", c.RxBytes, c.TxBytes)
 	}
-	if c.RxDrops != 5 {
-		t.Fatalf("RxDrops=%d, want 5 (rx_dropped + rx_missed_errors, not rx_errors)", c.RxDrops)
-	}
-	if c.TxDrops != 4 {
-		t.Fatalf("TxDrops=%d, want 4", c.TxDrops)
+	if want := map[string]uint64{"rx_dropped": 2, "rx_missed_errors": 3, "tx_dropped": 4}; !maps.Equal(c.Drops, want) {
+		t.Fatalf("Drops=%v, want %v (not rx_errors)", c.Drops, want)
 	}
 }
 
@@ -232,8 +227,8 @@ func TestEthtoolScanCountsDrops(t *testing.T) {
 	}}
 	var c model.RNICCounters
 	g.scan(context.Background(), "eth0", &c, true)
-	if c.RxDrops != 6 || c.TxDrops != 2 {
-		t.Fatalf("rx=%d tx=%d, want 6/2 (ethtool is the only source of *_discards_phy)", c.RxDrops, c.TxDrops)
+	if want := map[string]uint64{"rx_discards_phy": 6, "tx_discards_phy": 2}; !maps.Equal(c.Drops, want) {
+		t.Fatalf("Drops=%v, want %v (ethtool is the only source of *_discards_phy)", c.Drops, want)
 	}
 	// Drop counters alone are an answer, so the device must not be backed off.
 	if !g.allow("eth0") {

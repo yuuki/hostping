@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/yuuki/hostping/internal/config"
@@ -50,5 +53,26 @@ func TestLoadGraphRejectsExcludeWithoutDiscovery(t *testing.T) {
 	cfg.ExcludeRNICs = []string{"rnic0"}
 	if _, err := LoadGraph(cfg); err == nil {
 		t.Fatal("--exclude-rnic with --sim must fail")
+	}
+}
+
+// --drop-ignore-rnic applies to any topology, but a name that matches none of
+// its RNICs fails start-up, so a typo cannot leave the drops diagnosed.
+func TestNewRigValidatesDropIgnore(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sim = true
+	cfg.DropIgnoreRNICs = []string{"rnic1"}
+	var logged []string
+	rt, err := newRig(cfg, func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.close()
+	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "rnic1") && strings.Contains(l, "--drop-ignore-rnic") }) {
+		t.Errorf("the ignored RNIC is not logged: %q", logged)
+	}
+	cfg.DropIgnoreRNICs = []string{"mlx5_99"}
+	if _, err := newRig(cfg, func(string, ...any) {}); err == nil || !strings.Contains(err.Error(), "mlx5_99") {
+		t.Fatalf("newRig = %v, want an error naming mlx5_99", err)
 	}
 }

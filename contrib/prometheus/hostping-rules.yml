@@ -19,8 +19,9 @@
 #   - warning (ticket): every other code at "high" or "medium" (configuration,
 #     load and fabric findings), with the same two-run persistence.
 #   - info: the advisory codes (`path_latency_abnormal`,
-#     `gpu_mr_registration_slow`, `rnic_pcie_undersized`) and `unknown`, which
-#     never change a path or link status, with the same persistence.
+#     `gpu_mr_registration_slow`, `rnic_pcie_undersized`,
+#     `rnic_lossy_class_discards`) and `unknown`, which never change a path or
+#     link status, with the same persistence.
 #   - no alert: `rnic_cross_rail_unreachable` at "low", which is what isolated
 #     rails look like by design under --mutual-scope=host.
 groups:
@@ -62,11 +63,11 @@ groups:
       - alert: HostpingDiagnosis
         expr: |
           (
-            hostping:diagnosis_runs:30m{confidence="high", code!~"rnic_pcie_failure|gpu_pcie_failure|memory_channel_failure|memory_channel_flapping|upi_failure|snc_mesh_failure|cpu_root_port_failure|rnic_connectivity_failure|rnic_intermittent_timeout|path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+            hostping:diagnosis_runs:30m{confidence="high", code!~"rnic_pcie_failure|gpu_pcie_failure|memory_channel_failure|memory_channel_flapping|upi_failure|snc_mesh_failure|cpu_root_port_failure|rnic_connectivity_failure|rnic_intermittent_timeout|path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|rnic_lossy_class_discards|unknown"} >= 2
           )
           or
           (
-            hostping:diagnosis_runs:30m{confidence="medium", code!~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+            hostping:diagnosis_runs:30m{confidence="medium", code!~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|rnic_lossy_class_discards|unknown"} >= 2
           )
         labels:
           severity: warning
@@ -77,7 +78,7 @@ groups:
 
       - alert: HostpingAdvisoryDiagnosis
         expr: |
-          hostping:diagnosis_runs:30m{code=~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|unknown"} >= 2
+          hostping:diagnosis_runs:30m{code=~"path_latency_abnormal|gpu_mr_registration_slow|rnic_pcie_undersized|rnic_lossy_class_discards|unknown"} >= 2
         labels:
           severity: info
         annotations:

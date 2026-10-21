@@ -68,8 +68,8 @@ const (
 // ReadRNICSysfsFrom reads n's counters under sysroot (normally /sys) so tests
 // can inject a tree.
 //
-// Pause duration comes from hw_counters, else ethtool -S. Drops are the sum of
-// port_xmit_discards, hw_counters and ethtool -S, with the netdev statistics
+// Pause duration comes from hw_counters, else ethtool -S. Drops are each
+// counter of port_xmit_discards, hw_counters and ethtool -S, with the netdev statistics
 // as a fallback when none of those has one. Each family records the sources
 // it was read from, so a counter that could not be read is told apart from
 // one that reads 0. An InfiniBand port has no PFC, so its pause duration is
@@ -91,7 +91,7 @@ func ReadRNICSysfsFrom(ctx context.Context, sysroot string, n model.RNIC) (model
 		c.TxBytes, _ = sysfs.ReadUint64OK(filepath.Join(st, "tx_bytes"))
 	}
 	if v, ok := sysfs.ReadUint64OK(filepath.Join(base, "port_xmit_discards")); ok {
-		c.TxDrops = v
+		addDrop(&c, "port_xmit_discards", v)
 		c.DropSources |= srcIBDiscards
 	}
 	ib := isInfiniBandLinkLayer(sysfs.ReadString(filepath.Join(portDir, "link_layer")))
@@ -354,7 +354,7 @@ func looksLikePauseDuration(name string) bool {
 	return strings.Contains(name, "pause") && strings.Contains(name, "duration")
 }
 
-// looksLikeDrop reports whether a counter counts toward RNICCounters drops.
+// looksLikeDrop reports whether a counter is one of RNICCounters.Drops.
 //
 // Included: out_of_buffer (no receive WQE was posted), anything containing
 // "discard" (port_xmit_discards, the Mellanox rx_discards_phy /
@@ -423,25 +423,30 @@ func (a *pauseAccum) flush(c *model.RNICCounters) {
 }
 
 // classifyCounter files one counter (lower-cased name, value) with the family
-// it belongs to: a pause duration into acc, a drop into c's Tx or Rx drops,
-// anything else nowhere. It reports which family took it.
+// it belongs to: a pause duration into acc, a drop into c's Drops under its
+// name, anything else nowhere. It reports which family took it.
 func classifyCounter(name string, v uint64, c *model.RNICCounters, acc *pauseAccum) (pause, drop bool) {
 	switch {
 	case looksLikePauseDuration(name):
 		acc.add(name, v)
 		return true, false
 	case looksLikeDrop(name):
-		if isTxCounter(name) {
-			c.TxDrops += v
-		} else {
-			c.RxDrops += v
-		}
+		addDrop(c, name, v)
 		return false, true
 	}
 	return false, false
 }
 
-// scanCounterDir sums the drop counters, and the pause-duration counters when
+// addDrop adds v to the drop counter name of c. The monitor differences each
+// counter on its own, so the report can say which one moved.
+func addDrop(c *model.RNICCounters, name string, v uint64) {
+	if c.Drops == nil {
+		c.Drops = map[string]uint64{}
+	}
+	c.Drops[name] += v
+}
+
+// scanCounterDir files the drop counters, and sums the pause-duration counters when
 // pause is set, in one sysfs directory, and reports which of the two families
 // had at least one readable counter there. It serves both the InfiniBand
 // hw_counters directory and the netdev statistics fallback.
@@ -475,7 +480,7 @@ type ethtoolResult struct {
 
 const ethtoolGaveNone = "ethtool -S gave none"
 
-// scan adds ethtool -S drops, and pause durations when pause is set, unless
+// scan files ethtool -S drops, and pause durations when pause is set, unless
 // this netdev is in backoff after failing or reporting neither of them. Drops
 // are read here because the Mellanox rx_discards_phy / tx_discards_phy family
 // is only exposed through ethtool, never under hw_counters.

@@ -214,7 +214,7 @@ set -a; . /etc/default/hostping; set +a
 ```
 
 This parses every flag and runs discovery, including `--mem-channel-capacity`
-link IDs, without probing. It does not read `--baseline-file` or check the
+link IDs and `--drop-ignore-rnic` names, without probing. It does not read `--baseline-file` or check the
 `--mutual-interval` / `--mutual-transport` combination.
 
 `hostpingctl diagnose` and the daemon do not coordinate. Running a live

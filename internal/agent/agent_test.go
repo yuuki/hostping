@@ -91,9 +91,9 @@ func TestRequestFromDecisionBusyAndIdle(t *testing.T) {
 	busy, err := requestFromDecision(monitor.Decision{
 		Ready: true, IdleKnown: true, HostIdle: false,
 		BusyRNICs: map[string]bool{"rnic0": true},
-		DropDelta: map[string]uint64{"rnic0": 3},
+		DropDelta: map[string]model.RNICDrops{"rnic0": {Fault: map[string]uint64{"rx_discards_phy": 3}}},
 	})
-	if err != nil || busy.Mode != model.ModeBusy || busy.HostIdle || busy.DropDelta["rnic0"] != 3 {
+	if err != nil || busy.Mode != model.ModeBusy || busy.HostIdle || busy.DropDelta["rnic0"].FaultTotal() != 3 {
 		t.Fatalf("busy %+v err=%v", busy, err)
 	}
 }

@@ -33,6 +33,13 @@ HOSTPING_OPTS=""
 #                              leave RDMA devices that are not data-path NICs
 #                              (e.g. a fabric-management HCA) out of discovery:
 #                              never probed, paired or exported
+#   --drop-ignore-rnic mlx5_3,mlx5_8
+#                              RNICs whose drops are their clients' load (e.g.
+#                              storage NICs): no drop-triggered busy run and no
+#                              rnic_packet_drops; still probed and exported
+#   --lossless-priorities 3    PFC priorities; drops on other priorities are
+#                              the advisory rnic_lossy_class_discards and
+#                              start no busy run
 #   --metrics=                 no /metrics listener (OTLP only)
 #   --metrics-web-config /etc/hostping/web.yml
 #                              TLS and/or basic auth on /metrics (Prometheus

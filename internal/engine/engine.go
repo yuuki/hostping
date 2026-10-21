@@ -155,7 +155,9 @@ type RunRequest struct {
 	PCIe      map[string]model.PCIeConfig
 	Hints     map[string]string
 	HostIdle  bool
-	DropDelta map[string]uint64
+	// DropDelta is each RNIC's drop-counter deltas on the poll that started
+	// the run (monitor.Decision.DropDelta).
+	DropDelta map[string]model.RNICDrops
 	// GPUComputeMode is each GPU's compute mode by endpoint ID. A GPU whose
 	// mode blocks probing (model.ComputeModeBlocksProbe) is skipped with
 	// ErrComputeMode; a GPU absent here is unknown and probed as before.
@@ -225,7 +227,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 		return model.Report{}, err
 	}
 	for i := range mutual {
-		mutual[i].CounterDrops = req.DropDelta[mutual[i].Src] + req.DropDelta[mutual[i].Dst]
+		mutual[i].CounterDrops = req.DropDelta[mutual[i].Src].FaultTotal() + req.DropDelta[mutual[i].Dst].FaultTotal()
 	}
 	markCrossRail(e.Graph, mutual)
 

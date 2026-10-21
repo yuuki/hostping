@@ -4,12 +4,13 @@ import "time"
 
 // RNICCounters is one poll of throughput / PFC / drop counters.
 type RNICCounters struct {
-	Device            string
-	Netdev            string
-	RxBytes           uint64
-	TxBytes           uint64
-	RxDrops           uint64
-	TxDrops           uint64
+	Device  string
+	Netdev  string
+	RxBytes uint64
+	TxBytes uint64
+	// Drops is every drop counter read, by lower-cased counter name, with
+	// its cumulative value. A name read from two sources is summed.
+	Drops             map[string]uint64
 	TxPauseDurationUs uint64
 	RxPauseDurationUs uint64
 	// PauseSources and DropSources are the sampler's bitmask of the sources
@@ -37,6 +38,34 @@ type RNICRates struct {
 	PauseKnown bool
 	DropKnown  bool
 	Idle       bool
+}
+
+// RNICDrops is one RNIC's drop-counter deltas over a monitor poll, by
+// counter name, split by what they say about the RNIC. Counters that did not
+// move are left out, so both maps are nil on a poll without drops.
+type RNICDrops struct {
+	// Fault holds the deltas that count against the RNIC: they start a
+	// busy-mode run and are reported as rnic_packet_drops.
+	Fault map[string]uint64
+	// Lossy holds the per-priority deltas on priorities PFC does not
+	// protect (--lossless-priorities). A lossy class drops under load by
+	// design, so they start no run and are reported apart, at low
+	// confidence.
+	Lossy map[string]uint64
+}
+
+// FaultTotal is the sum of the Fault deltas.
+func (d RNICDrops) FaultTotal() uint64 { return sumCounts(d.Fault) }
+
+// LossyTotal is the sum of the Lossy deltas.
+func (d RNICDrops) LossyTotal() uint64 { return sumCounts(d.Lossy) }
+
+func sumCounts(m map[string]uint64) uint64 {
+	var n uint64
+	for _, v := range m {
+		n += v
+	}
+	return n
 }
 
 // GPUStatus is idle vs active for the hardware monitor.
