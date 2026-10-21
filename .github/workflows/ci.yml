@@ -18,7 +18,7 @@ jobs:
       # Keep the toolchain versions in sync with mise.toml and the Dockerfile.
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
           cache: true
 
       - uses: mlugg/setup-zig@v2
@@ -74,7 +74,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
           cache: true
 
       - uses: mlugg/setup-zig@v2
