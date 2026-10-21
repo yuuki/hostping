@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/yuuki/hostping/internal/model"
@@ -95,6 +96,46 @@ func TestReadRNICSysfsPicksFirstActivePort(t *testing.T) {
 	}
 	if c.RxDrops != 6 {
 		t.Fatalf("RxDrops=%d, want 6 from the ACTIVE port 2", c.RxDrops)
+	}
+}
+
+// An RNIC whose only ACTIVE port is 5 (ports 1..6 present): the counters
+// come from port 5, the port discovery also keys the device on. The former
+// fixed "1".."4" probe read the DOWN port 1 instead.
+func TestReadRNICSysfsPicksActivePortAboveFour(t *testing.T) {
+	root := t.TempDir()
+	for i := 1; i <= 6; i++ {
+		p := "class/infiniband/mlx5_0/ports/" + strconv.Itoa(i)
+		mkFile(t, root, p+"/state", "1: DOWN")
+		mkFile(t, root, p+"/counters/port_rcv_data", strconv.Itoa(i))
+		mkFile(t, root, p+"/counters/port_xmit_data", strconv.Itoa(i))
+		mkFile(t, root, p+"/hw_counters/out_of_buffer", strconv.Itoa(i*100))
+	}
+	mkFile(t, root, "class/infiniband/mlx5_0/ports/5/state", "4: ACTIVE")
+	if got := firstActiveIBPort(root, "mlx5_0"); got != "5" {
+		t.Fatalf("firstActiveIBPort = %q, want 5", got)
+	}
+	c, err := ReadRNICSysfsFrom(context.Background(), root, model.RNIC{Device: "mlx5_0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RxDrops != 500 || c.RxBytes != 5*4 {
+		t.Fatalf("RxDrops=%d RxBytes=%d, want 500 and 20 from the ACTIVE port 5", c.RxDrops, c.RxBytes)
+	}
+}
+
+// Without a readable ports directory the monitor still attempts port 1, as
+// it always has, rather than giving up on the device.
+func TestFirstActiveIBPortFallsBackToOne(t *testing.T) {
+	root := t.TempDir()
+	if got := firstActiveIBPort(root, "missing"); got != "1" {
+		t.Fatalf("missing ports dir: %q, want 1", got)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "class/infiniband/mlx5_0/ports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := firstActiveIBPort(root, "mlx5_0"); got != "1" {
+		t.Fatalf("empty ports dir: %q, want 1", got)
 	}
 }
 

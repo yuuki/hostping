@@ -15,7 +15,7 @@ func TestParseNvidiaGPUsComputeMode(t *testing.T) {
 		"00000000:02:00.0, 97, Exclusive_Process\n" +
 		"0000:03:00.0, [N/A], Prohibited\n" + // util unreadable, mode still read
 		"04:00.0, 5, EXCLUSIVE_THREAD\n" + // short domain, any case
-		"00000001:05:00.0, 3, [Not Supported]\n" + // mode unknown, util still read
+		"00000001:05:00.0, 3, [Not Supported]\n" + // mode unknown, util still read; domain 1 kept
 		"00000000:06:00.0, 1\n" + // older two-column output: mode unknown
 		"00000000:07:00.0, 2, bogus\n" +
 		"garbage\n" +
@@ -23,10 +23,10 @@ func TestParseNvidiaGPUsComputeMode(t *testing.T) {
 	s := parseNvidiaGPUs(out)
 
 	wantMode := map[string]string{
-		"01:00.0": model.ComputeModeDefault,
-		"02:00.0": model.ComputeModeExclusiveProcess,
-		"03:00.0": model.ComputeModeProhibited,
-		"04:00.0": model.ComputeModeExclusiveThread,
+		"0000:01:00.0": model.ComputeModeDefault,
+		"0000:02:00.0": model.ComputeModeExclusiveProcess,
+		"0000:03:00.0": model.ComputeModeProhibited,
+		"0000:04:00.0": model.ComputeModeExclusiveThread,
 	}
 	if len(s.mode) != len(wantMode) {
 		t.Fatalf("modes = %v, want %v", s.mode, wantMode)
@@ -36,7 +36,7 @@ func TestParseNvidiaGPUsComputeMode(t *testing.T) {
 			t.Errorf("mode[%s] = %q, want %q", bdf, s.mode[bdf], m)
 		}
 	}
-	wantUtil := map[string]float64{"01:00.0": 0, "02:00.0": 97, "04:00.0": 5, "05:00.0": 3, "06:00.0": 1, "07:00.0": 2}
+	wantUtil := map[string]float64{"0000:01:00.0": 0, "0000:02:00.0": 97, "0000:04:00.0": 5, "0001:05:00.0": 3, "0000:06:00.0": 1, "0000:07:00.0": 2}
 	if len(s.util) != len(wantUtil) {
 		t.Fatalf("util = %v, want %v", s.util, wantUtil)
 	}
@@ -56,7 +56,7 @@ func TestNvidiaGPUsByBDFQueriesComputeMode(t *testing.T) {
 	if !slices.Contains(args, "--query-gpu=pci.bus_id,utilization.gpu,compute_mode") {
 		t.Fatalf("query args = %v", args)
 	}
-	if s.mode["01:00.0"] != model.ComputeModeExclusiveProcess {
+	if s.mode["0000:01:00.0"] != model.ComputeModeExclusiveProcess {
 		t.Fatalf("mode = %v", s.mode)
 	}
 }

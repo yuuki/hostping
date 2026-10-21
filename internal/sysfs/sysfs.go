@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -171,4 +172,43 @@ func PackageID(sysroot string, cpu int) int {
 func PortActive(portDir string) bool {
 	st := strings.ToUpper(ReadString(filepath.Join(portDir, "state")))
 	return strings.Contains(st, "ACTIVE") || strings.HasPrefix(strings.TrimSpace(st), "4:")
+}
+
+// FirstActiveIBPort is the port of the InfiniBand device dev
+// (sysroot/class/infiniband/<dev>/ports) that discovery and the counters
+// use: the first ACTIVE port by port number, else the first listed port.
+// Port names are sorted numerically ("2" before "10"), with any non-numeric
+// name after them in lexical order. ok is false when the ports directory
+// cannot be listed or is empty; port is "" then.
+//
+// Both topology discovery and the monitor pick their port with this, so the
+// rate, link layer and rail key of an RNIC and the counters read for it
+// always come from the same port, whatever its number.
+func FirstActiveIBPort(sysroot, dev string) (port string, ok bool) {
+	dir := filepath.Join(sysroot, "class/infiniband", dev, "ports")
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) == 0 {
+		return "", false
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	sort.Slice(names, func(i, j int) bool {
+		a, ea := strconv.Atoi(names[i])
+		b, eb := strconv.Atoi(names[j])
+		switch {
+		case ea == nil && eb == nil:
+			return a < b
+		case ea == nil || eb == nil:
+			return ea == nil // numeric names first
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
+		if PortActive(filepath.Join(dir, name)) {
+			return name, true
+		}
+	}
+	return names[0], true
 }

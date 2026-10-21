@@ -111,7 +111,9 @@ func nvidiaPCIeByBDF(ctx context.Context, run runner) map[string]float64 {
 		if !ok {
 			continue
 		}
-		bdf[strings.TrimSpace(i)] = normalizeBDF(b)
+		if nb := normalizeBDF(b); nb != "" {
+			bdf[strings.TrimSpace(i)] = nb
+		}
 	}
 	if len(bdf) == 0 {
 		return nil

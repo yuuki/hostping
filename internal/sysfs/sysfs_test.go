@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -241,5 +242,57 @@ func TestPortActive(t *testing.T) {
 	}
 	if PortActive(filepath.Join(root, "ports", "missing")) {
 		t.Fatal("a port without a state file is not active")
+	}
+}
+
+func TestFirstActiveIBPort(t *testing.T) {
+	root := t.TempDir()
+	ports := func(dev string) string { return filepath.Join(root, "class/infiniband", dev, "ports") }
+
+	// Ports 1..6 with only 5 ACTIVE: the fixed "1".."4" probe the monitor
+	// used to do would have settled on "1".
+	for i := 1; i <= 6; i++ {
+		st := "1: DOWN\n"
+		if i == 5 {
+			st = "4: ACTIVE\n"
+		}
+		write(t, filepath.Join(ports("mlx5_0"), strconv.Itoa(i), "state"), st)
+	}
+	if p, ok := FirstActiveIBPort(root, "mlx5_0"); !ok || p != "5" {
+		t.Fatalf("mlx5_0 = %q ok=%v, want 5", p, ok)
+	}
+
+	// Numeric sort: "10" sorts after "2", and the first ACTIVE by number wins.
+	for _, n := range []string{"10", "2", "9"} {
+		write(t, filepath.Join(ports("mlx5_1"), n, "state"), "4: ACTIVE\n")
+	}
+	if p, ok := FirstActiveIBPort(root, "mlx5_1"); !ok || p != "2" {
+		t.Fatalf("mlx5_1 = %q ok=%v, want 2", p, ok)
+	}
+
+	// None ACTIVE: the lowest-numbered port.
+	for _, n := range []string{"3", "12"} {
+		write(t, filepath.Join(ports("mlx5_2"), n, "state"), "1: DOWN\n")
+	}
+	if p, ok := FirstActiveIBPort(root, "mlx5_2"); !ok || p != "3" {
+		t.Fatalf("mlx5_2 = %q ok=%v, want 3", p, ok)
+	}
+
+	// A non-numeric port name is listed too, after the numeric ones.
+	write(t, filepath.Join(ports("mlx5_3"), "p0", "state"), "4: ACTIVE\n")
+	write(t, filepath.Join(ports("mlx5_3"), "1", "state"), "1: DOWN\n")
+	if p, ok := FirstActiveIBPort(root, "mlx5_3"); !ok || p != "p0" {
+		t.Fatalf("mlx5_3 = %q ok=%v, want p0", p, ok)
+	}
+
+	// Unreadable (missing) and empty ports directories: no port, ok=false.
+	if p, ok := FirstActiveIBPort(root, "missing"); ok || p != "" {
+		t.Fatalf("missing = %q ok=%v, want \"\" false", p, ok)
+	}
+	if err := os.MkdirAll(ports("empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := FirstActiveIBPort(root, "empty"); ok || p != "" {
+		t.Fatalf("empty = %q ok=%v, want \"\" false", p, ok)
 	}
 }

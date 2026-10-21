@@ -40,14 +40,14 @@ func fakeSMI(t *testing.T, calls *int, dmon string, dmonErr error) runner {
 func TestNvidiaPCIeByBDF(t *testing.T) {
 	calls := 0
 	got := nvidiaPCIeByBDF(context.Background(), fakeSMI(t, &calls, dmonOut, nil))
-	if got["18:00.0"] != 12600e6 {
-		t.Errorf("gpu0 = %v, want max(rx, tx) = 12600 MB/s", got["18:00.0"])
+	if got["0000:18:00.0"] != 12600e6 {
+		t.Errorf("gpu0 = %v, want max(rx, tx) = 12600 MB/s", got["0000:18:00.0"])
 	}
-	if v, ok := got["19:00.0"]; !ok || v != 0 {
+	if v, ok := got["0000:19:00.0"]; !ok || v != 0 {
 		t.Errorf("a measured 0 must stay 0, got %v ok=%v", v, ok)
 	}
-	if _, ok := got["38:00.0"]; ok {
-		t.Errorf("an unsupported counter must be absent, got %v", got["38:00.0"])
+	if _, ok := got["0000:38:00.0"]; ok {
+		t.Errorf("an unsupported counter must be absent, got %v", got["0000:38:00.0"])
 	}
 }
 
@@ -65,18 +65,18 @@ func TestNvidiaPCIeByBDFFailureIsUnknown(t *testing.T) {
 // Columns are found by name, so a driver that adds columns still parses.
 func TestParseDmonPCIeLocatesColumns(t *testing.T) {
 	out := "# gpu    Id  txpci  rxpci\n# Idx    Id   MB/s   MB/s\n    0  a0     10     20\n"
-	got := parseDmonPCIe(out, map[string]string{"0": "18:00.0"})
-	if got["18:00.0"] != 20e6 {
+	got := parseDmonPCIe(out, map[string]string{"0": "0000:18:00.0"})
+	if got["0000:18:00.0"] != 20e6 {
 		t.Fatalf("got %v, want 20 MB/s", got)
 	}
-	if got := parseDmonPCIe("    0  10  20\n", map[string]string{"0": "18:00.0"}); got != nil {
+	if got := parseDmonPCIe("    0  10  20\n", map[string]string{"0": "0000:18:00.0"}); got != nil {
 		t.Fatalf("rows without a header must not be guessed at: %v", got)
 	}
 }
 
 func TestGPUPCIeUtilNeedsReadCapacity(t *testing.T) {
 	g := topology.Fig2()
-	rate := map[string]float64{"18:00.0": 12600e6, "19:00.0": 0}
+	rate := map[string]float64{"0000:18:00.0": 12600e6, "0000:19:00.0": 0}
 	got := gpuPCIeUtil(g, rate)
 	c, _ := g.Link("pcie.gpu0")
 	if want := 12600e6 * 8 / float64(c.CapacityBPS); got["pcie.gpu0"] != want {
