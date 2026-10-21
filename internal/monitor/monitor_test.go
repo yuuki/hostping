@@ -128,20 +128,20 @@ func TestDropWrap32DoesNotSumThenDelta(t *testing.T) {
 	cfg.IdleInterval = time.Hour
 	s := monitor.StaticSampler{
 		Counters: map[string]model.RNICCounters{
-			"rnic0": {RxDrops: 0xfffffff0, TxDrops: 0xfffffff0},
+			"rnic0": {Drops: map[string]uint64{"rx_discards_phy": 0xfffffff0, "tx_discards_phy": 0xfffffff0}},
 		},
 		GPU: []model.GPUStatus{{ID: "gpu0", Idle: true}},
 	}
 	m := monitor.New(cfg, g, s)
 	_, _ = m.Poll(context.Background())
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 0x10, TxDrops: 0x20}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: map[string]uint64{"rx_discards_phy": 0x10, "tx_discards_phy": 0x20}}
 	d, err := m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Independent wrap of each 32-bit counter: (0x10+0x10) + (0x20+0x10) = 0x50
-	if d.DropDelta["rnic0"] != 0x50 {
-		t.Fatalf("drop delta=%d want 0x50", d.DropDelta["rnic0"])
+	if got := d.DropDelta["rnic0"].FaultTotal(); got != 0x50 || d.Rates[0].DropDelta != 0x50 {
+		t.Fatalf("drop delta=%d rate=%d want 0x50", got, d.Rates[0].DropDelta)
 	}
 }
 
@@ -169,7 +169,7 @@ func TestBusyCooldownRateLimitsDropTriggers(t *testing.T) {
 	cfg.IdleInterval = time.Hour
 	cfg.BusyCooldown = time.Hour
 	s := monitor.StaticSampler{
-		Counters: map[string]model.RNICCounters{"rnic0": {}},
+		Counters: map[string]model.RNICCounters{"rnic0": {Drops: drops(0)}},
 		GPU:      []model.GPUStatus{{ID: "gpu0", Idle: true}},
 	}
 	m := monitor.New(cfg, g, s)
@@ -178,7 +178,7 @@ func TestBusyCooldownRateLimitsDropTriggers(t *testing.T) {
 	}
 	runs := 0
 	for i := 1; i <= 5; i++ {
-		s.Counters["rnic0"] = model.RNICCounters{RxDrops: uint64(i)}
+		s.Counters["rnic0"] = model.RNICCounters{Drops: drops(uint64(i))}
 		d, err := m.Poll(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -192,7 +192,7 @@ func TestBusyCooldownRateLimitsDropTriggers(t *testing.T) {
 			t.Fatalf("suppressed poll %d must carry no trigger: %+v", i, d)
 		}
 		// Drops stay visible to telemetry even when the run is suppressed.
-		if !d.BusyRNICs["rnic0"] || d.DropDelta["rnic0"] == 0 {
+		if !d.BusyRNICs["rnic0"] || d.DropDelta["rnic0"].FaultTotal() == 0 {
 			t.Fatalf("poll %d must still report the busy RNIC: %+v", i, d)
 		}
 	}
@@ -207,14 +207,14 @@ func TestBusyTriggerReArmsAfterCooldown(t *testing.T) {
 	cfg.IdleInterval = time.Hour
 	cfg.BusyCooldown = time.Millisecond
 	s := monitor.StaticSampler{
-		Counters: map[string]model.RNICCounters{"rnic0": {}},
+		Counters: map[string]model.RNICCounters{"rnic0": {Drops: drops(0)}},
 		GPU:      []model.GPUStatus{{ID: "gpu0", Idle: true}},
 	}
 	m := monitor.New(cfg, g, s)
 	if _, err := m.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 1}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(1)}
 	d, err := m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestBusyTriggerReArmsAfterCooldown(t *testing.T) {
 		t.Fatalf("first busy poll must run: %+v", d)
 	}
 	time.Sleep(2 * time.Millisecond)
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 2}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(2)}
 	d, err = m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -238,14 +238,14 @@ func TestPFCKeepsPriorityOverDrops(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.IdleInterval = time.Hour
 	s := monitor.StaticSampler{
-		Counters: map[string]model.RNICCounters{"rnic0": {}},
+		Counters: map[string]model.RNICCounters{"rnic0": {Drops: drops(0)}},
 		GPU:      []model.GPUStatus{{ID: "gpu0", Idle: true}},
 	}
 	m := monitor.New(cfg, g, s)
 	if _, err := m.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 3, TxPauseDurationUs: 40_000}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(3), TxPauseDurationUs: 40_000}
 	d, err := m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -297,14 +297,14 @@ func TestMarkRunDiscardsTheNextSample(t *testing.T) {
 	cfg.IdleInterval = time.Hour
 	cfg.BusyCooldown = 0
 	s := monitor.StaticSampler{
-		Counters: map[string]model.RNICCounters{"rnic0": {}},
+		Counters: map[string]model.RNICCounters{"rnic0": {Drops: drops(0)}},
 		GPU:      []model.GPUStatus{{ID: "gpu0", Idle: true}},
 	}
 	m := monitor.New(cfg, g, s)
 	if _, err := m.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 1}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(1)}
 	d, err := m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +314,7 @@ func TestMarkRunDiscardsTheNextSample(t *testing.T) {
 	}
 	m.MarkRun(time.Now())
 	// Probe traffic: drops and bytes jump, but this delta spans the engine run.
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 99, RxBytes: 1 << 30}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(99), RxBytes: 1 << 30}
 	d, err = m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -322,16 +322,16 @@ func TestMarkRunDiscardsTheNextSample(t *testing.T) {
 	if d.Run || d.Ready || d.Trigger != "" {
 		t.Fatalf("post-run sample must be re-baselined, got %+v", d)
 	}
-	if d.DropDelta["rnic0"] != 0 || d.Rates[0].ThroughputBPS != 0 {
+	if d.DropDelta["rnic0"].FaultTotal() != 0 || d.Rates[0].ThroughputBPS != 0 {
 		t.Fatalf("post-run sample must not derive rates from probe traffic: %+v", d)
 	}
 	// The sample after that is measured against the post-run baseline.
-	s.Counters["rnic0"] = model.RNICCounters{RxDrops: 100, RxBytes: 1 << 30}
+	s.Counters["rnic0"] = model.RNICCounters{Drops: drops(100), RxBytes: 1 << 30}
 	d, err = m.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Ready || d.DropDelta["rnic0"] != 1 {
+	if !d.Ready || d.DropDelta["rnic0"].FaultTotal() != 1 {
 		t.Fatalf("baseline must resume from the discarded sample: %+v", d)
 	}
 }
@@ -692,3 +692,6 @@ func TestPollRNICPCIeUtilUnknownOnAssumedCapacity(t *testing.T) {
 		t.Fatalf("other RNICs keep theirs: %v", d.Util)
 	}
 }
+
+// drops is a drop counter set holding one port discard counter at n.
+func drops(n uint64) map[string]uint64 { return map[string]uint64{"rx_discards_phy": n} }

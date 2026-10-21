@@ -104,8 +104,8 @@ func TestReadRNICSysfsEthtoolSuppliesPauseAndDrops(t *testing.T) {
 	if c.PauseSources != srcEthtool || c.TxPauseDurationUs != 7 {
 		t.Fatalf("pause sources=%b tx=%d, want ethtool 7", c.PauseSources, c.TxPauseDurationUs)
 	}
-	if c.DropSources != srcIBDiscards|srcEthtool || c.RxDrops != 1 {
-		t.Fatalf("drop sources=%b rx=%d", c.DropSources, c.RxDrops)
+	if c.DropSources != srcIBDiscards|srcEthtool || c.Drops["rx_discards_phy"] != 1 {
+		t.Fatalf("drop sources=%b drops=%v", c.DropSources, c.Drops)
 	}
 }
 
@@ -125,8 +125,8 @@ func TestReadRNICSysfsHWPauseKeepsEthtoolDrops(t *testing.T) {
 	if c.PauseSources != srcHWCounters || c.TxPauseDurationUs != 40 {
 		t.Fatalf("pause sources=%b tx=%d, want hw_counters 40 only", c.PauseSources, c.TxPauseDurationUs)
 	}
-	if c.DropSources&srcEthtool == 0 || c.RxDrops != 1 {
-		t.Fatalf("drop sources=%b rx=%d, want ethtool drops", c.DropSources, c.RxDrops)
+	if c.DropSources&srcEthtool == 0 || c.Drops["rx_discards_phy"] != 1 {
+		t.Fatalf("drop sources=%b drops=%v, want ethtool drops", c.DropSources, c.Drops)
 	}
 }
 
@@ -320,7 +320,7 @@ func TestMonitorUnknownDropsBlockIdleNotApplicableDoNot(t *testing.T) {
 	m := New(cfg, g, s)
 	m.Logf = func(string, ...any) {}
 	poll(t, m)
-	s.Counters["rnic3"] = model.RNICCounters{DropGap: "none", PauseGap: "none", RxDrops: 5, TxPauseDurationUs: 1 << 40}
+	s.Counters["rnic3"] = model.RNICCounters{DropGap: "none", PauseGap: "none", Drops: map[string]uint64{"rx_discards_phy": 5}, TxPauseDurationUs: 1 << 40}
 	d := poll(t, m)
 	if !d.HostIdle || !d.IdleKnown || d.Trigger != model.TriggerIdle || len(d.DropDelta) != 0 {
 		t.Fatalf("not-applicable counters must neither trigger nor block idle: %+v", d)

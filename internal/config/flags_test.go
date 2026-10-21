@@ -103,8 +103,8 @@ func TestFlagsGoldenCount(t *testing.T) {
 	_, fs := newFlagSet(t)
 	n := 0
 	fs.VisitAll(func(*flag.Flag) { n++ })
-	if n != 49 {
-		t.Fatalf("RegisterFlags registers %d flags, want 49 (update this test and the goldens together with an intended change)", n)
+	if n != 51 {
+		t.Fatalf("RegisterFlags registers %d flags, want 51 (update this test and the goldens together with an intended change)", n)
 	}
 }
 
@@ -140,6 +140,8 @@ func TestFlagValueZeroString(t *testing.T) {
 		"mutual-transport":     "",
 		"report-format":        "",
 		"exclude-rnic":         "",
+		"drop-ignore-rnic":     "",
+		"lossless-priorities":  "",
 		"baseline":             "",
 		"mem-channel-capacity": "",
 		"upi-capacity":         "",
@@ -235,6 +237,13 @@ func TestFlagValueSetErrors(t *testing.T) {
 		{"exclude-rnic", "mlx5_2,", `empty RNIC name in "mlx5_2,"`},
 		{"exclude-rnic", ",mlx5_2", `empty RNIC name in ",mlx5_2"`},
 		{"exclude-rnic", "mlx5_2, ,mlx5_3", `empty RNIC name in "mlx5_2, ,mlx5_3"`},
+		{"drop-ignore-rnic", "mlx5_8,", `empty RNIC name in "mlx5_8,"`},
+
+		// --lossless-priorities: each entry an 802.1p priority.
+		{"lossless-priorities", "", `priority "" is not 0 to 7`},
+		{"lossless-priorities", "8", `priority "8" is not 0 to 7`},
+		{"lossless-priorities", "-1", `priority "-1" is not 0 to 7`},
+		{"lossless-priorities", "3,x", `priority "x" is not 0 to 7`},
 
 		// --baseline: the spec parser's errors (internal/baseline) pass
 		// through unchanged.

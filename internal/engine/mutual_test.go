@@ -29,7 +29,7 @@ func TestEngineUsesFullMutualWindow(t *testing.T) {
 	e.Mutual = stubWindow{ready: true, ms: []model.MutualMeasurement{
 		{Src: a, Dst: b, Connected: true, Sent: 200, Recv: 100, Reliable: true},
 	}}
-	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle, DropDelta: map[string]uint64{a: 3}})
+	rep := runWith(t, e, RunRequest{Mode: model.ModeIdle, DropDelta: map[string]model.RNICDrops{a: {Fault: map[string]uint64{"rx_discards_phy": 3}, Lossy: map[string]uint64{"rx_prio0_buf_discard": 50}}}})
 	if burst != 0 {
 		t.Fatalf("a full window must replace the burst, prober asked %d times", burst)
 	}

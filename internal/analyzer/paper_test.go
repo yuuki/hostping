@@ -410,7 +410,7 @@ func TestReliableMutualDoesNotUseRCLoss(t *testing.T) {
 		Mutual: []model.MutualMeasurement{{
 			Src: "rnic0", Dst: "rnic1", Connected: true, Reliable: true,
 		}},
-		DropDelta: map[string]uint64{"rnic0": 12},
+		DropDelta: map[string]model.RNICDrops{"rnic0": {Fault: map[string]uint64{"rx_discards_phy": 12}}},
 	})
 	if !hasCause(model.Report{Causes: res.Causes}, model.CauseRNICPacketDrops) {
 		t.Fatalf("hardware discard delta should diagnose drops: %v", res.Causes)

@@ -226,7 +226,9 @@ type MutualMeasurement struct {
 	// (Recv < Sent), and LossRatio is not Ethernet drop evidence — drops come
 	// from the RNIC counters. It is false only in the simulator, whose lost
 	// probes are its injected drops.
-	Reliable     bool   `json:"reliable,omitempty"`
+	Reliable bool `json:"reliable,omitempty"`
+	// CounterDrops is both RNICs' fault drops (RNICDrops.FaultTotal) on the
+	// monitor poll that started the run.
 	CounterDrops uint64 `json:"counter_drops,omitempty"`
 	// CrossRail marks a pair whose RNICs sit on different rails (fabric
 	// keys), probed only under --mutual-scope=host. Its traffic leaves the

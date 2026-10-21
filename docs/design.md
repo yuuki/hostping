@@ -120,6 +120,49 @@ The run is an ordinary busy run. RNICs at or above `Thplow` are the loaded set, 
 
 Every run costs the workload some bandwidth or GPU memory; see [Cost to running workloads](operations.md#cost-to-running-workloads).
 
+### Drops that do not count against the RNIC
+
+A drop delta starts a busy run and is reported as `rnic_packet_drops` at `high`.
+That fits a compute RNIC on a congested rail. Two kinds of drops are not RNIC
+faults, and hostping can be told about both:
+
+- `--drop-ignore-rnic` names RNICs whose drops are their clients' load, such as
+  a storage NIC next to the rail NICs, by RNIC ID, IB device name or PCI
+  address in any spelling (`3c:00.0` is `0000:3c:00.0`), repeatable or
+  comma-separated. In `--sim` it also covers the RNIC's mutual-probe loss. A name that matches no RNIC fails
+  start-up, and each ignored RNIC is logged once at start.
+- `--lossless-priorities` lists the 802.1p priorities PFC protects (for
+  example `3`). A per-priority drop counter (`rx_prioN_*`) on any other
+  priority is lossy-class. A lossy class discards when its buffer fills, by
+  design: kernel TCP traffic on priority 0 does so under load while RDMA on the
+  lossless priority is unaffected. These drops are reported as the advisory
+  `rnic_lossy_class_discards` at `low`. Without the flag every priority counts,
+  as before.
+
+Neither starts a busy run or adds to a mutual pair's `counter_drops`. Both are
+still load: the RNIC is busy, the host is not idle, and the delta stays in
+`hostping_rnic_drop_delta`. The RNICs are probed and paired as before.
+
+The monitor differences each drop counter on its own and names those that
+moved in the evidence. The ConnectX port aggregate `rx_discards_phy` is the sum
+of `rx_prioN_discards`. Where the device has those counters, the aggregate is
+kept only for what they do not account for, so a lossy priority's discards do
+not count against the RNIC through the aggregate, and a lossless one's are not
+counted twice. The driver reads the two apart, so one sample can catch a
+discard in one and not yet in the other. A residual therefore counts only once
+it has held for two polls: a skew that reverses on the next poll is never a
+fault, and a real unexplained discard is reported one poll late.
+
+A drop counter that decreases is a wrap only from the upper half of its 32- or
+64-bit range. Any other decrease is a reset (a driver reload, say) and becomes
+the new baseline. A poll whose drop counters are not the same set as the last
+one's, because a counter appeared or vanished, cannot be differenced. Its drops
+are unread, as on a source change, so the host is not idle on that poll.
+
+hostping does not infer either setting. The topology cannot tell a storage NIC
+from a compute RNIC on a host without GPUs, and the PFC configuration is not
+read.
+
 ## Live runs
 
 A live (non-`--sim`) `diagnose` / `--once` warms RNIC counters and GPU util, then runs idle or busy mode from that sample. It refuses to run if GPU util, RNIC line rate, the CPU load, or a PFC pause or drop counter that has a source is unread (unknown ≠ idle).
@@ -504,7 +547,7 @@ hostping reports the causes from NSDI'23 and ToN'24, plus a few of its own.
   RNIC packet drops (sim loss or hardware discard/OOB counters, not probe
   timeouts).
 - Beyond the papers: `snc_mesh_failure`, `overloaded_rnic_pcie`,
-  `rnic_pcie_undersized`, `gpu_mr_registration_slow`,
+  `rnic_pcie_undersized`, `rnic_lossy_class_discards`, `gpu_mr_registration_slow`,
   `path_latency_abnormal`, and `unknown` when no cause explains the abnormal
   paths.
 

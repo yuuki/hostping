@@ -125,6 +125,14 @@ func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidateDropIgnore(g.RNICs); err != nil {
+		return nil, err
+	}
+	for _, n := range g.RNICs {
+		if cfg.DropIgnored(n) {
+			logf("hostping: %s (%s) drops ignored by --drop-ignore-rnic: still probed and exported, never a drop trigger or rnic_packet_drops", n.ID, n.Device)
+		}
+	}
 	if line := baseline.DescribeTables(ov, g.RNICs); line != "" {
 		logf("hostping: %s", line)
 	}
@@ -680,6 +688,10 @@ func hintsFrom(w *sim.World) map[string]string {
 func PrintTopology(cfg config.Config) error {
 	g, err := LoadGraph(cfg)
 	if err != nil {
+		return err
+	}
+	// The documented pre-flight check for a new option set.
+	if err := cfg.ValidateDropIgnore(g.RNICs); err != nil {
 		return err
 	}
 	enc := json.NewEncoder(os.Stdout)

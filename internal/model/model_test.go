@@ -558,6 +558,7 @@ func TestStringConstants(t *testing.T) {
 		{"CauseGPUMRRegistrationSlow", model.CauseGPUMRRegistrationSlow, "gpu_mr_registration_slow"},
 		{"CausePathLatencyAbnormal", model.CausePathLatencyAbnormal, "path_latency_abnormal"},
 		{"CauseRNICPCIeUndersized", model.CauseRNICPCIeUndersized, "rnic_pcie_undersized"},
+		{"CauseRNICLossyClassDiscards", model.CauseRNICLossyClassDiscards, "rnic_lossy_class_discards"},
 		{"CauseUnknown", model.CauseUnknown, "unknown"},
 		{"CauseRNICCrossRailUnreachable", model.CauseRNICCrossRailUnreachable, "rnic_cross_rail_unreachable"},
 		{"CauseSNCMeshFailure", model.CauseSNCMeshFailure, "snc_mesh_failure"},

@@ -177,6 +177,18 @@ type Config struct {
 	// that are not data-path NICs, such as the HCA a host manages its GPU
 	// fabric through. Discovery fails on an entry that matches no device.
 	ExcludeRNICs []string
+	// DropIgnoreRNICs are RNICs (ID, IB device name or PCI address) whose
+	// drop counters neither start a busy-mode run nor are diagnosed, such as
+	// a storage NIC whose discards are its clients' load. They are still
+	// probed, paired and exported, and their drops still count as load.
+	// Start-up fails on an entry that matches no RNIC (ValidateDropIgnore).
+	DropIgnoreRNICs []string
+	// LosslessPriorities are the 802.1p priorities PFC protects. When set,
+	// a per-priority drop counter (rx_prio0_buf_discard, rx_prio3_discards)
+	// on any other priority is lossy-class: it starts no busy-mode run and
+	// is reported as the advisory rnic_lossy_class_discards. Empty treats
+	// every priority as lossless, as before.
+	LosslessPriorities []int
 
 	Sim          bool
 	SimFault     string
@@ -279,6 +291,8 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.TopologyName, "topology", c.TopologyName, "built-in topology name (fig2; fig2-rails: the same host with one rail per RNIC; fig2-snc: the same host with sub-NUMA clustering, two NUMA nodes per package)")
 	fs.StringVar(&c.TopologyFile, "topology-file", c.TopologyFile, "JSON topology file")
 	fs.Var((*rnicList)(&c.ExcludeRNICs), "exclude-rnic", "RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up")
+	fs.Var((*rnicList)(&c.DropIgnoreRNICs), "drop-ignore-rnic", "RNIC whose drop counters start no busy run and are not diagnosed, by RNIC ID (rnic9), IB device name (mlx5_8) or PCI address, repeatable or comma-separated (e.g. a storage NIC that drops under its clients' load); it is still probed, paired and exported. A name that matches no RNIC fails start-up")
+	fs.Var((*priorityList)(&c.LosslessPriorities), "lossless-priorities", "802.1p priorities PFC protects, comma-separated (e.g. 3); per-priority drop counters on any other priority (rx_prio0_buf_discard) start no busy run and are reported as the advisory rnic_lossy_class_discards (empty: every priority counts)")
 	fs.StringVar(&c.PrometheusAddr, "metrics", c.PrometheusAddr, "Prometheus /metrics listen address (empty to disable; one-shot runs listen only when this flag is given)")
 	fs.StringVar(&c.MetricsWebConfig, "metrics-web-config", c.MetricsWebConfig, "Prometheus exporter-toolkit web config file enabling TLS and/or basic auth on the --metrics listener (empty: plain HTTP)")
 	fs.BoolVar(&c.MetricsVerbDurations, "metrics-verb-durations", c.MetricsVerbDurations, "export hostping.verb.duration (2-3 series per RNIC→endpoint path); false drops the series from /metrics and OTLP, while reports and the gpu_slow_mr_reg diagnosis keep the timings")

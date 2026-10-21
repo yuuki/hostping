@@ -60,7 +60,11 @@ const (
 	// is too narrow or slow by design). It is not a fault and never changes a
 	// path or link status.
 	CauseRNICPCIeUndersized = "rnic_pcie_undersized"
-	CauseUnknown            = "unknown"
+	// CauseRNICLossyClassDiscards is advisory: drops on priorities outside
+	// --lossless-priorities, which PFC does not protect and which discard
+	// under load by design. It is never high confidence.
+	CauseRNICLossyClassDiscards = "rnic_lossy_class_discards"
+	CauseUnknown                = "unknown"
 )
 
 // CauseRNICCrossRailUnreachable is reported from cross-rail mutual pairs only

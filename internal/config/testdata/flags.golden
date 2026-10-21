@@ -5,6 +5,7 @@ busy-cooldown | 30s | minimum interval between PFC/drop-triggered busy runs (0 d
 busy-interval | 0s | periodic busy-mode run on a loaded host without PFC/drops, at most once per interval (0 disables; beyond NSDI'23 §4.2)
 busy-samples | 3 | loopback readings per path on a loaded RNIC in busy mode; the median is classified, so a single noisy sample no longer marks a healthy sibling abnormal (1 disables the repeat)
 cpu-busy-high | 0.5 | CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1)
+drop-ignore-rnic |  | RNIC whose drop counters start no busy run and are not diagnosed, by RNIC ID (rnic9), IB device name (mlx5_8) or PCI address, repeatable or comma-separated (e.g. a storage NIC that drops under its clients' load); it is still probed, paired and exported. A name that matches no RNIC fails start-up
 exclude-rnic |  | RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up
 fault |  | simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1)
 flap-window | 3 | consecutive gray tests on a link that diagnose flapping
@@ -15,6 +16,7 @@ idle-interval | 5m0s | idle-host full-mesh interval
 iters | 512 | loopback probe iterations (small/large WRITE pairs) per measurement, 1 to 512
 large-msg | 262144 | large-message size in bytes (bandwidth probe), at most 16 MiB
 latency-floor | 500ns | least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor)
+lossless-priorities |  | 802.1p priorities PFC protects, comma-separated (e.g. 3); per-priority drop counters on any other priority (rx_prio0_buf_discard) start no busy run and are reported as the advisory rnic_lossy_class_discards (empty: every priority counts)
 mem-channel-capacity |  | memory bandwidth of each mem.N link (all channels of one NUMA node, reads + writes), replacing the assumed constant (repeatable). BW for every link or mem.N=BW for one; units bps/Gbps (bits) or GB/s/GiB/s (bytes)
 mem-warmup | 0s | before each host-memory loopback probe, write the probe's NUMA-bound buffers from the CPU for this long so the memory subsystem is awake when measuring (0 = off, at most 1s; GPU endpoints unaffected)
 metric-interval | 1s | RNIC counter poll interval

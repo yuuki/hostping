@@ -8,6 +8,37 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- `--drop-ignore-rnic` names RNICs (RNIC ID, IB device name or PCI address,
+  matched in canonical form)
+  whose drop counters start no busy-mode run and are not reported as
+  `rnic_packet_drops`, such as a storage NIC that drops under its clients'
+  load. They are still probed, paired and exported, and their drops still
+  count as load. A name that matches no RNIC fails start-up.
+- `--lossless-priorities` lists the 802.1p priorities PFC protects. A
+  per-priority drop counter (`rx_prio0_buf_discard`, `rx_prio0_discards`) on
+  any other priority starts no busy-mode run and is reported as the new
+  advisory `rnic_lossy_class_discards` at `low` confidence, routed to
+  `HostpingAdvisoryDiagnosis` (info) by the shipped rules. Without the flag
+  every priority counts, as before.
+
+### Changed
+
+- The `rnic_packet_drops` evidence names each counter that moved, for example
+  `rnic9 discard/OOB delta=120 (rx_prio3_discards=120)`. The ConnectX port
+  aggregate `rx_discards_phy`, the sum of `rx_prioN_discards`, is counted
+  only for what those counters do not account for, so the delta no longer
+  counts such a discard twice. `hostping_rnic_drop_delta` still sums every
+  drop counter.
+- Each drop counter is differenced on its own. A decrease is a wrap only from
+  the upper half of the counter's range; any other decrease is a reset and
+  becomes the new baseline. A poll on which a drop counter appears or
+  vanishes leaves the drops unread for that poll, so the host is not idle on
+  it, instead of reading as a wrap. Where per-priority counters exist, the
+  part of `rx_discards_phy` they do not explain counts only once it has held
+  for two polls, so the driver reading the two apart cannot raise a drop.
+
 ## [0.2.0] - 2026-10-21
 
 ### Changed

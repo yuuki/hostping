@@ -1,6 +1,7 @@
 package analyzer_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,7 +115,7 @@ func TestCounterDropDeltaReportedOnce(t *testing.T) {
 			reliable("rnic1", "rnic3", 12),
 			reliable("rnic0", "rnic2", 0),
 		},
-		DropDelta: map[string]uint64{"rnic1": 12},
+		DropDelta: map[string]model.RNICDrops{"rnic1": faultDrops("rx_discards_phy", 12)},
 	})
 	if len(causes) != 1 {
 		t.Fatalf("want 1 drop cause, got %d: %+v", len(causes), causes)
@@ -127,13 +128,82 @@ func TestCounterDropDeltaReportedOnce(t *testing.T) {
 	}
 }
 
-// Counter deltas without any mutual probe keep their per-RNIC form.
+// Counter deltas without any mutual probe keep their per-RNIC form, and name
+// each counter that moved.
 func TestCounterDropDeltaWithoutMutual(t *testing.T) {
-	causes := dropCauses(t, analyzer.Input{DropDelta: map[string]uint64{"rnic0": 3, "rnic2": 0}})
+	causes := dropCauses(t, analyzer.Input{DropDelta: map[string]model.RNICDrops{
+		"rnic0": {Fault: map[string]uint64{"rx_prio3_discards": 2, "out_of_buffer": 1}},
+		"rnic2": {},
+	}})
 	if len(causes) != 1 {
 		t.Fatalf("want 1 drop cause, got %d: %+v", len(causes), causes)
 	}
-	if causes[0].Evidence != "rnic0 discard/OOB delta=3" {
-		t.Errorf("evidence = %q", causes[0].Evidence)
+	if want := "rnic0 discard/OOB delta=3 (out_of_buffer=1, rx_prio3_discards=2)"; causes[0].Evidence != want {
+		t.Errorf("evidence = %q, want %q", causes[0].Evidence, want)
+	}
+}
+
+// Lossy-class drops are not rnic_packet_drops: they are the advisory
+// rnic_lossy_class_discards at low confidence, naming the counters and the
+// configured lossless priorities.
+func TestLossyClassDiscardsAreAdvisory(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.LosslessPriorities = []int{3, 4}
+	res := analyzer.Analyze(analyzer.Input{
+		Graph: topology.Fig2(), Cfg: cfg,
+		DropDelta: map[string]model.RNICDrops{
+			"rnic0": {Lossy: map[string]uint64{"rx_prio0_buf_discard": 300}},
+			"rnic1": {Fault: map[string]uint64{"rx_prio3_discards": 7}, Lossy: map[string]uint64{"rx_prio0_discards": 5}},
+		},
+	})
+	var drops, lossy []model.RootCause
+	for _, c := range res.Causes {
+		switch c.Code {
+		case model.CauseRNICPacketDrops:
+			drops = append(drops, c)
+		case model.CauseRNICLossyClassDiscards:
+			lossy = append(lossy, c)
+		}
+	}
+	if len(drops) != 1 || drops[0].RNICs[0] != "rnic1" || drops[0].Evidence != "rnic1 discard/OOB delta=7 (rx_prio3_discards=7)" {
+		t.Fatalf("rnic_packet_drops = %+v, want rnic1's lossless drops only", drops)
+	}
+	if len(lossy) != 2 {
+		t.Fatalf("want 2 lossy-class causes, got %+v", lossy)
+	}
+	for _, c := range lossy {
+		if c.Confidence != model.ConfidenceLow {
+			t.Errorf("%s confidence = %s, want low", c.RNICs, c.Confidence)
+		}
+	}
+	if want := "rnic0 lossy-class delta=300 (rx_prio0_buf_discard=300); lossless priorities 3,4"; lossy[0].Evidence != want {
+		t.Errorf("evidence = %q, want %q", lossy[0].Evidence, want)
+	}
+}
+
+func faultDrops(counter string, n uint64) model.RNICDrops {
+	return model.RNICDrops{Fault: map[string]uint64{counter: n}}
+}
+
+// --drop-ignore-rnic also leaves the RNIC's mutual-probe loss undiagnosed
+// (the --sim drops fault), not only its counter deltas.
+func TestDropIgnoredRNICProbeLossNotDiagnosed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.DropIgnoreRNICs = []string{"rnic1"}
+	res := analyzer.Analyze(analyzer.Input{
+		Graph: topology.Fig2(), Cfg: cfg,
+		Mutual: []model.MutualMeasurement{
+			lossy("rnic0", "rnic1", 0.05),
+			lossy("rnic1", "rnic2", 0.05),
+			lossy("rnic2", "rnic3", 0.05),
+		},
+	})
+	for _, c := range res.Causes {
+		if c.Code == model.CauseRNICPacketDrops && slices.Contains(c.RNICs, "rnic1") {
+			t.Fatalf("ignored rnic1 diagnosed: %+v", c)
+		}
+	}
+	if !slices.ContainsFunc(res.Causes, func(c model.RootCause) bool { return c.Code == model.CauseRNICPacketDrops }) {
+		t.Fatalf("the pair without rnic1 must still be diagnosed: %+v", res.Causes)
 	}
 }

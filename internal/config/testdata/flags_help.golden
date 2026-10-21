@@ -12,6 +12,8 @@
     	loopback readings per path on a loaded RNIC in busy mode; the median is classified, so a single noisy sample no longer marks a healthy sibling abnormal (1 disables the repeat) (default 3)
   -cpu-busy-high value
     	CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1) (default 0.5)
+  -drop-ignore-rnic value
+    	RNIC whose drop counters start no busy run and are not diagnosed, by RNIC ID (rnic9), IB device name (mlx5_8) or PCI address, repeatable or comma-separated (e.g. a storage NIC that drops under its clients' load); it is still probed, paired and exported. A name that matches no RNIC fails start-up
   -exclude-rnic value
     	RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up
   -fault string
@@ -32,6 +34,8 @@
     	large-message size in bytes (bandwidth probe), at most 16 MiB (default 262144)
   -latency-floor value
     	least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor) (default 500ns)
+  -lossless-priorities value
+    	802.1p priorities PFC protects, comma-separated (e.g. 3); per-priority drop counters on any other priority (rx_prio0_buf_discard) start no busy run and are reported as the advisory rnic_lossy_class_discards (empty: every priority counts)
   -mem-channel-capacity value
     	memory bandwidth of each mem.N link (all channels of one NUMA node, reads + writes), replacing the assumed constant (repeatable). BW for every link or mem.N=BW for one; units bps/Gbps (bits) or GB/s/GiB/s (bytes)
   -mem-warmup value
