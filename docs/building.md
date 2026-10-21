@@ -38,7 +38,7 @@ back to the module version and VCS stamping, and to `devel` / `unknown`
 without them. `hostping --version` and `hostpingctl version` print the result:
 
 ```
-hostping 1.2.3 (commit abc1234, zig probe 0.2.0, go1.27.2)
+hostping 1.2.3 (commit abc1234, zig probe 0.2.0, go1.27.3)
 ```
 
 ## Output locations
@@ -68,4 +68,4 @@ sysfs and ibverbs access stays Linux-only and fails closed.
 3. `make setup`
 
 Zig 0.14 and 0.15 do not link the build runner on current Apple Silicon macOS.
-Use the pinned Go 1.27.2 and Zig 0.17.0 from `mise.toml`.
+Use the pinned Go 1.27.3 and Zig 0.17.0 from `mise.toml`.
