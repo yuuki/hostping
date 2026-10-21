@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yuuki/hostping/internal/model"
+	"github.com/yuuki/hostping/internal/pci"
 )
 
 // MaxPriority is the highest 802.1p priority.
@@ -29,8 +30,14 @@ func (c Config) ValidateDropIgnore(rnics []model.RNIC) error {
 	return nil
 }
 
+// namesRNIC compares a PCI address in its canonical form, so 3c:00.0 and
+// 00000000:3C:00.0 name the device at 0000:3c:00.0.
 func namesRNIC(e string, n model.RNIC) bool {
-	return e == n.ID || e == n.Device || (n.PCIeBDF != "" && strings.EqualFold(e, n.PCIeBDF))
+	if e == n.ID || e == n.Device {
+		return true
+	}
+	bdf := pci.CanonicalBDF(e)
+	return bdf != "" && bdf == pci.CanonicalBDF(n.PCIeBDF)
 }
 
 // Lossless reports whether PFC protects priority p. With no

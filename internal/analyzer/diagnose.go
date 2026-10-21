@@ -765,10 +765,18 @@ func diagnoseDrops(in Input) []model.RootCause {
 	}
 
 	// Pairs whose counter drops are not already explained by a per-RNIC delta,
-	// and unreliable-probe loss. RC loss_ratio is never drop evidence.
+	// and unreliable-probe loss. RC loss_ratio is never drop evidence. A pair
+	// with an RNIC --drop-ignore-rnic names is left out: the probe cannot
+	// tell which side dropped, and that RNIC's drops are not diagnosed.
+	ignored := map[string]bool{}
+	for _, n := range in.Graph.RNICs {
+		if in.Cfg.DropIgnored(n) {
+			ignored[n.ID] = true
+		}
+	}
 	var counterPairs, lossPairs []model.MutualMeasurement
 	for _, m := range in.Mutual {
-		if !m.Connected || counted[m.Src] || counted[m.Dst] {
+		if !m.Connected || counted[m.Src] || counted[m.Dst] || ignored[m.Src] || ignored[m.Dst] {
 			continue
 		}
 		switch {

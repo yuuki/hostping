@@ -39,6 +39,14 @@ func TestDropIgnoredMatchesIDDeviceOrPCIAddress(t *testing.T) {
 	}
 	cfg := Defaults()
 	cfg.DropIgnoreRNICs = []string{"rnic0", "mlx5_2", "0000:3C:00.0"}
+	for _, e := range []string{"3c:00.0", "00000000:3C:00.0", "0000:3c:00.0"} {
+		if !(Config{DropIgnoreRNICs: []string{e}}).DropIgnored(rnics[1]) {
+			t.Errorf("%q does not name the RNIC at 0000:3c:00.0", e)
+		}
+	}
+	if (Config{DropIgnoreRNICs: []string{"0001:3c:00.0"}}).DropIgnored(rnics[1]) {
+		t.Error("another PCI domain must not match")
+	}
 	for _, n := range rnics {
 		if !cfg.DropIgnored(n) {
 			t.Errorf("%s not ignored", n.ID)

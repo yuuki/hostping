@@ -101,6 +101,9 @@ type Monitor struct {
 	// re-baselines included.
 	pauseSrc map[string]*sourceTrack
 	dropSrc  map[string]*sourceTrack
+	// dropResidual is each RNIC's aggregate drop balance across polls
+	// (settleResidual).
+	dropResidual map[string]map[string]int64
 	// cpuPrev is the previous CPU reading (pollCPU); cpuFailed is set while
 	// the CPU signal cannot be read, so the failure is logged once.
 	cpuPrev   map[int]CPUTicks
@@ -109,7 +112,7 @@ type Monitor struct {
 
 func New(cfg config.Config, g topology.Graph, s Sampler) *Monitor {
 	return &Monitor{Cfg: cfg, Graph: g, Sampler: s, prev: map[string]model.RNICCounters{}, now: time.Now,
-		pauseSrc: map[string]*sourceTrack{}, dropSrc: map[string]*sourceTrack{}}
+		pauseSrc: map[string]*sourceTrack{}, dropSrc: map[string]*sourceTrack{}, dropResidual: map[string]map[string]int64{}}
 }
 
 func (m *Monitor) logf(format string, args ...any) {
@@ -315,7 +318,12 @@ func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error
 		if r.DropKnown && !m.Cfg.DropIgnored(n) {
 			// Only fault drops trigger; lossy-class and ignored drops
 			// still made the RNIC busy in rnicRates, since they are load.
-			d := splitDrops(deltas, m.Cfg.Lossless)
+			res := m.dropResidual[n.ID]
+			if res == nil {
+				res = map[string]int64{}
+				m.dropResidual[n.ID] = res
+			}
+			d := splitDrops(c.Drops, deltas, m.Cfg.Lossless, res)
 			rn.drops[n.ID] = d
 			f.drop = d.FaultTotal() > 0
 		}
@@ -399,7 +407,7 @@ func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, dr
 		}
 	}
 	var drops map[string]uint64
-	if drop == sourceKnown && prev.DropSources == cur.DropSources {
+	if drop == sourceKnown && prev.DropSources == cur.DropSources && sameCounters(prev.Drops, cur.Drops) {
 		r.DropKnown = true
 		drops = dropDeltas(prev.Drops, cur.Drops)
 		for _, d := range drops {

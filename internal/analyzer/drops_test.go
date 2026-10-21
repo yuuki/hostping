@@ -1,6 +1,7 @@
 package analyzer_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -182,4 +183,27 @@ func TestLossyClassDiscardsAreAdvisory(t *testing.T) {
 
 func faultDrops(counter string, n uint64) model.RNICDrops {
 	return model.RNICDrops{Fault: map[string]uint64{counter: n}}
+}
+
+// --drop-ignore-rnic also leaves the RNIC's mutual-probe loss undiagnosed
+// (the --sim drops fault), not only its counter deltas.
+func TestDropIgnoredRNICProbeLossNotDiagnosed(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.DropIgnoreRNICs = []string{"rnic1"}
+	res := analyzer.Analyze(analyzer.Input{
+		Graph: topology.Fig2(), Cfg: cfg,
+		Mutual: []model.MutualMeasurement{
+			lossy("rnic0", "rnic1", 0.05),
+			lossy("rnic1", "rnic2", 0.05),
+			lossy("rnic2", "rnic3", 0.05),
+		},
+	})
+	for _, c := range res.Causes {
+		if c.Code == model.CauseRNICPacketDrops && slices.Contains(c.RNICs, "rnic1") {
+			t.Fatalf("ignored rnic1 diagnosed: %+v", c)
+		}
+	}
+	if !slices.ContainsFunc(res.Causes, func(c model.RootCause) bool { return c.Code == model.CauseRNICPacketDrops }) {
+		t.Fatalf("the pair without rnic1 must still be diagnosed: %+v", res.Causes)
+	}
 }

@@ -785,7 +785,8 @@ names containing `discard` and netdev `dropped` counters.
 The evidence names each counter that moved and its delta, for example
 `rnic9 discard/OOB delta=120 (rx_prio3_discards=120)`. The port aggregate
 `rx_discards_phy` is the sum of the per-priority `rx_prioN_discards`, so it is
-listed only for the part those counters do not account for.
+listed only for the part those counters do not account for, and only once that
+part has held for two polls.
 
 Two kinds of drops are left out of this code and of the drop trigger. Both
 still count as load, so the RNIC is busy and the host is not idle, and both

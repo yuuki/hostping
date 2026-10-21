@@ -128,7 +128,8 @@ faults, and hostping can be told about both:
 
 - `--drop-ignore-rnic` names RNICs whose drops are their clients' load, such as
   a storage NIC next to the rail NICs, by RNIC ID, IB device name or PCI
-  address (repeatable or comma-separated). A name that matches no RNIC fails
+  address in any spelling (`3c:00.0` is `0000:3c:00.0`), repeatable or
+  comma-separated. In `--sim` it also covers the RNIC's mutual-probe loss. A name that matches no RNIC fails
   start-up, and each ignored RNIC is logged once at start.
 - `--lossless-priorities` lists the 802.1p priorities PFC protects (for
   example `3`). A per-priority drop counter (`rx_prioN_*`) on any other
@@ -144,10 +145,19 @@ still load: the RNIC is busy, the host is not idle, and the delta stays in
 
 The monitor differences each drop counter on its own and names those that
 moved in the evidence. The ConnectX port aggregate `rx_discards_phy` is the sum
-of `rx_prioN_discards`. It is kept only for what those counters do not account
-for, so a lossy priority's discards do not count against the RNIC through the
-aggregate, and a lossless one's are not counted twice. A counter that appears
-between two polls is baselined, not counted from zero.
+of `rx_prioN_discards`. Where the device has those counters, the aggregate is
+kept only for what they do not account for, so a lossy priority's discards do
+not count against the RNIC through the aggregate, and a lossless one's are not
+counted twice. The driver reads the two apart, so one sample can catch a
+discard in one and not yet in the other. A residual therefore counts only once
+it has held for two polls: a skew that reverses on the next poll is never a
+fault, and a real unexplained discard is reported one poll late.
+
+A drop counter that decreases is a wrap only from the upper half of its 32- or
+64-bit range. Any other decrease is a reset (a driver reload, say) and becomes
+the new baseline. A poll whose drop counters are not the same set as the last
+one's, because a counter appeared or vanished, cannot be differenced. Its drops
+are unread, as on a source change, so the host is not idle on that poll.
 
 hostping does not infer either setting. The topology cannot tell a storage NIC
 from a compute RNIC on a host without GPUs, and the PFC configuration is not
