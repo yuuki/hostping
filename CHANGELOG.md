@@ -8,8 +8,13 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
 ### Changed
 
+- The binaries are built with Go 1.27.3, which carries the `crypto/x509`
+  fix for GO-2026-6809 (CVE-2026-111943) that the metrics listener's TLS
+  path reaches. Source builds need Go 1.27.3 (see `mise.toml`).
 - `--iters` now rejects 0 and values above 512 when the flags are parsed
   (`0 out of range [1, 512]`). Before, the help text said "at most 512" but
   the probe silently ran 8 iterations for 0 and 512 for anything larger.
