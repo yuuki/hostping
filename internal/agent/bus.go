@@ -39,8 +39,8 @@ func liveSampler(g topology.Graph, cfg config.Config) (monitor.SysfsSampler, fun
 	for _, id := range slices.Sorted(maps.Keys(u.Skipped)) {
 		log.Printf("hostping: uncore: %s stays unknown: %s", id, u.Skipped[id])
 	}
-	for die, boxes := range u.SNCBoxes {
-		log.Printf("hostping: uncore: sub-NUMA clustering on package/die %s, IMC boxes measured per node: %s", die, boxes)
+	for _, die := range slices.Sorted(maps.Keys(u.SNCBoxes)) {
+		log.Printf("hostping: uncore: sub-NUMA clustering on package/die %s, IMC boxes measured per node: %s", die, u.SNCBoxes[die])
 	}
 	log.Printf("hostping: uncore utilization on %s", strings.Join(u.Links(), ", "))
 	s.Uncore = u

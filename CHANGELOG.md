@@ -8,6 +8,38 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Changed
+
+- `--iters` now rejects 0 and values above 512 when the flags are parsed
+  (`0 out of range [1, 512]`). Before, the help text said "at most 512" but
+  the probe silently ran 8 iterations for 0 and 512 for anything larger.
+- `--small-msg` must be at least 1 byte, like `--large-msg`; a 0-byte WRITE
+  measures nothing.
+- The `hostping.mutual.rtt`, `hostping.mutual.loss_ratio` and
+  `hostping.mutual.timeout_ratio` descriptions (the Prometheus `HELP` lines)
+  no longer say "same-rail": with `--mutual-scope=host` every RNIC pair is
+  measured. Names, units and values are unchanged.
+- The RNIC port whose counters the monitor reads is now the port discovery
+  keys the device on: the first `ACTIVE` port by number, whatever its
+  number. Before, the monitor tried only ports 1 to 4 and fell back to port
+  1, so an RNIC whose active port is 5 or higher had its pauses, drops and
+  throughput read from a down port. RNICs with ports 1 to 4 are unaffected.
+
+### Fixed
+
+- GPU utilization, compute mode, `nvidia-smi dmon` PCIe throughput and the
+  DRM `gpu_busy_percent` fallback now match GPUs on the full PCI address,
+  domain included. Two GPUs at the same `bus:dev.fn` in different PCI
+  domains were read as one GPU, the later line of `nvidia-smi` winning.
+- A report's `elapsed_ns` is taken from the same clock reading as the
+  elapsed time it is derived from; the two differed by a few microseconds.
+- The uncore lines logged at start (`hostping: uncore: <link> stays unknown:
+  …` and the sub-NUMA clustering lines) come out in a fixed order instead
+  of map order.
+- A `--sim` daemon whose mutual probe is scheduled (`--mutual-interval`)
+  stops as soon as it is asked to, instead of sleeping out the simulated
+  probe interval first.
+
 ## [0.1.7] - 2026-10-20
 
 ### Changed
