@@ -174,17 +174,21 @@ func TestFlagValueSetErrors(t *testing.T) {
 		{"report-format", "JSON", `unknown report format "JSON" (want json, pretty or none)`},
 
 		// uint32 (unbounded): the strconv error is passed through.
+		{"mutual-iters", "4294967296", `strconv.ParseUint: parsing "4294967296": value out of range`},
+		{"busy-samples", "-1", `strconv.ParseUint: parsing "-1": invalid syntax`},
+
+		// Bounded uint32: parse errors first, then the [min, max] check.
 		{"iters", "4294967296", `strconv.ParseUint: parsing "4294967296": value out of range`},
 		{"iters", "-1", `strconv.ParseUint: parsing "-1": invalid syntax`},
 		{"iters", "many", `strconv.ParseUint: parsing "many": invalid syntax`},
 		{"iters", "", `strconv.ParseUint: parsing "": invalid syntax`},
 		{"iters", "1.5", `strconv.ParseUint: parsing "1.5": invalid syntax`},
 		{"iters", "+7", `strconv.ParseUint: parsing "+7": invalid syntax`},
-		{"mutual-iters", "4294967296", `strconv.ParseUint: parsing "4294967296": value out of range`},
+		{"iters", "0", `0 out of range [1, 512]`},
+		{"iters", "513", `513 out of range [1, 512]`},
 		{"small-msg", "4294967296", `strconv.ParseUint: parsing "4294967296": value out of range`},
-		{"busy-samples", "-1", `strconv.ParseUint: parsing "-1": invalid syntax`},
-
-		// Bounded uint32: parse errors first, then the [min, max] check.
+		{"small-msg", "0", `0 out of range [1, 16777216]`},
+		{"small-msg", "16777217", `16777217 out of range [1, 16777216]`},
 		{"large-msg", "0", `0 out of range [1, 16777216]`},
 		{"large-msg", "16777217", `16777217 out of range [1, 16777216]`},
 		{"large-msg", "4294967296", `strconv.ParseUint: parsing "4294967296": value out of range`},
@@ -300,6 +304,8 @@ func TestFlagParseErrorWrapsSetError(t *testing.T) {
 		{[]string{"--report-format", "yaml"}, `invalid value "yaml" for flag -report-format: unknown report format "yaml" (want json, pretty or none)`},
 		{[]string{"--idle-gate-timeout", "1m"}, `invalid value "1m" for flag -idle-gate-timeout: 1m0s out of range [0s, 20s]`},
 		{[]string{"--large-msg", "0"}, `invalid value "0" for flag -large-msg: 0 out of range [1, 16777216]`},
+		{[]string{"--iters", "0"}, `invalid value "0" for flag -iters: 0 out of range [1, 512]`},
+		{[]string{"--small-msg", "0"}, `invalid value "0" for flag -small-msg: 0 out of range [1, 16777216]`},
 		{[]string{"--cpu-busy-high", "2"}, `invalid value "2" for flag -cpu-busy-high: 2 out of range [0, 1]`},
 		{[]string{"--baseline", "nope=1Gbps"}, `invalid value "nope=1Gbps" for flag -baseline: unknown distance "nope" (want same_switch, multi_switch, cross_root, cross_socket, local_mem, remote_mem)`},
 		{[]string{"--no-such-flag"}, `flag provided but not defined: -no-such-flag`},
@@ -338,8 +344,8 @@ func TestFlagValueString(t *testing.T) {
 		{"report-format", []string{"pretty"}, "pretty"},
 		{"report-format", []string{"none"}, "none"},
 		{"iters", []string{"128"}, "128"},
-		{"iters", []string{"0"}, "0"},
-		{"iters", []string{"4294967295"}, "4294967295"},
+		{"iters", []string{"1"}, "1"},
+		{"iters", []string{"512"}, "512"},
 		{"iters", []string{"007"}, "7"},
 		{"mutual-iters", []string{"8"}, "8"},
 		{"small-msg", []string{"64"}, "64"},
@@ -460,8 +466,8 @@ func TestFlagSetWritesConfig(t *testing.T) {
 // keeps the number in the error message and the one in the help text tied
 // to the same constant.
 func TestBoundedFlagMaxConstants(t *testing.T) {
-	if MaxLargeMsgBytes != 16<<20 || MaxMutualMsgBytes != 4096 {
-		t.Errorf("MaxLargeMsgBytes=%d MaxMutualMsgBytes=%d", MaxLargeMsgBytes, MaxMutualMsgBytes)
+	if MaxLargeMsgBytes != 16<<20 || MaxMutualMsgBytes != 4096 || MaxIters != 512 {
+		t.Errorf("MaxLargeMsgBytes=%d MaxMutualMsgBytes=%d MaxIters=%d", MaxLargeMsgBytes, MaxMutualMsgBytes, MaxIters)
 	}
 	if MaxMemWarmup != time.Second || MaxIdleGateTimeout != 20*time.Second || MaxLatencyFloor != 10*time.Microsecond {
 		t.Errorf("MaxMemWarmup=%v MaxIdleGateTimeout=%v MaxLatencyFloor=%v", MaxMemWarmup, MaxIdleGateTimeout, MaxLatencyFloor)
@@ -475,10 +481,11 @@ func TestBoundedFlagMaxConstants(t *testing.T) {
 		"latency-floor":      "(at most 10us;",
 		"mem-warmup":         "at most 1s;",
 		"large-msg":          "at most 16 MiB",
+		"small-msg":          "1 to 16 MiB",
 		"mutual-msg":         "1 to 4096",
 		"upi-bytes-per-flit": "at most 64)",
 		"cpu-busy-high":      "at most 1)",
-		"iters":              "at most 512",
+		"iters":              "1 to 512",
 	} {
 		if u := fs.Lookup(name).Usage; !strings.Contains(u, want) {
 			t.Errorf("--%s help lacks %q: %s", name, want, u)

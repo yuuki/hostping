@@ -12,7 +12,7 @@ gpu-util-interval | 10s | minimum period between nvidia-smi GPU utilization quer
 idle-gate-command |  | daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start; exit 1 (denied), exit 2 or higher (the gate could not decide), a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits 1 while a scheduler job holds the host and 2 when the scheduler cannot be queried; empty: no gate)
 idle-gate-timeout | 5s | daemon: kill --idle-gate-command and skip the idle run when it has not exited after this long (at most 20s)
 idle-interval | 5m0s | idle-host full-mesh interval
-iters | 512 | loopback probe iterations (small/large WRITE pairs) per measurement, at most 512
+iters | 512 | loopback probe iterations (small/large WRITE pairs) per measurement, 1 to 512
 large-msg | 262144 | large-message size in bytes (bandwidth probe), at most 16 MiB
 latency-floor | 500ns | least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most 10us; a set baseline LAT has no floor)
 mem-channel-capacity |  | memory bandwidth of each mem.N link (all channels of one NUMA node, reads + writes), replacing the assumed constant (repeatable). BW for every link or mem.N=BW for one; units bps/Gbps (bits) or GB/s/GiB/s (bytes)
@@ -36,7 +36,7 @@ pfc-high | 0.03 | Tx pause duration ratio that triggers busy diagnosis
 report-file |  | append each report to this file as one JSON line (created 0640; reopened per report, so logrotate needs no signal)
 report-format |  | how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)
 sim | false | run against the in-process intra-host simulator
-small-msg | 1 | small-message size in bytes (latency probe)
+small-msg | 1 | small-message size in bytes (latency probe), 1 to 16 MiB (a 0-byte WRITE measures nothing)
 state-dir |  | daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)
 thp-low | 0.05 | fraction of RNIC line rate below which the host counts as idle
 timeout | 5s | per-probe timeout

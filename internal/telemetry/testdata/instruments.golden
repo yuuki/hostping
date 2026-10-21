@@ -18,9 +18,9 @@ hostping.loopback.latency | us | Intra-host loopback latency, small-message p50 
 hostping.monitor.host_idle |  | 1 when the last clean monitor poll found the host idle, 0 when busy or unclassified | Gauge | int64
 hostping.monitor.last_poll_timestamp | s | Unix time of the last monitor poll that completed without error | Gauge | float64
 hostping.monitor.poll.errors |  | Monitor polls that returned an error | Sum(monotonic=true, CumulativeTemporality) | int64
-hostping.mutual.loss_ratio |  | Same-rail RNIC-to-RNIC loss ratio | Gauge | float64
-hostping.mutual.rtt | us | Same-rail RNIC-to-RNIC RTT p50 | Gauge | float64
-hostping.mutual.timeout_ratio |  | Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent | Gauge | float64
+hostping.mutual.loss_ratio |  | Mutual probe RNIC-to-RNIC loss ratio (same-rail pairs, or every pair with --mutual-scope=host) | Gauge | float64
+hostping.mutual.rtt | us | Mutual probe RNIC-to-RNIC RTT p50 (same-rail pairs, or every pair with --mutual-scope=host) | Gauge | float64
+hostping.mutual.timeout_ratio |  | Mutual probe RNIC-to-RNIC timeout ratio, 1 - recv/sent (same-rail pairs, or every pair with --mutual-scope=host) | Gauge | float64
 hostping.path.abnormal |  | 1 if RNIC→endpoint path is abnormal | Gauge | int64
 hostping.path.latency_reason_code |  | Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code | Gauge | int64
 hostping.path.latency_status_code |  | Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code | Gauge | int64

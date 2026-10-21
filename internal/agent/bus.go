@@ -2,6 +2,8 @@ package agent
 
 import (
 	"log"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/yuuki/hostping/internal/config"
@@ -34,8 +36,8 @@ func liveSampler(g topology.Graph, cfg config.Config) (monitor.SysfsSampler, fun
 		log.Printf("hostping: uncore utilization unavailable, memory and inter-socket links stay unknown: %v", err)
 		return s, func() {}
 	}
-	for id, why := range u.Skipped {
-		log.Printf("hostping: uncore: %s stays unknown: %s", id, why)
+	for _, id := range slices.Sorted(maps.Keys(u.Skipped)) {
+		log.Printf("hostping: uncore: %s stays unknown: %s", id, u.Skipped[id])
 	}
 	for die, boxes := range u.SNCBoxes {
 		log.Printf("hostping: uncore: sub-NUMA clustering on package/die %s, IMC boxes measured per node: %s", die, boxes)

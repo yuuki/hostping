@@ -45,7 +45,7 @@ type Config struct {
 	// times. Too few and a path between two root ports or sockets reads at a
 	// different level from run to run; a probe's setup (QP, MR) costs far
 	// more than 512 iterations, so the default barely changes a run's time.
-	// The Zig probe takes at most 512.
+	// 1 to MaxIters, the most the Zig probe times.
 	Iters uint32
 	// MutualIters is the number of round trips in one mutual burst. It is
 	// separate from Iters because a burst against a pair that does not answer
@@ -311,10 +311,10 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.UncoreUtil, "uncore-util", c.UncoreUtil, "read memory-channel and inter-socket utilization from Intel uncore IMC and UPI PMUs via perf_event_open (Linux; needs CAP_PERFMON or perf_event_paranoid <= 0, and --mem-channel-capacity / --upi-capacity)")
 	fs.Var(&boundedFloat{p: &c.UPIBytesPerFlit, max: MaxUPIBytesPerFlit}, "upi-bytes-per-flit", fmt.Sprintf("bytes of data one UPI data-flit count (UNC_UPI_TxL_FLITS.ALL_DATA) carries, for a processor whose ratio hostping has not measured; measure it against a known cross-socket load (0 = the measured per-model ratio, at most %d)", MaxUPIBytesPerFlit))
 	fs.Float64Var(&c.ThpLowFraction, "thp-low", c.ThpLowFraction, "fraction of RNIC line rate below which the host counts as idle")
-	fs.Var((*uint32Value)(&c.Iters), "iters", "loopback probe iterations (small/large WRITE pairs) per measurement, at most 512")
+	fs.Var(&boundedUint32{p: &c.Iters, min: 1, max: MaxIters}, "iters", fmt.Sprintf("loopback probe iterations (small/large WRITE pairs) per measurement, 1 to %d", MaxIters))
 	fs.Var((*uint32Value)(&c.MutualIters), "mutual-iters", "round trips per mutual probe burst (a pair that does not answer costs this many --mutual-timeout)")
 	fs.Var(&boundedDuration{p: &c.MemWarmup, max: MaxMemWarmup}, "mem-warmup", fmt.Sprintf("before each host-memory loopback probe, write the probe's NUMA-bound buffers from the CPU for this long so the memory subsystem is awake when measuring (0 = off, at most %v; GPU endpoints unaffected)", MaxMemWarmup))
-	fs.Var((*uint32Value)(&c.SmallMsgBytes), "small-msg", "small-message size in bytes (latency probe)")
+	fs.Var(&boundedUint32{p: &c.SmallMsgBytes, min: 1, max: MaxLargeMsgBytes}, "small-msg", fmt.Sprintf("small-message size in bytes (latency probe), 1 to %d MiB (a 0-byte WRITE measures nothing)", MaxLargeMsgBytes>>20))
 	fs.Var(&boundedUint32{p: &c.LargeMsgBytes, min: 1, max: MaxLargeMsgBytes}, "large-msg", fmt.Sprintf("large-message size in bytes (bandwidth probe), at most %d MiB", MaxLargeMsgBytes>>20))
 	fs.Var(&boundedUint32{p: &c.MutualMsgBytes, min: 1, max: MaxMutualMsgBytes}, "mutual-msg", fmt.Sprintf("mutual-probe UD SEND payload in bytes, 1 to %d and at most the port MTU", MaxMutualMsgBytes))
 	fs.IntVar(&c.FlapWindow, "flap-window", c.FlapWindow, "consecutive gray tests on a link that diagnose flapping")
@@ -402,6 +402,11 @@ func (v *uint32Value) Set(s string) error {
 // allocation on every run. 16 MiB is 64x the default, far more than a 400 Gb/s
 // transfer needs to dominate Tproc + Lat_host in Eq.1 - Eq.2.
 const MaxLargeMsgBytes = 16 << 20
+
+// MaxIters bounds --iters: the Zig loopback probe times at most this many
+// WRITE pairs (zig/src/verbs_linux.zig sizes its sample arrays for 512 and
+// clamps anything larger), so a value above it would be silently cut down.
+const MaxIters = 512
 
 // MaxMutualMsgBytes bounds --mutual-msg: the Zig mutual probe sizes its
 // registered buffers for at most 4 KiB (zig/src/verbs.zig), the largest RoCE

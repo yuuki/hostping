@@ -73,12 +73,12 @@ Each is a flag on both binaries, alongside the other tuning flags. Fractions are
 | `--latency-floor` | 500ns | Least excess over the sibling median a path's latency must also show to be `abnormal` against its siblings; see [Latency verdict and reference](#latency-verdict-and-reference). At most 10µs. |
 | `--util-high` | 0.90 | `Utilhigh`. |
 | `--cpu-busy-high` | 0.5 | CPU busy fraction at which a package counts as loaded; see [CPU load](#cpu-load-on-an-idle-host). |
-| `--small-msg` | 1 | Small message, in bytes. |
+| `--small-msg` | 1 | Small message, in bytes, 1 to 16 MiB; a 0-byte WRITE measures nothing. |
 | `--large-msg` | 262144 | Large message, in bytes (256 KiB). At most 16 MiB, because every loopback probe registers two buffers of that size. |
 | `--mutual-msg` | 1 | Mutual probe payload in bytes and the size of the probe's registered buffers, 1–4096 B. With `ud` it is also at most the port MTU, as a UD probe is one packet. |
 | `--idle-interval` | 5m | Idle poll. |
 | `--metric-interval` | 1s | Counter poll. |
-| `--iters` | 512 | Small/large WRITE pairs per loopback probe. 512 is the most the probe takes. Fewer leave paths between root ports or sockets reading at a different level from run to run, while a probe's setup still dominates its time. |
+| `--iters` | 512 | Small/large WRITE pairs per loopback probe, 1 to 512 (the most the probe times; a larger value is a flag error). Fewer leave paths between root ports or sockets reading at a different level from run to run, while a probe's setup still dominates its time. |
 | `--mutual-iters` | 64 | Round trips per mutual burst. |
 | `--mem-warmup` | off | Opt-in, at most 1s. The CPU writes to a memory path's buffers right before it is measured; see [Live runs](#live-runs). |
 | `--timeout` | 5s | Per loopback probe. |

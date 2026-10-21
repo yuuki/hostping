@@ -38,11 +38,11 @@
 # TYPE hostping_monitor_last_poll_timestamp_seconds gauge
 # HELP hostping_monitor_poll_errors_total Monitor polls that returned an error
 # TYPE hostping_monitor_poll_errors_total counter
-# HELP hostping_mutual_loss_ratio Same-rail RNIC-to-RNIC loss ratio
+# HELP hostping_mutual_loss_ratio Mutual probe RNIC-to-RNIC loss ratio (same-rail pairs, or every pair with --mutual-scope=host)
 # TYPE hostping_mutual_loss_ratio gauge
-# HELP hostping_mutual_rtt_microseconds Same-rail RNIC-to-RNIC RTT p50
+# HELP hostping_mutual_rtt_microseconds Mutual probe RNIC-to-RNIC RTT p50 (same-rail pairs, or every pair with --mutual-scope=host)
 # TYPE hostping_mutual_rtt_microseconds gauge
-# HELP hostping_mutual_timeout_ratio Same-rail RNIC-to-RNIC probe timeout ratio, 1 - recv/sent
+# HELP hostping_mutual_timeout_ratio Mutual probe RNIC-to-RNIC timeout ratio, 1 - recv/sent (same-rail pairs, or every pair with --mutual-scope=host)
 # TYPE hostping_mutual_timeout_ratio gauge
 # HELP hostping_path_abnormal 1 if RNIC→endpoint path is abnormal
 # TYPE hostping_path_abnormal gauge

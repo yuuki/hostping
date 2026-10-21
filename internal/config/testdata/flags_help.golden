@@ -27,7 +27,7 @@
   -idle-interval duration
     	idle-host full-mesh interval (default 5m0s)
   -iters value
-    	loopback probe iterations (small/large WRITE pairs) per measurement, at most 512 (default 512)
+    	loopback probe iterations (small/large WRITE pairs) per measurement, 1 to 512 (default 512)
   -large-msg value
     	large-message size in bytes (bandwidth probe), at most 16 MiB (default 262144)
   -latency-floor value
@@ -75,7 +75,7 @@
   -sim
     	run against the in-process intra-host simulator
   -small-msg value
-    	small-message size in bytes (latency probe) (default 1)
+    	small-message size in bytes (latency probe), 1 to 16 MiB (a 0-byte WRITE measures nothing) (default 1)
   -state-dir string
     	daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)
   -thp-low float

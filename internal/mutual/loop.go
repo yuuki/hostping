@@ -47,6 +47,14 @@ type Transport interface {
 	Close()
 }
 
+// interrupter is a Transport whose Wait can be woken from another goroutine.
+// Run calls it once ctx is cancelled so a Wait asleep on a long block (the
+// simulator's) ends with the daemon instead of after it; a transport without
+// it (the live UD probe polls with a bounded block) is left alone.
+type interrupter interface {
+	Interrupt()
+}
+
 // Config is the probe schedule. ToN'24 §IV-A-2: every 100 ms, 500 ms
 // timeout, 20 s window.
 type Config struct {
@@ -191,6 +199,9 @@ func pairKey(a, b int) [2]int {
 // Run probes until ctx is done, then closes the transport.
 func (l *Loop) Run(ctx context.Context) {
 	defer l.t.Close()
+	if i, ok := l.t.(interrupter); ok {
+		defer context.AfterFunc(ctx, i.Interrupt)()
+	}
 	start := l.now()
 	l.mu.Lock()
 	l.started = start
