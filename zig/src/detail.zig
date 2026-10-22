@@ -49,7 +49,31 @@ pub const Detail = struct {
     pub fn restore(self: *Detail, saved: Detail) void {
         self.* = saved;
     }
+
+    /// setErrno stores a failed libc or verbs call's errno, "errno=113
+    /// (EHOSTUNREACH)" for the values a probe meets most often, "errno=7"
+    /// for any other.
+    pub fn setErrno(self: *Detail, n: i32) void {
+        const tag = errnoName(n);
+        if (tag.len > 0) {
+            self.set("errno={d} ({s})", .{ n, tag });
+        } else {
+            self.set("errno={d}", .{n});
+        }
+    }
 };
+
+/// errnoName names the errno values a probe's address and QP calls fail
+/// with most often: EINVAL (a refused QP attribute), ENETUNREACH and
+/// EHOSTUNREACH (no route to the peer's GID). Anything else is "".
+pub fn errnoName(n: i32) []const u8 {
+    return switch (n) {
+        22 => "EINVAL",
+        101 => "ENETUNREACH",
+        113 => "EHOSTUNREACH",
+        else => "",
+    };
+}
 
 test "a fresh detail is empty and set formats into it" {
     var d: Detail = .{};
@@ -94,4 +118,16 @@ test "text longer than the buffer is cut, never overrun" {
     d.set("{s}", .{&long});
     try std.testing.expect(d.get().len <= len);
     try std.testing.expect(d.get().len > 0);
+}
+
+test "errno is stored with its name when it has one" {
+    try std.testing.expectEqualStrings("EINVAL", errnoName(22));
+    try std.testing.expectEqualStrings("ENETUNREACH", errnoName(101));
+    try std.testing.expectEqualStrings("EHOSTUNREACH", errnoName(113));
+    try std.testing.expectEqualStrings("", errnoName(7));
+    var d: Detail = .{};
+    d.setErrno(113);
+    try std.testing.expectEqualStrings("errno=113 (EHOSTUNREACH)", d.get());
+    d.setErrno(7);
+    try std.testing.expectEqualStrings("errno=7", d.get());
 }

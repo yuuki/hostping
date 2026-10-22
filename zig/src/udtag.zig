@@ -52,6 +52,13 @@ pub fn slotBytes(msg: u32) usize {
     return std.mem.alignForward(usize, @as(usize, grh_bytes) + @as(usize, msg), 64);
 }
 
+/// bufBytes is the registered buffer of one UD endpoint: recv_depth receive
+/// slots plus one send slot, in whole pages (aligned_alloc wants a multiple
+/// of the alignment).
+pub fn bufBytes(slot: usize, recv_depth: u32) usize {
+    return std.mem.alignForward(usize, slot * (@as(usize, recv_depth) + 1), 4096);
+}
+
 /// mtuBytes converts an ibv_mtu enum value (IBV_MTU_256 = 1 … IBV_MTU_4096 = 5)
 /// to bytes. A UD message cannot exceed the path MTU; 0 means unknown.
 pub fn mtuBytes(mtu: u32) u32 {
@@ -80,6 +87,16 @@ test "slot holds the GRH and the payload" {
     try std.testing.expectEqual(@as(usize, 64), slotBytes(1));
     try std.testing.expectEqual(@as(usize, 4160), slotBytes(4096));
     try std.testing.expect(slotBytes(24) >= grh_bytes + 24);
+}
+
+test "the endpoint buffer holds every receive slot and the send slot, in whole pages" {
+    try std.testing.expectEqual(@as(usize, 4096), bufBytes(64, 1));
+    try std.testing.expectEqual(@as(usize, 8192), bufBytes(64, 127));
+    const slot = slotBytes(4096);
+    const n = bufBytes(slot, 128);
+    try std.testing.expectEqual(@as(usize, 0), n % 4096);
+    try std.testing.expect(n >= slot * 129);
+    try std.testing.expect(n - slot * 129 < 4096);
 }
 
 test "mtu enum to bytes" {

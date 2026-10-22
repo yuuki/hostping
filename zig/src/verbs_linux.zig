@@ -6,6 +6,7 @@ const loopbuf = @import("loopbuf.zig");
 const memwarm = @import("memwarm.zig");
 const udtag = @import("udtag.zig");
 const portaddr = @import("portaddr.zig");
+const gidsel = @import("gidsel.zig");
 const sim = @import("sim.zig");
 const types = @import("verbs_types.zig");
 const c = @import("verbs_c");
@@ -34,13 +35,13 @@ fn openDevice(name: []const u8) ?*c.ibv_context {
     return null;
 }
 
-/// gidRaw is the 16 bytes of a GID, the view every test below reads.
-fn gidRaw(g: *const c.ibv_gid) *const [16]u8 {
+/// gidRaw is the 16 bytes of a GID, the view gidsel.zig reads.
+fn gidRaw(g: *const c.ibv_gid) *const gidsel.Gid {
     return @ptrCast(g);
 }
 
 fn gidZero(g: c.ibv_gid) bool {
-    return std.mem.allEqual(u8, gidRaw(&g), 0);
+    return gidsel.isZero(gidRaw(&g).*);
 }
 
 /// One port's address as a probe uses it. On RoCE, `gid` at `index` is a
@@ -59,16 +60,6 @@ const PortGid = struct {
         return self.mode == .ib_lid or self.mode == .ib_lid_grh;
     }
 };
-
-fn gidIPv4Mapped(g: c.ibv_gid) bool {
-    const raw = gidRaw(&g);
-    return std.mem.allEqual(u8, raw[0..10], 0) and raw[10] == 0xff and raw[11] == 0xff;
-}
-
-fn gidLinkLocal(g: c.ibv_gid) bool {
-    const raw = gidRaw(&g);
-    return raw[0] == 0xfe and raw[1] == 0x80;
-}
 
 fn sysfsGidRoCEv2(ctx: *c.ibv_context, port: u8, index: u8) bool {
     const dev = ctx.device orelse return false;
@@ -142,13 +133,14 @@ fn collectRoceV2(ctx: *c.ibv_context, out: []GidCand, max_rd: *u8) !usize {
             if (gidZero(gid)) continue;
             if (!gidIsRoCEv2(ctx, port, gi)) continue;
             if (n >= out.len) break;
+            const kind = gidsel.kindOf(gidRaw(&gid).*);
             out[n] = .{
                 .port = port,
                 .index = gi,
                 .gid = gid,
                 .mtu = pattr.active_mtu,
-                .ipv4 = gidIPv4Mapped(gid),
-                .link_local = gidLinkLocal(gid),
+                .ipv4 = kind.ipv4,
+                .link_local = kind.link_local,
             };
             n += 1;
         }
@@ -161,15 +153,8 @@ fn pickPortGid(ctx: *c.ibv_context) !PortGid {
     var cands: [32]GidCand = undefined;
     var max_rd: u8 = 16;
     const n = try collectRoceV2(ctx, &cands, &max_rd);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (cands[i].ipv4) return gidToPort(cands[i], max_rd);
-    }
-    i = 0;
-    while (i < n) : (i += 1) {
-        if (!cands[i].link_local) return gidToPort(cands[i], max_rd);
-    }
-    return error.Gid;
+    const i = gidsel.preferred(cands[0..n]) orelse return error.Gid;
+    return gidToPort(cands[i], max_rd);
 }
 
 fn linkLayer(v: u8) portaddr.LinkLayer {
@@ -284,32 +269,6 @@ fn pickPortAddr(ctx: *c.ibv_context) !PortGid {
     };
 }
 
-fn orderLoopbackGids(cands: []const GidCand, idx: []usize) usize {
-    var k: usize = 0;
-    var i: usize = 0;
-    while (i < cands.len) : (i += 1) {
-        if (cands[i].link_local) {
-            idx[k] = i;
-            k += 1;
-        }
-    }
-    i = 0;
-    while (i < cands.len) : (i += 1) {
-        if (cands[i].ipv4) {
-            idx[k] = i;
-            k += 1;
-        }
-    }
-    i = 0;
-    while (i < cands.len) : (i += 1) {
-        if (!cands[i].link_local and !cands[i].ipv4) {
-            idx[k] = i;
-            k += 1;
-        }
-    }
-    return k;
-}
-
 fn bindNuma(ptr: [*]u8, len: usize, node: i32) !void {
     if (node < 0) return;
     if (node > 63) return error.Numa;
@@ -354,18 +313,7 @@ pub fn lastQpDetail() []const u8 {
 }
 
 fn storeLibcErrno() void {
-    const n = std.c._errno().*;
-    const tag: []const u8 = switch (n) {
-        22 => "EINVAL",
-        101 => "ENETUNREACH",
-        113 => "EHOSTUNREACH",
-        else => "",
-    };
-    if (tag.len > 0) {
-        qp_err_detail.set("errno={d} ({s})", .{ n, tag });
-    } else {
-        qp_err_detail.set("errno={d}", .{n});
-    }
+    qp_err_detail.setErrno(std.c._errno().*);
 }
 
 /// The status of the last completion error timedWrite saw.
@@ -702,7 +650,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
             var max_rd: u8 = 16;
             const nc = try collectRoceV2(ctx_c, &cands, &max_rd);
             var order: [32]usize = undefined;
-            const no = orderLoopbackGids(cands[0..nc], &order);
+            const no = gidsel.loopbackOrder(cands[0..nc], &order);
             for (order[0..no]) |oi| {
                 tries[nk] = .{ .pg = gidToPort(cands[oi], max_rd), .hop = if (cands[oi].link_local) 1 else 64 };
                 nk += 1;
@@ -1014,12 +962,6 @@ pub const UdEp = struct {
     }
 };
 
-fn udBufBytes(slot: usize) usize {
-    // ud_recv_depth receive slots plus one send slot, in whole pages
-    // (aligned_alloc wants a multiple of the alignment).
-    return std.mem.alignForward(usize, slot * (ud_recv_depth + 1), 4096);
-}
-
 fn udPostRecv(ep: *UdEp, i: usize) !void {
     var sge: c.ibv_sge = .{ .addr = ep.slotAddr(i), .length = @intCast(ep.slot), .lkey = ep.mr.lkey };
     var wr: c.ibv_recv_wr = std.mem.zeroes(c.ibv_recv_wr);
@@ -1098,7 +1040,7 @@ pub fn udOpen(device: []const u8, msg: u32) !*UdEp {
     errdefer _ = c.ibv_destroy_qp(qp);
 
     const slot = udtag.slotBytes(@max(msg, 1));
-    const len = udBufBytes(slot);
+    const len = udtag.bufBytes(slot, ud_recv_depth);
     const buf = try allocAligned(len, -1);
     errdefer freeAligned(buf);
     const mr = c.ibv_reg_mr(pd, buf.ptr, len, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;

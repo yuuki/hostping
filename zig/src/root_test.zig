@@ -10,6 +10,7 @@ test {
     _ = @import("detail.zig");
     _ = @import("udtag.zig");
     _ = @import("portaddr.zig");
+    _ = @import("gidsel.zig");
     _ = @import("verbs_types.zig");
 }
 
