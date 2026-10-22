@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-22
+
 ### Added
 
 - `--drop-ignore-rnic` names RNICs (RNIC ID, IB device name or PCI address,

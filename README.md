@@ -91,7 +91,7 @@ Each release on GitHub carries `.deb` and `.rpm` packages, a tarball and
 `SHA256SUMS`:
 
 ```bash
-gh release download v0.2.0 --repo yuuki/hostping \
+gh release download v0.2.1 --repo yuuki/hostping \
     --pattern 'hostping*' --pattern SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 sudo apt install ./hostping_*_amd64.deb      # or: sudo dnf install ./hostping-*.x86_64.rpm
