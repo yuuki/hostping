@@ -6,6 +6,7 @@ const loopbuf = @import("loopbuf.zig");
 const memwarm = @import("memwarm.zig");
 const udtag = @import("udtag.zig");
 const portaddr = @import("portaddr.zig");
+const gidsel = @import("gidsel.zig");
 const sim = @import("sim.zig");
 const types = @import("verbs_types.zig");
 const c = @import("verbs_c");
@@ -34,13 +35,13 @@ fn openDevice(name: []const u8) ?*c.ibv_context {
     return null;
 }
 
-/// gidRaw is the 16 bytes of a GID, the view every test below reads.
-fn gidRaw(g: *const c.ibv_gid) *const [16]u8 {
+/// gidRaw is the 16 bytes of a GID, the view gidsel.zig reads.
+fn gidRaw(g: *const c.ibv_gid) *const gidsel.Gid {
     return @ptrCast(g);
 }
 
 fn gidZero(g: c.ibv_gid) bool {
-    return std.mem.allEqual(u8, gidRaw(&g), 0);
+    return gidsel.isZero(gidRaw(&g).*);
 }
 
 /// One port's address as a probe uses it. On RoCE, `gid` at `index` is a
@@ -59,16 +60,6 @@ const PortGid = struct {
         return self.mode == .ib_lid or self.mode == .ib_lid_grh;
     }
 };
-
-fn gidIPv4Mapped(g: c.ibv_gid) bool {
-    const raw = gidRaw(&g);
-    return std.mem.allEqual(u8, raw[0..10], 0) and raw[10] == 0xff and raw[11] == 0xff;
-}
-
-fn gidLinkLocal(g: c.ibv_gid) bool {
-    const raw = gidRaw(&g);
-    return raw[0] == 0xfe and raw[1] == 0x80;
-}
 
 fn sysfsGidRoCEv2(ctx: *c.ibv_context, port: u8, index: u8) bool {
     const dev = ctx.device orelse return false;
@@ -91,6 +82,12 @@ fn gidIsRoCEv2(ctx: *c.ibv_context, port: u8, index: u8) bool {
     }
     return sysfsGidRoCEv2(ctx, port, index);
 }
+
+/// Clamps every reading of a device applies: ports past the fourth and GID
+/// table entries past the 32nd are never looked at, and at most 32 RoCEv2
+/// candidates are kept over all ports.
+const max_ports = 4;
+const max_gids = 32;
 
 const GidCand = struct {
     port: u8,
@@ -119,57 +116,9 @@ fn deviceCaps(ctx: *c.ibv_context) !DevCaps {
         rd = dev_rd;
     }
     return .{
-        .nports = @intCast(@max(@as(i32, 1), @min(dattr.phys_port_cnt, 4))),
+        .nports = @intCast(@max(@as(i32, 1), @min(dattr.phys_port_cnt, max_ports))),
         .max_rd = rd,
     };
-}
-
-fn collectRoceV2(ctx: *c.ibv_context, out: []GidCand, max_rd: *u8) !usize {
-    const caps = try deviceCaps(ctx);
-    max_rd.* = caps.max_rd;
-    const nports = caps.nports;
-    var n: usize = 0;
-    var port: u8 = 1;
-    while (port <= nports) : (port += 1) {
-        var pattr: c.ibv_port_attr = undefined;
-        if (c.___ibv_query_port(ctx, port, &pattr) != 0) continue;
-        if (pattr.state != c.IBV_PORT_ACTIVE) continue;
-        const glen: u8 = @intCast(@min(pattr.gid_tbl_len, 32));
-        var gi: u8 = 0;
-        while (gi < glen) : (gi += 1) {
-            var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-            if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
-            if (gidZero(gid)) continue;
-            if (!gidIsRoCEv2(ctx, port, gi)) continue;
-            if (n >= out.len) break;
-            out[n] = .{
-                .port = port,
-                .index = gi,
-                .gid = gid,
-                .mtu = pattr.active_mtu,
-                .ipv4 = gidIPv4Mapped(gid),
-                .link_local = gidLinkLocal(gid),
-            };
-            n += 1;
-        }
-    }
-    if (n == 0) return error.Gid;
-    return n;
-}
-
-fn pickPortGid(ctx: *c.ibv_context) !PortGid {
-    var cands: [32]GidCand = undefined;
-    var max_rd: u8 = 16;
-    const n = try collectRoceV2(ctx, &cands, &max_rd);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (cands[i].ipv4) return gidToPort(cands[i], max_rd);
-    }
-    i = 0;
-    while (i < n) : (i += 1) {
-        if (!cands[i].link_local) return gidToPort(cands[i], max_rd);
-    }
-    return error.Gid;
 }
 
 fn linkLayer(v: u8) portaddr.LinkLayer {
@@ -180,58 +129,118 @@ fn linkLayer(v: u8) portaddr.LinkLayer {
     };
 }
 
-/// hasRoceV2 reports whether the port's GID table holds a non-zero RoCEv2
-/// GID, the test collectRoceV2 applies to every entry.
-fn hasRoceV2(ctx: *c.ibv_context, port: u8, gid_tbl_len: c_int) bool {
-    const glen: u8 = @intCast(@max(@as(c_int, 0), @min(gid_tbl_len, 32)));
-    var gi: u8 = 0;
-    while (gi < glen) : (gi += 1) {
-        var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-        if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
-        if (gidZero(gid)) continue;
-        if (gidIsRoCEv2(ctx, port, gi)) return true;
-    }
-    return false;
-}
+/// Scan is one reading of a device, taken by Dev.open and the only one a
+/// probe takes: its capabilities, every port as portaddr.plan sees it with
+/// the port's active MTU beside it, and the RoCEv2 GIDs a RoCE probe can
+/// address the device by, in port order then GID index order. Everything
+/// after it (the plan, the loopback try order, the mutual probe's address)
+/// is decided from the scan, so the three never disagree about a port.
+const Scan = struct {
+    caps: DevCaps,
+    ports: [max_ports]portaddr.Port,
+    /// mtus[i] is ports[i]'s active MTU.
+    mtus: [max_ports]c.ibv_mtu,
+    nports: usize,
+    cands: [max_gids]GidCand,
+    ncands: usize,
 
-/// scanPorts reads every port of the device for portaddr.plan. A port whose
-/// query fails is left out, as collectRoceV2 leaves it out.
-fn scanPorts(ctx: *c.ibv_context, nports: u8, out: []portaddr.Port) usize {
-    var n: usize = 0;
+    fn portList(self: *const Scan) []const portaddr.Port {
+        return self.ports[0..self.nports];
+    }
+
+    fn candList(self: *const Scan) []const GidCand {
+        return self.cands[0..self.ncands];
+    }
+
+    /// collectRoceV2 walks one active RoCE port's GID table in index order:
+    /// every non-zero RoCEv2 GID is counted and, while there is room, kept
+    /// as a candidate. Returns the count, which is what portaddr.plan reads.
+    fn collectRoceV2(self: *Scan, ctx: *c.ibv_context, port: u8, pattr: *const c.ibv_port_attr) u16 {
+        const glen: u8 = @intCast(@max(@as(c_int, 0), @min(pattr.gid_tbl_len, max_gids)));
+        var found: u16 = 0;
+        var gi: u8 = 0;
+        while (gi < glen) : (gi += 1) {
+            var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
+            if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
+            if (gidZero(gid)) continue;
+            if (!gidIsRoCEv2(ctx, port, gi)) continue;
+            found += 1;
+            if (self.ncands >= max_gids) continue;
+            const kind = gidsel.kindOf(gidRaw(&gid).*);
+            self.cands[self.ncands] = .{
+                .port = port,
+                .index = gi,
+                .gid = gid,
+                .mtu = pattr.active_mtu,
+                .ipv4 = kind.ipv4,
+                .link_local = kind.link_local,
+            };
+            self.ncands += 1;
+        }
+        return found;
+    }
+
+    /// ibPortAddr is an InfiniBand port's LID address: its active MTU, its
+    /// LID and GID index 0 (for the GRH fallback and the UD address-handle
+    /// cache). `port` is one plan chose from this scan.
+    fn ibPortAddr(self: *const Scan, ctx: *c.ibv_context, port: u8, lid: u16) !PortGid {
+        for (self.portList(), self.mtus[0..self.nports]) |p, mtu| {
+            if (p.num != port) continue;
+            var gid0: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
+            if (c.ibv_query_gid(ctx, port, 0, &gid0) != 0) gid0 = std.mem.zeroes(c.ibv_gid);
+            return .{
+                .port = port,
+                .index = 0,
+                .gid = gid0,
+                .mtu = mtu,
+                .max_rd = self.caps.max_rd,
+                .lid = lid,
+                .mode = .ib_lid,
+            };
+        }
+        return error.Port;
+    }
+};
+
+/// scanDevice reads the device once: ibv_query_device, then ibv_query_port
+/// for each port and, for each active RoCE port, its GID table. A port whose
+/// query fails is left out, as if the device did not have it.
+fn scanDevice(ctx: *c.ibv_context) !Scan {
+    var s: Scan = .{
+        .caps = try deviceCaps(ctx),
+        .ports = undefined,
+        .mtus = undefined,
+        .nports = 0,
+        .cands = undefined,
+        .ncands = 0,
+    };
     var port: u8 = 1;
-    while (port <= nports and n < out.len) : (port += 1) {
+    while (port <= s.caps.nports and s.nports < max_ports) : (port += 1) {
         var pattr: c.ibv_port_attr = undefined;
         if (c.___ibv_query_port(ctx, port, &pattr) != 0) continue;
         const ll = linkLayer(pattr.link_layer);
         const active = pattr.state == c.IBV_PORT_ACTIVE;
-        out[n] = .{
+        // Only an active RoCE port can carry a RoCEv2 GID; an InfiniBand
+        // port's table is never walked.
+        const rocev2: u16 = if (active and !ll.isInfiniBand()) s.collectRoceV2(ctx, port, &pattr) else 0;
+        s.ports[s.nports] = .{
             .num = port,
             .link_layer = ll,
             .active = active,
             .lid = pattr.lid,
-            .rocev2_gids = if (active and !ll.isInfiniBand() and hasRoceV2(ctx, port, pattr.gid_tbl_len)) 1 else 0,
+            .rocev2_gids = rocev2,
         };
-        n += 1;
+        s.mtus[s.nports] = pattr.active_mtu;
+        s.nports += 1;
     }
-    return n;
+    return s;
 }
 
-/// ibPortAddr is an InfiniBand port's LID address: its active MTU, its LID
-/// and GID index 0 (for the GRH fallback and the UD address-handle cache).
-fn ibPortAddr(ctx: *c.ibv_context, port: u8, lid: u16, max_rd: u8) !PortGid {
-    var pattr: c.ibv_port_attr = undefined;
-    if (c.___ibv_query_port(ctx, port, &pattr) != 0) return error.Port;
-    var gid0: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-    if (c.ibv_query_gid(ctx, port, 0, &gid0) != 0) gid0 = std.mem.zeroes(c.ibv_gid);
-    return .{
-        .port = port,
-        .index = 0,
-        .gid = gid0,
-        .mtu = pattr.active_mtu,
-        .max_rd = max_rd,
-        .lid = lid,
-        .mode = .ib_lid,
-    };
+/// pickPortGid is the RoCEv2 GID a mutual probe addresses the device by
+/// (gidsel.preferred); error.Gid when the device has only link-local ones.
+fn pickPortGid(scan: *const Scan) !PortGid {
+    const i = gidsel.preferred(scan.candList()) orelse return error.Gid;
+    return gidToPort(scan.cands[i], scan.caps.max_rd);
 }
 
 fn storeSkipDetail(s: portaddr.Skip, ports: []const portaddr.Port) void {
@@ -252,63 +261,71 @@ fn storeSkipDetail(s: portaddr.Skip, ports: []const portaddr.Port) void {
     }
 }
 
-/// The address a device is probed through: RoCEv2 GIDs (collected by the
-/// caller, as before InfiniBand support) or one InfiniBand port's LID.
+/// The address a device is probed through: its RoCEv2 GIDs (the scan's
+/// candidates, as before InfiniBand support) or one InfiniBand port's LID.
 const Target = union(enum) {
     rocev2,
     ib: PortGid,
 };
 
-/// resolvePort decides how to address the device (portaddr.plan). A device
-/// with no usable port fails with the skip's error: error.Gid for RoCE, as
-/// it always did, error.PortDown or error.NoLid for InfiniBand.
-fn resolvePort(ctx: *c.ibv_context) !Target {
-    const caps = try deviceCaps(ctx);
-    var ports: [4]portaddr.Port = undefined;
-    const n = scanPorts(ctx, caps.nports, &ports);
-    return switch (portaddr.plan(ports[0..n])) {
+/// resolvePort decides how to address the device (portaddr.plan) from its
+/// scan. A device with no usable port fails with the skip's error: error.Gid
+/// for RoCE, as it always did, error.PortDown or error.NoLid for InfiniBand.
+fn resolvePort(ctx: *c.ibv_context, scan: *const Scan) !Target {
+    return switch (portaddr.plan(scan.portList())) {
         .rocev2 => .rocev2,
-        .ib => |ib| .{ .ib = try ibPortAddr(ctx, ib.port, ib.lid, caps.max_rd) },
+        .ib => |ib| .{ .ib = try scan.ibPortAddr(ctx, ib.port, ib.lid) },
         .skip => |s| {
-            storeSkipDetail(s, ports[0..n]);
+            storeSkipDetail(s, scan.portList());
             return portaddr.skipError(s);
         },
     };
 }
 
-/// pickPortAddr is the address a mutual probe uses for a device.
-fn pickPortAddr(ctx: *c.ibv_context) !PortGid {
-    return switch (try resolvePort(ctx)) {
-        .rocev2 => pickPortGid(ctx),
-        .ib => |pg| pg,
-    };
-}
+/// Dev is one opened RNIC with what every probe sets up on it before its
+/// QPs, in this order: the device context, one scan of its ports and GID
+/// tables, how the device is addressed (resolvePort) and the protection
+/// domain. A device with no usable port fails in open with the skip's
+/// error, before any PD exists. The CQs are not part of the bundle because
+/// each probe shapes them differently (one shared by a loopback pair, one
+/// per device for the RC mutual probe, a send and a notified receive CQ for
+/// a UD endpoint); createCq makes them. deinit releases the PD and closes
+/// the device, in that order.
+const Dev = struct {
+    ctx: *c.ibv_context,
+    scan: Scan,
+    target: Target,
+    pd: *c.ibv_pd,
 
-fn orderLoopbackGids(cands: []const GidCand, idx: []usize) usize {
-    var k: usize = 0;
-    var i: usize = 0;
-    while (i < cands.len) : (i += 1) {
-        if (cands[i].link_local) {
-            idx[k] = i;
-            k += 1;
-        }
+    fn open(name: []const u8) !Dev {
+        const ctx = openDevice(name) orelse return error.NoDevice;
+        errdefer _ = c.ibv_close_device(ctx);
+        const scan = try scanDevice(ctx);
+        const target = try resolvePort(ctx, &scan);
+        const pd = c.ibv_alloc_pd(ctx) orelse return error.Pd;
+        return .{ .ctx = ctx, .scan = scan, .target = target, .pd = pd };
     }
-    i = 0;
-    while (i < cands.len) : (i += 1) {
-        if (cands[i].ipv4) {
-            idx[k] = i;
-            k += 1;
-        }
+
+    fn deinit(self: Dev) void {
+        _ = c.ibv_dealloc_pd(self.pd);
+        _ = c.ibv_close_device(self.ctx);
     }
-    i = 0;
-    while (i < cands.len) : (i += 1) {
-        if (!cands[i].link_local and !cands[i].ipv4) {
-            idx[k] = i;
-            k += 1;
-        }
+
+    /// createCq is a CQ of `depth` entries, delivering its events to `chan`
+    /// when one is given.
+    fn createCq(self: Dev, depth: u32, chan: ?*c.ibv_comp_channel) !*c.ibv_cq {
+        return c.ibv_create_cq(self.ctx, @intCast(depth), null, chan, 0) orelse error.Cq;
     }
-    return k;
-}
+
+    /// portAddr is the address a mutual probe uses for the device: its
+    /// InfiniBand port's LID, or the preferred RoCEv2 GID (pickPortGid).
+    fn portAddr(self: *const Dev) !PortGid {
+        return switch (self.target) {
+            .rocev2 => pickPortGid(&self.scan),
+            .ib => |pg| pg,
+        };
+    }
+};
 
 fn bindNuma(ptr: [*]u8, len: usize, node: i32) !void {
     if (node < 0) return;
@@ -354,18 +371,7 @@ pub fn lastQpDetail() []const u8 {
 }
 
 fn storeLibcErrno() void {
-    const n = std.c._errno().*;
-    const tag: []const u8 = switch (n) {
-        22 => "EINVAL",
-        101 => "ENETUNREACH",
-        113 => "EHOSTUNREACH",
-        else => "",
-    };
-    if (tag.len > 0) {
-        qp_err_detail.set("errno={d} ({s})", .{ n, tag });
-    } else {
-        qp_err_detail.set("errno={d}", .{n});
-    }
+    qp_err_detail.setErrno(std.c._errno().*);
 }
 
 /// The status of the last completion error timedWrite saw.
@@ -449,6 +455,20 @@ fn createRcQp(pd: *c.ibv_pd, cq: *c.ibv_cq) !*c.ibv_qp {
     qcap.cap.max_send_sge = 1;
     qcap.cap.max_recv_sge = 1;
     return c.ibv_create_qp(pd, &qcap) orelse error.Qp;
+}
+
+/// createUdQp is a UD QP completing its sends on send_cq and its receives
+/// on recv_cq, with room for send_depth and recv_depth posted WRs.
+fn createUdQp(pd: *c.ibv_pd, send_cq: *c.ibv_cq, recv_cq: *c.ibv_cq, send_depth: u32, recv_depth: u32) !*c.ibv_qp {
+    var ia: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
+    ia.send_cq = send_cq;
+    ia.recv_cq = recv_cq;
+    ia.qp_type = c.IBV_QPT_UD;
+    ia.cap.max_send_wr = send_depth;
+    ia.cap.max_recv_wr = recv_depth;
+    ia.cap.max_send_sge = 1;
+    ia.cap.max_recv_sge = 1;
+    return c.ibv_create_qp(pd, &ia) orelse error.Qp;
 }
 
 fn qpReset(qp: [*c]c.ibv_qp) !void {
@@ -655,6 +675,121 @@ fn gpuRegions(pd: *c.ibv_pd, mem: gdr.DeviceMem, bp: loopbuf.Plan, access: c_int
     };
 }
 
+/// The addresses a loopback connects its QP pair through, in the order it
+/// tries them (build). `what` is how the "after {d} {s}" detail names them
+/// when none is accepted.
+const Attempts = struct {
+    list: [max_gids]Attempt,
+    n: usize,
+    what: []const u8,
+
+    fn slice(self: *const Attempts) []const Attempt {
+        return self.list[0..self.n];
+    }
+
+    /// build lists the attempts for `dev`. RoCE: every RoCEv2 GID of the
+    /// scan in loopback order (gidsel.loopbackOrder), a link-local one with
+    /// hop limit 1. InfiniBand: the port's own LID with no GRH and the same
+    /// LID with a GRH over GID index 0, the mode that last worked on this
+    /// port first (ModeCache); the GRH attempt is left out when the port
+    /// has no GID 0. The second is tried when the first one's RTR is
+    /// refused, or when its WRITEs complete with a remote error
+    /// (portaddr.retryOtherMode).
+    fn build(dev: *const Dev, device: []const u8) !Attempts {
+        var a: Attempts = .{ .list = undefined, .n = 0, .what = "gid(s)" };
+        switch (dev.target) {
+            .rocev2 => {
+                // The plan chose RoCE because a port has a RoCEv2 GID, so
+                // the scan holds at least one candidate.
+                const cands = dev.scan.candList();
+                if (cands.len == 0) return error.Gid;
+                var order: [max_gids]usize = undefined;
+                const no = gidsel.loopbackOrder(cands, &order);
+                for (order[0..no]) |oi| {
+                    const cnd = cands[oi];
+                    a.list[a.n] = .{ .pg = gidToPort(cnd, dev.scan.caps.max_rd), .hop = if (cnd.link_local) 1 else 64 };
+                    a.n += 1;
+                }
+            },
+            .ib => |pg| {
+                a.what = "lid attempt(s)";
+                for (portaddr.ibOrder(cachedMode(device, pg.port))) |m| {
+                    // No GID 0, no GRH to build.
+                    if (m == .ib_lid_grh and gidZero(pg.gid)) continue;
+                    var t = pg;
+                    t.mode = m;
+                    a.list[a.n] = .{ .pg = t, .hop = 64 };
+                    a.n += 1;
+                }
+            },
+        }
+        return a;
+    }
+};
+
+/// A GPU endpoint's device allocation and how long it took (ToN'24 §VI-C:
+/// verb execution time exposes bottlenecks in calling the verbs themselves,
+/// e.g. slow GPU memory registration on a failing GPU, so the setup steps
+/// are timed alongside the data path).
+const GpuAlloc = struct {
+    mem: gdr.DeviceMem,
+    alloc_ns: u64,
+};
+
+/// allocGpu allocates `len` bytes on the GPU at `bdf`, or fails with NoGDR
+/// and gdr's detail. A GPU endpoint without a BDF has nothing to allocate on.
+fn allocGpu(bdf: []const u8, len: usize) !GpuAlloc {
+    if (bdf.len == 0) {
+        qp_err_detail.set("{s}", .{"missing gpu"});
+        return error.NoGDR;
+    }
+    const t0 = try timespecNs();
+    const mem = gdr.alloc(bdf, len) catch {
+        qp_err_detail.set("{s}", .{gdr.lastDetail()});
+        return error.NoGDR;
+    };
+    return .{ .mem = mem, .alloc_ns = (timespecNs() catch t0) - t0 };
+}
+
+/// What measure reports beyond the timings it filled in.
+const Measured = struct {
+    /// The attempt the WRITEs completed through: tries[at] after a retry.
+    at: usize,
+    /// Time the retry's reconnect took, part of qp_setup_ns.
+    reconnect_ns: u64,
+};
+
+/// measure runs the timed loopback WRITEs (writeAll) through the pair
+/// connected via tries[at]. An InfiniBand port whose WRITEs come back with a
+/// remote error in one addressing mode gets one try in the other, from
+/// RESET (connectPair from at + 1); when the other mode cannot even connect,
+/// the WRITE failure is reported, not the refused RTR. On failure it sets
+/// last_port_fault (portaddr.portFault) for the attempt in effect.
+fn measure(qp_s: [*c]c.ibv_qp, qp_d: [*c]c.ibv_qp, cq: *c.ibv_cq, regions: Regions, tries: []const Attempt, at0: usize, small_size: u32, large_size: u32, timeout_ms: u32, smalls: []u64, larges: []u64) !Measured {
+    var at = at0;
+    var reconnect_ns: u64 = 0;
+    while (true) {
+        writeAll(qp_s, cq, regions, small_size, large_size, timeout_ms, smalls, larges) catch |err| {
+            if (err == error.Wc and tries[at].pg.isInfiniBand() and at + 1 < tries.len and
+                portaddr.retryOtherMode(last_wc_status))
+            {
+                const saved = qp_err_detail.save();
+                drainCq(cq);
+                const t_re = try timespecNs();
+                if (connectPair(qp_s, qp_d, tries, at + 1)) |next| {
+                    reconnect_ns += (try timespecNs()) - t_re;
+                    at = next;
+                    continue;
+                }
+                qp_err_detail.restore(saved);
+            }
+            last_port_fault = portaddr.portFault(tries[at].pg.isInfiniBand(), err == error.Wc, last_wc_status);
+            return err;
+        };
+        return .{ .at = at, .reconnect_ns = reconnect_ns };
+    }
+}
+
 pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []const u8, small_size: u32, large_size: u32, iters: u32, timeout_ms: u32, mem_warmup_ns: u64) !LoopResult {
     qp_err_detail.clear();
     last_port_fault = false;
@@ -664,66 +799,14 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // halves of one device allocation. `numa` only places host DRAM for
     // memory endpoints.
     const bp = loopbuf.plan(large_size, gpu_index >= 0);
+    const gpu: ?GpuAlloc = if (gpu_index >= 0) try allocGpu(gpu_bdf, bp.alloc_len) else null;
+    defer if (gpu) |g| g.mem.free();
 
-    // ToN'24 §VI-C: verb execution time exposes bottlenecks in calling the
-    // verbs themselves (e.g. slow GPU memory registration on a failing GPU),
-    // so the setup steps are timed alongside the data path.
-    var gpu_mem: ?gdr.DeviceMem = null;
-    defer if (gpu_mem) |m| m.free();
-    var gpu_alloc_ns: u64 = 0;
-    if (gpu_index >= 0) {
-        if (gpu_bdf.len == 0) {
-            qp_err_detail.set("{s}", .{"missing gpu"});
-            return error.NoGDR;
-        }
-        const t_alloc = try timespecNs();
-        gpu_mem = gdr.alloc(gpu_bdf, bp.alloc_len) catch {
-            qp_err_detail.set("{s}", .{gdr.lastDetail()});
-            return error.NoGDR;
-        };
-        gpu_alloc_ns = (timespecNs() catch t_alloc) - t_alloc;
-    }
+    const dev = try Dev.open(device);
+    defer dev.deinit();
+    const tries = try Attempts.build(&dev, device);
 
-    const ctx_c = openDevice(device) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_c);
-
-    // The addresses the QP pair is connected through, tried in order. RoCE:
-    // every RoCEv2 GID in loopback order (below). InfiniBand: the port's own
-    // LID with no GRH and the same LID with a GRH over GID index 0, the mode
-    // that last worked on this port first (ModeCache). The second is tried
-    // when the first one's RTR is refused, or when its WRITEs complete with a
-    // remote error (portaddr.retryOtherMode).
-    var tries: [32]Attempt = undefined;
-    var nk: usize = 0;
-    var what: []const u8 = "gid(s)";
-    switch (try resolvePort(ctx_c)) {
-        .rocev2 => {
-            var cands: [32]GidCand = undefined;
-            var max_rd: u8 = 16;
-            const nc = try collectRoceV2(ctx_c, &cands, &max_rd);
-            var order: [32]usize = undefined;
-            const no = orderLoopbackGids(cands[0..nc], &order);
-            for (order[0..no]) |oi| {
-                tries[nk] = .{ .pg = gidToPort(cands[oi], max_rd), .hop = if (cands[oi].link_local) 1 else 64 };
-                nk += 1;
-            }
-        },
-        .ib => |pg| {
-            what = "lid attempt(s)";
-            for (portaddr.ibOrder(cachedMode(device, pg.port))) |m| {
-                // No GID 0, no GRH to build.
-                if (m == .ib_lid_grh and gidZero(pg.gid)) continue;
-                var a = pg;
-                a.mode = m;
-                tries[nk] = .{ .pg = a, .hop = 64 };
-                nk += 1;
-            }
-        },
-    }
-
-    const pd = c.ibv_alloc_pd(ctx_c) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd);
-    const cq = c.ibv_create_cq(ctx_c, 128, null, null, 0) orelse return error.Cq;
+    const cq = try dev.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq);
 
     // mlx5 RoCE rejects a self-connected RC QP (dest_qpn == own qpn) at RTR.
@@ -732,29 +815,29 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // qp_setup_ns spans both creates and INIT→RTR→RTS, address retries
     // included.
     const t_qp = try timespecNs();
-    const qp_s = try createRcQp(pd, cq);
+    const qp_s = try createRcQp(dev.pd, cq);
     defer _ = c.ibv_destroy_qp(qp_s);
-    const qp_d = try createRcQp(pd, cq);
+    const qp_d = try createRcQp(dev.pd, cq);
     defer _ = c.ibv_destroy_qp(qp_d);
-    var at = connectPair(qp_s, qp_d, tries[0..nk], 0) orelse {
-        qp_err_detail.append("after {d} {s}", .{ nk, what });
+    const at = connectPair(qp_s, qp_d, tries.slice(), 0) orelse {
+        qp_err_detail.append("after {d} {s}", .{ tries.n, tries.what });
         return error.Rtr;
     };
-    var qp_setup_ns = (try timespecNs()) - t_qp;
+    const qp_setup_ns = (try timespecNs()) - t_qp;
 
     const access: c_int = c.IBV_ACCESS_LOCAL_WRITE | c.IBV_ACCESS_REMOTE_WRITE | c.IBV_ACCESS_REMOTE_READ;
 
     // Released before the QPs, PD and device memory above (defer is LIFO).
-    const regions = if (gpu_mem) |m|
-        try gpuRegions(pd, m, bp, access)
+    const regions = if (gpu) |g|
+        try gpuRegions(dev.pd, g.mem, bp, access)
     else
-        try hostRegions(pd, bp, numa, access);
+        try hostRegions(dev.pd, bp, numa, access);
     defer regions.deinit();
 
     // --mem-warmup: wake the endpoint node's memory right before measuring
     // (memwarm.zig). Host buffers only; a GPU endpoint has none.
     var warm_ns: u64 = 0;
-    if (gpu_mem == null and mem_warmup_ns > 0) {
+    if (gpu == null and mem_warmup_ns > 0) {
         const bufs = [_][]u8{ regions.bufs[0].?, regions.bufs[1].? };
         warm_ns = memwarm.run(&bufs, mem_warmup_ns, memwarm.SystemClock{});
     }
@@ -762,31 +845,8 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     const n: usize = if (iters == 0) 8 else @min(iters, 512);
     var smalls: [512]u64 = undefined;
     var larges: [512]u64 = undefined;
-    while (true) {
-        writeAll(qp_s, cq, regions, small_size, large_size, timeout_ms, smalls[0..n], larges[0..n]) catch |err| {
-            // An InfiniBand port whose WRITEs come back with a remote error in
-            // one addressing mode gets one try in the other, from RESET.
-            if (err == error.Wc and tries[at].pg.isInfiniBand() and at + 1 < nk and
-                portaddr.retryOtherMode(last_wc_status))
-            {
-                const saved = qp_err_detail.save();
-                drainCq(cq);
-                const t_re = try timespecNs();
-                if (connectPair(qp_s, qp_d, tries[0..nk], at + 1)) |next| {
-                    qp_setup_ns += (try timespecNs()) - t_re;
-                    at = next;
-                    continue;
-                }
-                // The other mode could not even connect: report the WRITE
-                // failure, not the refused RTR.
-                qp_err_detail.restore(saved);
-            }
-            last_port_fault = portaddr.portFault(tries[at].pg.isInfiniBand(), err == error.Wc, last_wc_status);
-            return err;
-        };
-        break;
-    }
-    const pg = tries[at].pg;
+    const m = try measure(qp_s, qp_d, cq, regions, tries.slice(), at, small_size, large_size, timeout_ms, smalls[0..n], larges[0..n]);
+    const pg = tries.list[m.at].pg;
     if (pg.isInfiniBand()) cacheMode(device, pg.port, pg.mode);
     return .{
         .small_p50 = sim.percentile(smalls[0..n], 50),
@@ -794,9 +854,9 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
         .large_p50 = sim.percentile(larges[0..n], 50),
         .bw = sim.bandwidthBps(large_size, sim.percentile(larges[0..n], 50), sim.percentile(smalls[0..n], 50)),
         .completions = @intCast(n),
-        .gpu_alloc_ns = gpu_alloc_ns,
+        .gpu_alloc_ns = if (gpu) |g| g.alloc_ns else 0,
         .mr_reg_ns = regions.reg_ns,
-        .qp_setup_ns = qp_setup_ns,
+        .qp_setup_ns = qp_setup_ns + m.reconnect_ns,
         .mem_warmup_ns = warm_ns,
         .mode = pg.mode,
         .port = pg.port,
@@ -849,13 +909,13 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
 
     // Every resource is released by defer, so the error and success paths
     // tear down in the same order: the reverse of this one.
-    const ctx_a = openDevice(src) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_a);
-    const ctx_b = openDevice(dst) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_b);
+    const dev_a = try Dev.open(src);
+    defer dev_a.deinit();
+    const dev_b = try Dev.open(dst);
+    defer dev_b.deinit();
 
-    const pg_a = try pickPortAddr(ctx_a);
-    const pg_b = try pickPortAddr(ctx_b);
+    const pg_a = try dev_a.portAddr();
+    const pg_b = try dev_b.portAddr();
     // A RoCE port cannot reach an InfiniBand one; that is a pairing error,
     // not a measured connectivity failure.
     if (pg_a.isInfiniBand() != pg_b.isInfiniBand()) {
@@ -863,18 +923,14 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
         return error.Port;
     }
 
-    const pd_a = c.ibv_alloc_pd(ctx_a) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd_a);
-    const pd_b = c.ibv_alloc_pd(ctx_b) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd_b);
-    const cq_a = c.ibv_create_cq(ctx_a, 128, null, null, 0) orelse return error.Cq;
+    const cq_a = try dev_a.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq_a);
-    const cq_b = c.ibv_create_cq(ctx_b, 128, null, null, 0) orelse return error.Cq;
+    const cq_b = try dev_b.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq_b);
 
-    const qp_a = try createRcQp(pd_a, cq_a);
+    const qp_a = try createRcQp(dev_a.pd, cq_a);
     defer _ = c.ibv_destroy_qp(qp_a);
-    const qp_b = try createRcQp(pd_b, cq_b);
+    const qp_b = try createRcQp(dev_b.pd, cq_b);
     defer _ = c.ibv_destroy_qp(qp_b);
 
     try qpInit(qp_a, pg_a.port);
@@ -890,9 +946,9 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
     defer freeAligned(ba);
     const bb = try allocAligned(bytes_aligned, -1);
     defer freeAligned(bb);
-    const mra = c.ibv_reg_mr(pd_a, ba.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mra = c.ibv_reg_mr(dev_a.pd, ba.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     defer _ = c.ibv_dereg_mr(mra);
-    const mrb = c.ibv_reg_mr(pd_b, bb.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mrb = c.ibv_reg_mr(dev_b.pd, bb.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     defer _ = c.ibv_dereg_mr(mrb);
 
     const n: usize = if (iters == 0) 8 else @min(iters, 512);
@@ -988,11 +1044,11 @@ const AhEntry = struct {
     ah: *c.ibv_ah,
 };
 
-/// One RNIC's UD probe endpoint: a UD QP with its own PD, CQs and registered
-/// buffer, plus the address handles of the peers it has probed.
+/// One RNIC's UD probe endpoint: a UD QP with its own device and PD (Dev),
+/// CQs and registered buffer, plus the address handles of the peers it has
+/// probed.
 pub const UdEp = struct {
-    ctx: *c.ibv_context,
-    pd: *c.ibv_pd,
+    dev: Dev,
     chan: *c.ibv_comp_channel,
     send_cq: *c.ibv_cq,
     recv_cq: *c.ibv_cq,
@@ -1013,12 +1069,6 @@ pub const UdEp = struct {
         return @intFromPtr(self.buf.ptr) + i * self.slot;
     }
 };
-
-fn udBufBytes(slot: usize) usize {
-    // ud_recv_depth receive slots plus one send slot, in whole pages
-    // (aligned_alloc wants a multiple of the alignment).
-    return std.mem.alignForward(usize, slot * (ud_recv_depth + 1), 4096);
-}
 
 fn udPostRecv(ep: *UdEp, i: usize) !void {
     var sge: c.ibv_sge = .{ .addr = ep.slotAddr(i), .length = @intCast(ep.slot), .lkey = ep.mr.lkey };
@@ -1070,46 +1120,34 @@ fn udReset(ep: *UdEp) !void {
 
 pub fn udOpen(device: []const u8, msg: u32) !*UdEp {
     qp_err_detail.clear();
-    const ctx = openDevice(device) orelse return error.NoDevice;
-    errdefer _ = c.ibv_close_device(ctx);
-    const pg = try pickPortAddr(ctx);
+    const dev = try Dev.open(device);
+    errdefer dev.deinit();
+    const pg = try dev.portAddr();
     // A UD message is one packet: it cannot exceed the port's active MTU.
     const mtu = udtag.mtuBytes(@intCast(pg.mtu));
     if (mtu != 0 and msg > mtu) return error.MsgSize;
 
-    const pd = c.ibv_alloc_pd(ctx) orelse return error.Pd;
-    errdefer _ = c.ibv_dealloc_pd(pd);
-    const chan = c.ibv_create_comp_channel(ctx) orelse return error.Cq;
+    const chan = c.ibv_create_comp_channel(dev.ctx) orelse return error.Cq;
     errdefer _ = c.ibv_destroy_comp_channel(chan);
-    const send_cq = c.ibv_create_cq(ctx, @intCast(ud_send_depth * 2), null, null, 0) orelse return error.Cq;
+    const send_cq = try dev.createCq(ud_send_depth * 2, null);
     errdefer _ = c.ibv_destroy_cq(send_cq);
-    const recv_cq = c.ibv_create_cq(ctx, @intCast(ud_recv_depth * 2), null, chan, 0) orelse return error.Cq;
+    const recv_cq = try dev.createCq(ud_recv_depth * 2, chan);
     errdefer _ = c.ibv_destroy_cq(recv_cq);
-
-    var ia: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
-    ia.send_cq = send_cq;
-    ia.recv_cq = recv_cq;
-    ia.qp_type = c.IBV_QPT_UD;
-    ia.cap.max_send_wr = ud_send_depth;
-    ia.cap.max_recv_wr = ud_recv_depth;
-    ia.cap.max_send_sge = 1;
-    ia.cap.max_recv_sge = 1;
-    const qp = c.ibv_create_qp(pd, &ia) orelse return error.Qp;
+    const qp = try createUdQp(dev.pd, send_cq, recv_cq, ud_send_depth, ud_recv_depth);
     errdefer _ = c.ibv_destroy_qp(qp);
 
     const slot = udtag.slotBytes(@max(msg, 1));
-    const len = udBufBytes(slot);
+    const len = udtag.bufBytes(slot, ud_recv_depth);
     const buf = try allocAligned(len, -1);
     errdefer freeAligned(buf);
-    const mr = c.ibv_reg_mr(pd, buf.ptr, len, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mr = c.ibv_reg_mr(dev.pd, buf.ptr, len, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     errdefer _ = c.ibv_dereg_mr(mr);
 
     const raw = c.calloc(1, @sizeOf(UdEp)) orelse return error.Alloc;
     const ep: *UdEp = @ptrCast(@alignCast(raw));
     errdefer c.free(raw);
     ep.* = .{
-        .ctx = ctx,
-        .pd = pd,
+        .dev = dev,
         .chan = chan,
         .send_cq = send_cq,
         .recv_cq = recv_cq,
@@ -1139,8 +1177,7 @@ pub fn udClose(ep: *UdEp) void {
     _ = c.ibv_destroy_cq(ep.recv_cq);
     _ = c.ibv_destroy_cq(ep.send_cq);
     _ = c.ibv_destroy_comp_channel(ep.chan);
-    _ = c.ibv_dealloc_pd(ep.pd);
-    _ = c.ibv_close_device(ep.ctx);
+    ep.dev.deinit();
     c.free(ep);
 }
 
@@ -1162,7 +1199,7 @@ fn udAh(src: *UdEp, dst: *const UdEp) !*c.ibv_ah {
     if (src.nah >= src.ahs.len) return error.Alloc;
     var attr: c.ibv_ah_attr = std.mem.zeroes(c.ibv_ah_attr);
     fillAh(&attr, src.pg, dst.pg, ud_hop_limit);
-    const ah = c.ibv_create_ah(src.pd, &attr) orelse {
+    const ah = c.ibv_create_ah(src.dev.pd, &attr) orelse {
         storeLibcErrno();
         return error.Connect;
     };
