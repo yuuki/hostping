@@ -675,6 +675,121 @@ fn gpuRegions(pd: *c.ibv_pd, mem: gdr.DeviceMem, bp: loopbuf.Plan, access: c_int
     };
 }
 
+/// The addresses a loopback connects its QP pair through, in the order it
+/// tries them (build). `what` is how the "after {d} {s}" detail names them
+/// when none is accepted.
+const Attempts = struct {
+    list: [max_gids]Attempt,
+    n: usize,
+    what: []const u8,
+
+    fn slice(self: *const Attempts) []const Attempt {
+        return self.list[0..self.n];
+    }
+
+    /// build lists the attempts for `dev`. RoCE: every RoCEv2 GID of the
+    /// scan in loopback order (gidsel.loopbackOrder), a link-local one with
+    /// hop limit 1. InfiniBand: the port's own LID with no GRH and the same
+    /// LID with a GRH over GID index 0, the mode that last worked on this
+    /// port first (ModeCache); the GRH attempt is left out when the port
+    /// has no GID 0. The second is tried when the first one's RTR is
+    /// refused, or when its WRITEs complete with a remote error
+    /// (portaddr.retryOtherMode).
+    fn build(dev: *const Dev, device: []const u8) !Attempts {
+        var a: Attempts = .{ .list = undefined, .n = 0, .what = "gid(s)" };
+        switch (dev.target) {
+            .rocev2 => {
+                // The plan chose RoCE because a port has a RoCEv2 GID, so
+                // the scan holds at least one candidate.
+                const cands = dev.scan.candList();
+                if (cands.len == 0) return error.Gid;
+                var order: [max_gids]usize = undefined;
+                const no = gidsel.loopbackOrder(cands, &order);
+                for (order[0..no]) |oi| {
+                    const cnd = cands[oi];
+                    a.list[a.n] = .{ .pg = gidToPort(cnd, dev.scan.caps.max_rd), .hop = if (cnd.link_local) 1 else 64 };
+                    a.n += 1;
+                }
+            },
+            .ib => |pg| {
+                a.what = "lid attempt(s)";
+                for (portaddr.ibOrder(cachedMode(device, pg.port))) |m| {
+                    // No GID 0, no GRH to build.
+                    if (m == .ib_lid_grh and gidZero(pg.gid)) continue;
+                    var t = pg;
+                    t.mode = m;
+                    a.list[a.n] = .{ .pg = t, .hop = 64 };
+                    a.n += 1;
+                }
+            },
+        }
+        return a;
+    }
+};
+
+/// A GPU endpoint's device allocation and how long it took (ToN'24 §VI-C:
+/// verb execution time exposes bottlenecks in calling the verbs themselves,
+/// e.g. slow GPU memory registration on a failing GPU, so the setup steps
+/// are timed alongside the data path).
+const GpuAlloc = struct {
+    mem: gdr.DeviceMem,
+    alloc_ns: u64,
+};
+
+/// allocGpu allocates `len` bytes on the GPU at `bdf`, or fails with NoGDR
+/// and gdr's detail. A GPU endpoint without a BDF has nothing to allocate on.
+fn allocGpu(bdf: []const u8, len: usize) !GpuAlloc {
+    if (bdf.len == 0) {
+        qp_err_detail.set("{s}", .{"missing gpu"});
+        return error.NoGDR;
+    }
+    const t0 = try timespecNs();
+    const mem = gdr.alloc(bdf, len) catch {
+        qp_err_detail.set("{s}", .{gdr.lastDetail()});
+        return error.NoGDR;
+    };
+    return .{ .mem = mem, .alloc_ns = (timespecNs() catch t0) - t0 };
+}
+
+/// What measure reports beyond the timings it filled in.
+const Measured = struct {
+    /// The attempt the WRITEs completed through: tries[at] after a retry.
+    at: usize,
+    /// Time the retry's reconnect took, part of qp_setup_ns.
+    reconnect_ns: u64,
+};
+
+/// measure runs the timed loopback WRITEs (writeAll) through the pair
+/// connected via tries[at]. An InfiniBand port whose WRITEs come back with a
+/// remote error in one addressing mode gets one try in the other, from
+/// RESET (connectPair from at + 1); when the other mode cannot even connect,
+/// the WRITE failure is reported, not the refused RTR. On failure it sets
+/// last_port_fault (portaddr.portFault) for the attempt in effect.
+fn measure(qp_s: [*c]c.ibv_qp, qp_d: [*c]c.ibv_qp, cq: *c.ibv_cq, regions: Regions, tries: []const Attempt, at0: usize, small_size: u32, large_size: u32, timeout_ms: u32, smalls: []u64, larges: []u64) !Measured {
+    var at = at0;
+    var reconnect_ns: u64 = 0;
+    while (true) {
+        writeAll(qp_s, cq, regions, small_size, large_size, timeout_ms, smalls, larges) catch |err| {
+            if (err == error.Wc and tries[at].pg.isInfiniBand() and at + 1 < tries.len and
+                portaddr.retryOtherMode(last_wc_status))
+            {
+                const saved = qp_err_detail.save();
+                drainCq(cq);
+                const t_re = try timespecNs();
+                if (connectPair(qp_s, qp_d, tries, at + 1)) |next| {
+                    reconnect_ns += (try timespecNs()) - t_re;
+                    at = next;
+                    continue;
+                }
+                qp_err_detail.restore(saved);
+            }
+            last_port_fault = portaddr.portFault(tries[at].pg.isInfiniBand(), err == error.Wc, last_wc_status);
+            return err;
+        };
+        return .{ .at = at, .reconnect_ns = reconnect_ns };
+    }
+}
+
 pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []const u8, small_size: u32, large_size: u32, iters: u32, timeout_ms: u32, mem_warmup_ns: u64) !LoopResult {
     qp_err_detail.clear();
     last_port_fault = false;
@@ -684,64 +799,12 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // halves of one device allocation. `numa` only places host DRAM for
     // memory endpoints.
     const bp = loopbuf.plan(large_size, gpu_index >= 0);
-
-    // ToN'24 §VI-C: verb execution time exposes bottlenecks in calling the
-    // verbs themselves (e.g. slow GPU memory registration on a failing GPU),
-    // so the setup steps are timed alongside the data path.
-    var gpu_mem: ?gdr.DeviceMem = null;
-    defer if (gpu_mem) |m| m.free();
-    var gpu_alloc_ns: u64 = 0;
-    if (gpu_index >= 0) {
-        if (gpu_bdf.len == 0) {
-            qp_err_detail.set("{s}", .{"missing gpu"});
-            return error.NoGDR;
-        }
-        const t_alloc = try timespecNs();
-        gpu_mem = gdr.alloc(gpu_bdf, bp.alloc_len) catch {
-            qp_err_detail.set("{s}", .{gdr.lastDetail()});
-            return error.NoGDR;
-        };
-        gpu_alloc_ns = (timespecNs() catch t_alloc) - t_alloc;
-    }
+    const gpu: ?GpuAlloc = if (gpu_index >= 0) try allocGpu(gpu_bdf, bp.alloc_len) else null;
+    defer if (gpu) |g| g.mem.free();
 
     const dev = try Dev.open(device);
     defer dev.deinit();
-
-    // The addresses the QP pair is connected through, tried in order. RoCE:
-    // every RoCEv2 GID in loopback order (below). InfiniBand: the port's own
-    // LID with no GRH and the same LID with a GRH over GID index 0, the mode
-    // that last worked on this port first (ModeCache). The second is tried
-    // when the first one's RTR is refused, or when its WRITEs complete with a
-    // remote error (portaddr.retryOtherMode).
-    var tries: [max_gids]Attempt = undefined;
-    var nk: usize = 0;
-    var what: []const u8 = "gid(s)";
-    switch (dev.target) {
-        .rocev2 => {
-            // The plan chose RoCE because a port has a RoCEv2 GID, so the
-            // scan holds at least one candidate.
-            const cands = dev.scan.candList();
-            if (cands.len == 0) return error.Gid;
-            var order: [max_gids]usize = undefined;
-            const no = gidsel.loopbackOrder(cands, &order);
-            for (order[0..no]) |oi| {
-                const cnd = cands[oi];
-                tries[nk] = .{ .pg = gidToPort(cnd, dev.scan.caps.max_rd), .hop = if (cnd.link_local) 1 else 64 };
-                nk += 1;
-            }
-        },
-        .ib => |pg| {
-            what = "lid attempt(s)";
-            for (portaddr.ibOrder(cachedMode(device, pg.port))) |m| {
-                // No GID 0, no GRH to build.
-                if (m == .ib_lid_grh and gidZero(pg.gid)) continue;
-                var a = pg;
-                a.mode = m;
-                tries[nk] = .{ .pg = a, .hop = 64 };
-                nk += 1;
-            }
-        },
-    }
+    const tries = try Attempts.build(&dev, device);
 
     const cq = try dev.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq);
@@ -756,17 +819,17 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     defer _ = c.ibv_destroy_qp(qp_s);
     const qp_d = try createRcQp(dev.pd, cq);
     defer _ = c.ibv_destroy_qp(qp_d);
-    var at = connectPair(qp_s, qp_d, tries[0..nk], 0) orelse {
-        qp_err_detail.append("after {d} {s}", .{ nk, what });
+    const at = connectPair(qp_s, qp_d, tries.slice(), 0) orelse {
+        qp_err_detail.append("after {d} {s}", .{ tries.n, tries.what });
         return error.Rtr;
     };
-    var qp_setup_ns = (try timespecNs()) - t_qp;
+    const qp_setup_ns = (try timespecNs()) - t_qp;
 
     const access: c_int = c.IBV_ACCESS_LOCAL_WRITE | c.IBV_ACCESS_REMOTE_WRITE | c.IBV_ACCESS_REMOTE_READ;
 
     // Released before the QPs, PD and device memory above (defer is LIFO).
-    const regions = if (gpu_mem) |m|
-        try gpuRegions(dev.pd, m, bp, access)
+    const regions = if (gpu) |g|
+        try gpuRegions(dev.pd, g.mem, bp, access)
     else
         try hostRegions(dev.pd, bp, numa, access);
     defer regions.deinit();
@@ -774,7 +837,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // --mem-warmup: wake the endpoint node's memory right before measuring
     // (memwarm.zig). Host buffers only; a GPU endpoint has none.
     var warm_ns: u64 = 0;
-    if (gpu_mem == null and mem_warmup_ns > 0) {
+    if (gpu == null and mem_warmup_ns > 0) {
         const bufs = [_][]u8{ regions.bufs[0].?, regions.bufs[1].? };
         warm_ns = memwarm.run(&bufs, mem_warmup_ns, memwarm.SystemClock{});
     }
@@ -782,31 +845,8 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     const n: usize = if (iters == 0) 8 else @min(iters, 512);
     var smalls: [512]u64 = undefined;
     var larges: [512]u64 = undefined;
-    while (true) {
-        writeAll(qp_s, cq, regions, small_size, large_size, timeout_ms, smalls[0..n], larges[0..n]) catch |err| {
-            // An InfiniBand port whose WRITEs come back with a remote error in
-            // one addressing mode gets one try in the other, from RESET.
-            if (err == error.Wc and tries[at].pg.isInfiniBand() and at + 1 < nk and
-                portaddr.retryOtherMode(last_wc_status))
-            {
-                const saved = qp_err_detail.save();
-                drainCq(cq);
-                const t_re = try timespecNs();
-                if (connectPair(qp_s, qp_d, tries[0..nk], at + 1)) |next| {
-                    qp_setup_ns += (try timespecNs()) - t_re;
-                    at = next;
-                    continue;
-                }
-                // The other mode could not even connect: report the WRITE
-                // failure, not the refused RTR.
-                qp_err_detail.restore(saved);
-            }
-            last_port_fault = portaddr.portFault(tries[at].pg.isInfiniBand(), err == error.Wc, last_wc_status);
-            return err;
-        };
-        break;
-    }
-    const pg = tries[at].pg;
+    const m = try measure(qp_s, qp_d, cq, regions, tries.slice(), at, small_size, large_size, timeout_ms, smalls[0..n], larges[0..n]);
+    const pg = tries.list[m.at].pg;
     if (pg.isInfiniBand()) cacheMode(device, pg.port, pg.mode);
     return .{
         .small_p50 = sim.percentile(smalls[0..n], 50),
@@ -814,9 +854,9 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
         .large_p50 = sim.percentile(larges[0..n], 50),
         .bw = sim.bandwidthBps(large_size, sim.percentile(larges[0..n], 50), sim.percentile(smalls[0..n], 50)),
         .completions = @intCast(n),
-        .gpu_alloc_ns = gpu_alloc_ns,
+        .gpu_alloc_ns = if (gpu) |g| g.alloc_ns else 0,
         .mr_reg_ns = regions.reg_ns,
-        .qp_setup_ns = qp_setup_ns,
+        .qp_setup_ns = qp_setup_ns + m.reconnect_ns,
         .mem_warmup_ns = warm_ns,
         .mode = pg.mode,
         .port = pg.port,
