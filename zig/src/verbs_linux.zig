@@ -261,13 +261,47 @@ fn resolvePort(ctx: *c.ibv_context) !Target {
     };
 }
 
-/// pickPortAddr is the address a mutual probe uses for a device.
-fn pickPortAddr(ctx: *c.ibv_context) !PortGid {
-    return switch (try resolvePort(ctx)) {
-        .rocev2 => pickPortGid(ctx),
-        .ib => |pg| pg,
-    };
-}
+/// Dev is one opened RNIC with what every probe sets up on it before its
+/// QPs, in this order: the device context, how the device is addressed
+/// (resolvePort) and the protection domain. A device with no usable port
+/// fails in open with the skip's error, before any PD exists. The CQs are
+/// not part of the bundle because each probe shapes them differently (one
+/// shared by a loopback pair, one per device for the RC mutual probe, a send
+/// and a notified receive CQ for a UD endpoint); createCq makes them.
+/// deinit releases the PD and closes the device, in that order.
+const Dev = struct {
+    ctx: *c.ibv_context,
+    target: Target,
+    pd: *c.ibv_pd,
+
+    fn open(name: []const u8) !Dev {
+        const ctx = openDevice(name) orelse return error.NoDevice;
+        errdefer _ = c.ibv_close_device(ctx);
+        const target = try resolvePort(ctx);
+        const pd = c.ibv_alloc_pd(ctx) orelse return error.Pd;
+        return .{ .ctx = ctx, .target = target, .pd = pd };
+    }
+
+    fn deinit(self: Dev) void {
+        _ = c.ibv_dealloc_pd(self.pd);
+        _ = c.ibv_close_device(self.ctx);
+    }
+
+    /// createCq is a CQ of `depth` entries, delivering its events to `chan`
+    /// when one is given.
+    fn createCq(self: Dev, depth: u32, chan: ?*c.ibv_comp_channel) !*c.ibv_cq {
+        return c.ibv_create_cq(self.ctx, @intCast(depth), null, chan, 0) orelse error.Cq;
+    }
+
+    /// portAddr is the address a mutual probe uses for the device: its
+    /// InfiniBand port's LID, or the preferred RoCEv2 GID (pickPortGid).
+    fn portAddr(self: Dev) !PortGid {
+        return switch (self.target) {
+            .rocev2 => pickPortGid(self.ctx),
+            .ib => |pg| pg,
+        };
+    }
+};
 
 fn bindNuma(ptr: [*]u8, len: usize, node: i32) !void {
     if (node < 0) return;
@@ -397,6 +431,20 @@ fn createRcQp(pd: *c.ibv_pd, cq: *c.ibv_cq) !*c.ibv_qp {
     qcap.cap.max_send_sge = 1;
     qcap.cap.max_recv_sge = 1;
     return c.ibv_create_qp(pd, &qcap) orelse error.Qp;
+}
+
+/// createUdQp is a UD QP completing its sends on send_cq and its receives
+/// on recv_cq, with room for send_depth and recv_depth posted WRs.
+fn createUdQp(pd: *c.ibv_pd, send_cq: *c.ibv_cq, recv_cq: *c.ibv_cq, send_depth: u32, recv_depth: u32) !*c.ibv_qp {
+    var ia: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
+    ia.send_cq = send_cq;
+    ia.recv_cq = recv_cq;
+    ia.qp_type = c.IBV_QPT_UD;
+    ia.cap.max_send_wr = send_depth;
+    ia.cap.max_recv_wr = recv_depth;
+    ia.cap.max_send_sge = 1;
+    ia.cap.max_recv_sge = 1;
+    return c.ibv_create_qp(pd, &ia) orelse error.Qp;
 }
 
 fn qpReset(qp: [*c]c.ibv_qp) !void {
@@ -632,8 +680,8 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
         gpu_alloc_ns = (timespecNs() catch t_alloc) - t_alloc;
     }
 
-    const ctx_c = openDevice(device) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_c);
+    const dev = try Dev.open(device);
+    defer dev.deinit();
 
     // The addresses the QP pair is connected through, tried in order. RoCE:
     // every RoCEv2 GID in loopback order (below). InfiniBand: the port's own
@@ -644,11 +692,11 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     var tries: [32]Attempt = undefined;
     var nk: usize = 0;
     var what: []const u8 = "gid(s)";
-    switch (try resolvePort(ctx_c)) {
+    switch (dev.target) {
         .rocev2 => {
             var cands: [32]GidCand = undefined;
             var max_rd: u8 = 16;
-            const nc = try collectRoceV2(ctx_c, &cands, &max_rd);
+            const nc = try collectRoceV2(dev.ctx, &cands, &max_rd);
             var order: [32]usize = undefined;
             const no = gidsel.loopbackOrder(cands[0..nc], &order);
             for (order[0..no]) |oi| {
@@ -669,9 +717,7 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
         },
     }
 
-    const pd = c.ibv_alloc_pd(ctx_c) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd);
-    const cq = c.ibv_create_cq(ctx_c, 128, null, null, 0) orelse return error.Cq;
+    const cq = try dev.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq);
 
     // mlx5 RoCE rejects a self-connected RC QP (dest_qpn == own qpn) at RTR.
@@ -680,9 +726,9 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // qp_setup_ns spans both creates and INIT→RTR→RTS, address retries
     // included.
     const t_qp = try timespecNs();
-    const qp_s = try createRcQp(pd, cq);
+    const qp_s = try createRcQp(dev.pd, cq);
     defer _ = c.ibv_destroy_qp(qp_s);
-    const qp_d = try createRcQp(pd, cq);
+    const qp_d = try createRcQp(dev.pd, cq);
     defer _ = c.ibv_destroy_qp(qp_d);
     var at = connectPair(qp_s, qp_d, tries[0..nk], 0) orelse {
         qp_err_detail.append("after {d} {s}", .{ nk, what });
@@ -694,9 +740,9 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
 
     // Released before the QPs, PD and device memory above (defer is LIFO).
     const regions = if (gpu_mem) |m|
-        try gpuRegions(pd, m, bp, access)
+        try gpuRegions(dev.pd, m, bp, access)
     else
-        try hostRegions(pd, bp, numa, access);
+        try hostRegions(dev.pd, bp, numa, access);
     defer regions.deinit();
 
     // --mem-warmup: wake the endpoint node's memory right before measuring
@@ -797,13 +843,13 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
 
     // Every resource is released by defer, so the error and success paths
     // tear down in the same order: the reverse of this one.
-    const ctx_a = openDevice(src) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_a);
-    const ctx_b = openDevice(dst) orelse return error.NoDevice;
-    defer _ = c.ibv_close_device(ctx_b);
+    const dev_a = try Dev.open(src);
+    defer dev_a.deinit();
+    const dev_b = try Dev.open(dst);
+    defer dev_b.deinit();
 
-    const pg_a = try pickPortAddr(ctx_a);
-    const pg_b = try pickPortAddr(ctx_b);
+    const pg_a = try dev_a.portAddr();
+    const pg_b = try dev_b.portAddr();
     // A RoCE port cannot reach an InfiniBand one; that is a pairing error,
     // not a measured connectivity failure.
     if (pg_a.isInfiniBand() != pg_b.isInfiniBand()) {
@@ -811,18 +857,14 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
         return error.Port;
     }
 
-    const pd_a = c.ibv_alloc_pd(ctx_a) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd_a);
-    const pd_b = c.ibv_alloc_pd(ctx_b) orelse return error.Pd;
-    defer _ = c.ibv_dealloc_pd(pd_b);
-    const cq_a = c.ibv_create_cq(ctx_a, 128, null, null, 0) orelse return error.Cq;
+    const cq_a = try dev_a.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq_a);
-    const cq_b = c.ibv_create_cq(ctx_b, 128, null, null, 0) orelse return error.Cq;
+    const cq_b = try dev_b.createCq(128, null);
     defer _ = c.ibv_destroy_cq(cq_b);
 
-    const qp_a = try createRcQp(pd_a, cq_a);
+    const qp_a = try createRcQp(dev_a.pd, cq_a);
     defer _ = c.ibv_destroy_qp(qp_a);
-    const qp_b = try createRcQp(pd_b, cq_b);
+    const qp_b = try createRcQp(dev_b.pd, cq_b);
     defer _ = c.ibv_destroy_qp(qp_b);
 
     try qpInit(qp_a, pg_a.port);
@@ -838,9 +880,9 @@ pub fn mutualVerbsRc(src: []const u8, dst: []const u8, msg: u32, iters: u32, tim
     defer freeAligned(ba);
     const bb = try allocAligned(bytes_aligned, -1);
     defer freeAligned(bb);
-    const mra = c.ibv_reg_mr(pd_a, ba.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mra = c.ibv_reg_mr(dev_a.pd, ba.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     defer _ = c.ibv_dereg_mr(mra);
-    const mrb = c.ibv_reg_mr(pd_b, bb.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mrb = c.ibv_reg_mr(dev_b.pd, bb.ptr, bytes_aligned, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     defer _ = c.ibv_dereg_mr(mrb);
 
     const n: usize = if (iters == 0) 8 else @min(iters, 512);
@@ -936,11 +978,11 @@ const AhEntry = struct {
     ah: *c.ibv_ah,
 };
 
-/// One RNIC's UD probe endpoint: a UD QP with its own PD, CQs and registered
-/// buffer, plus the address handles of the peers it has probed.
+/// One RNIC's UD probe endpoint: a UD QP with its own device and PD (Dev),
+/// CQs and registered buffer, plus the address handles of the peers it has
+/// probed.
 pub const UdEp = struct {
-    ctx: *c.ibv_context,
-    pd: *c.ibv_pd,
+    dev: Dev,
     chan: *c.ibv_comp_channel,
     send_cq: *c.ibv_cq,
     recv_cq: *c.ibv_cq,
@@ -1012,46 +1054,34 @@ fn udReset(ep: *UdEp) !void {
 
 pub fn udOpen(device: []const u8, msg: u32) !*UdEp {
     qp_err_detail.clear();
-    const ctx = openDevice(device) orelse return error.NoDevice;
-    errdefer _ = c.ibv_close_device(ctx);
-    const pg = try pickPortAddr(ctx);
+    const dev = try Dev.open(device);
+    errdefer dev.deinit();
+    const pg = try dev.portAddr();
     // A UD message is one packet: it cannot exceed the port's active MTU.
     const mtu = udtag.mtuBytes(@intCast(pg.mtu));
     if (mtu != 0 and msg > mtu) return error.MsgSize;
 
-    const pd = c.ibv_alloc_pd(ctx) orelse return error.Pd;
-    errdefer _ = c.ibv_dealloc_pd(pd);
-    const chan = c.ibv_create_comp_channel(ctx) orelse return error.Cq;
+    const chan = c.ibv_create_comp_channel(dev.ctx) orelse return error.Cq;
     errdefer _ = c.ibv_destroy_comp_channel(chan);
-    const send_cq = c.ibv_create_cq(ctx, @intCast(ud_send_depth * 2), null, null, 0) orelse return error.Cq;
+    const send_cq = try dev.createCq(ud_send_depth * 2, null);
     errdefer _ = c.ibv_destroy_cq(send_cq);
-    const recv_cq = c.ibv_create_cq(ctx, @intCast(ud_recv_depth * 2), null, chan, 0) orelse return error.Cq;
+    const recv_cq = try dev.createCq(ud_recv_depth * 2, chan);
     errdefer _ = c.ibv_destroy_cq(recv_cq);
-
-    var ia: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
-    ia.send_cq = send_cq;
-    ia.recv_cq = recv_cq;
-    ia.qp_type = c.IBV_QPT_UD;
-    ia.cap.max_send_wr = ud_send_depth;
-    ia.cap.max_recv_wr = ud_recv_depth;
-    ia.cap.max_send_sge = 1;
-    ia.cap.max_recv_sge = 1;
-    const qp = c.ibv_create_qp(pd, &ia) orelse return error.Qp;
+    const qp = try createUdQp(dev.pd, send_cq, recv_cq, ud_send_depth, ud_recv_depth);
     errdefer _ = c.ibv_destroy_qp(qp);
 
     const slot = udtag.slotBytes(@max(msg, 1));
     const len = udtag.bufBytes(slot, ud_recv_depth);
     const buf = try allocAligned(len, -1);
     errdefer freeAligned(buf);
-    const mr = c.ibv_reg_mr(pd, buf.ptr, len, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
+    const mr = c.ibv_reg_mr(dev.pd, buf.ptr, len, c.IBV_ACCESS_LOCAL_WRITE) orelse return error.Mr;
     errdefer _ = c.ibv_dereg_mr(mr);
 
     const raw = c.calloc(1, @sizeOf(UdEp)) orelse return error.Alloc;
     const ep: *UdEp = @ptrCast(@alignCast(raw));
     errdefer c.free(raw);
     ep.* = .{
-        .ctx = ctx,
-        .pd = pd,
+        .dev = dev,
         .chan = chan,
         .send_cq = send_cq,
         .recv_cq = recv_cq,
@@ -1081,8 +1111,7 @@ pub fn udClose(ep: *UdEp) void {
     _ = c.ibv_destroy_cq(ep.recv_cq);
     _ = c.ibv_destroy_cq(ep.send_cq);
     _ = c.ibv_destroy_comp_channel(ep.chan);
-    _ = c.ibv_dealloc_pd(ep.pd);
-    _ = c.ibv_close_device(ep.ctx);
+    ep.dev.deinit();
     c.free(ep);
 }
 
@@ -1104,7 +1133,7 @@ fn udAh(src: *UdEp, dst: *const UdEp) !*c.ibv_ah {
     if (src.nah >= src.ahs.len) return error.Alloc;
     var attr: c.ibv_ah_attr = std.mem.zeroes(c.ibv_ah_attr);
     fillAh(&attr, src.pg, dst.pg, ud_hop_limit);
-    const ah = c.ibv_create_ah(src.pd, &attr) orelse {
+    const ah = c.ibv_create_ah(src.dev.pd, &attr) orelse {
         storeLibcErrno();
         return error.Connect;
     };
