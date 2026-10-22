@@ -83,6 +83,12 @@ fn gidIsRoCEv2(ctx: *c.ibv_context, port: u8, index: u8) bool {
     return sysfsGidRoCEv2(ctx, port, index);
 }
 
+/// Clamps every reading of a device applies: ports past the fourth and GID
+/// table entries past the 32nd are never looked at, and at most 32 RoCEv2
+/// candidates are kept over all ports.
+const max_ports = 4;
+const max_gids = 32;
+
 const GidCand = struct {
     port: u8,
     index: u8,
@@ -110,51 +116,9 @@ fn deviceCaps(ctx: *c.ibv_context) !DevCaps {
         rd = dev_rd;
     }
     return .{
-        .nports = @intCast(@max(@as(i32, 1), @min(dattr.phys_port_cnt, 4))),
+        .nports = @intCast(@max(@as(i32, 1), @min(dattr.phys_port_cnt, max_ports))),
         .max_rd = rd,
     };
-}
-
-fn collectRoceV2(ctx: *c.ibv_context, out: []GidCand, max_rd: *u8) !usize {
-    const caps = try deviceCaps(ctx);
-    max_rd.* = caps.max_rd;
-    const nports = caps.nports;
-    var n: usize = 0;
-    var port: u8 = 1;
-    while (port <= nports) : (port += 1) {
-        var pattr: c.ibv_port_attr = undefined;
-        if (c.___ibv_query_port(ctx, port, &pattr) != 0) continue;
-        if (pattr.state != c.IBV_PORT_ACTIVE) continue;
-        const glen: u8 = @intCast(@min(pattr.gid_tbl_len, 32));
-        var gi: u8 = 0;
-        while (gi < glen) : (gi += 1) {
-            var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-            if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
-            if (gidZero(gid)) continue;
-            if (!gidIsRoCEv2(ctx, port, gi)) continue;
-            if (n >= out.len) break;
-            const kind = gidsel.kindOf(gidRaw(&gid).*);
-            out[n] = .{
-                .port = port,
-                .index = gi,
-                .gid = gid,
-                .mtu = pattr.active_mtu,
-                .ipv4 = kind.ipv4,
-                .link_local = kind.link_local,
-            };
-            n += 1;
-        }
-    }
-    if (n == 0) return error.Gid;
-    return n;
-}
-
-fn pickPortGid(ctx: *c.ibv_context) !PortGid {
-    var cands: [32]GidCand = undefined;
-    var max_rd: u8 = 16;
-    const n = try collectRoceV2(ctx, &cands, &max_rd);
-    const i = gidsel.preferred(cands[0..n]) orelse return error.Gid;
-    return gidToPort(cands[i], max_rd);
 }
 
 fn linkLayer(v: u8) portaddr.LinkLayer {
@@ -165,58 +129,118 @@ fn linkLayer(v: u8) portaddr.LinkLayer {
     };
 }
 
-/// hasRoceV2 reports whether the port's GID table holds a non-zero RoCEv2
-/// GID, the test collectRoceV2 applies to every entry.
-fn hasRoceV2(ctx: *c.ibv_context, port: u8, gid_tbl_len: c_int) bool {
-    const glen: u8 = @intCast(@max(@as(c_int, 0), @min(gid_tbl_len, 32)));
-    var gi: u8 = 0;
-    while (gi < glen) : (gi += 1) {
-        var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-        if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
-        if (gidZero(gid)) continue;
-        if (gidIsRoCEv2(ctx, port, gi)) return true;
-    }
-    return false;
-}
+/// Scan is one reading of a device, taken by Dev.open and the only one a
+/// probe takes: its capabilities, every port as portaddr.plan sees it with
+/// the port's active MTU beside it, and the RoCEv2 GIDs a RoCE probe can
+/// address the device by, in port order then GID index order. Everything
+/// after it (the plan, the loopback try order, the mutual probe's address)
+/// is decided from the scan, so the three never disagree about a port.
+const Scan = struct {
+    caps: DevCaps,
+    ports: [max_ports]portaddr.Port,
+    /// mtus[i] is ports[i]'s active MTU.
+    mtus: [max_ports]c.ibv_mtu,
+    nports: usize,
+    cands: [max_gids]GidCand,
+    ncands: usize,
 
-/// scanPorts reads every port of the device for portaddr.plan. A port whose
-/// query fails is left out, as collectRoceV2 leaves it out.
-fn scanPorts(ctx: *c.ibv_context, nports: u8, out: []portaddr.Port) usize {
-    var n: usize = 0;
+    fn portList(self: *const Scan) []const portaddr.Port {
+        return self.ports[0..self.nports];
+    }
+
+    fn candList(self: *const Scan) []const GidCand {
+        return self.cands[0..self.ncands];
+    }
+
+    /// collectRoceV2 walks one active RoCE port's GID table in index order:
+    /// every non-zero RoCEv2 GID is counted and, while there is room, kept
+    /// as a candidate. Returns the count, which is what portaddr.plan reads.
+    fn collectRoceV2(self: *Scan, ctx: *c.ibv_context, port: u8, pattr: *const c.ibv_port_attr) u16 {
+        const glen: u8 = @intCast(@max(@as(c_int, 0), @min(pattr.gid_tbl_len, max_gids)));
+        var found: u16 = 0;
+        var gi: u8 = 0;
+        while (gi < glen) : (gi += 1) {
+            var gid: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
+            if (c.ibv_query_gid(ctx, port, gi, &gid) != 0) continue;
+            if (gidZero(gid)) continue;
+            if (!gidIsRoCEv2(ctx, port, gi)) continue;
+            found += 1;
+            if (self.ncands >= max_gids) continue;
+            const kind = gidsel.kindOf(gidRaw(&gid).*);
+            self.cands[self.ncands] = .{
+                .port = port,
+                .index = gi,
+                .gid = gid,
+                .mtu = pattr.active_mtu,
+                .ipv4 = kind.ipv4,
+                .link_local = kind.link_local,
+            };
+            self.ncands += 1;
+        }
+        return found;
+    }
+
+    /// ibPortAddr is an InfiniBand port's LID address: its active MTU, its
+    /// LID and GID index 0 (for the GRH fallback and the UD address-handle
+    /// cache). `port` is one plan chose from this scan.
+    fn ibPortAddr(self: *const Scan, ctx: *c.ibv_context, port: u8, lid: u16) !PortGid {
+        for (self.portList(), self.mtus[0..self.nports]) |p, mtu| {
+            if (p.num != port) continue;
+            var gid0: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
+            if (c.ibv_query_gid(ctx, port, 0, &gid0) != 0) gid0 = std.mem.zeroes(c.ibv_gid);
+            return .{
+                .port = port,
+                .index = 0,
+                .gid = gid0,
+                .mtu = mtu,
+                .max_rd = self.caps.max_rd,
+                .lid = lid,
+                .mode = .ib_lid,
+            };
+        }
+        return error.Port;
+    }
+};
+
+/// scanDevice reads the device once: ibv_query_device, then ibv_query_port
+/// for each port and, for each active RoCE port, its GID table. A port whose
+/// query fails is left out, as if the device did not have it.
+fn scanDevice(ctx: *c.ibv_context) !Scan {
+    var s: Scan = .{
+        .caps = try deviceCaps(ctx),
+        .ports = undefined,
+        .mtus = undefined,
+        .nports = 0,
+        .cands = undefined,
+        .ncands = 0,
+    };
     var port: u8 = 1;
-    while (port <= nports and n < out.len) : (port += 1) {
+    while (port <= s.caps.nports and s.nports < max_ports) : (port += 1) {
         var pattr: c.ibv_port_attr = undefined;
         if (c.___ibv_query_port(ctx, port, &pattr) != 0) continue;
         const ll = linkLayer(pattr.link_layer);
         const active = pattr.state == c.IBV_PORT_ACTIVE;
-        out[n] = .{
+        // Only an active RoCE port can carry a RoCEv2 GID; an InfiniBand
+        // port's table is never walked.
+        const rocev2: u16 = if (active and !ll.isInfiniBand()) s.collectRoceV2(ctx, port, &pattr) else 0;
+        s.ports[s.nports] = .{
             .num = port,
             .link_layer = ll,
             .active = active,
             .lid = pattr.lid,
-            .rocev2_gids = if (active and !ll.isInfiniBand() and hasRoceV2(ctx, port, pattr.gid_tbl_len)) 1 else 0,
+            .rocev2_gids = rocev2,
         };
-        n += 1;
+        s.mtus[s.nports] = pattr.active_mtu;
+        s.nports += 1;
     }
-    return n;
+    return s;
 }
 
-/// ibPortAddr is an InfiniBand port's LID address: its active MTU, its LID
-/// and GID index 0 (for the GRH fallback and the UD address-handle cache).
-fn ibPortAddr(ctx: *c.ibv_context, port: u8, lid: u16, max_rd: u8) !PortGid {
-    var pattr: c.ibv_port_attr = undefined;
-    if (c.___ibv_query_port(ctx, port, &pattr) != 0) return error.Port;
-    var gid0: c.ibv_gid = std.mem.zeroes(c.ibv_gid);
-    if (c.ibv_query_gid(ctx, port, 0, &gid0) != 0) gid0 = std.mem.zeroes(c.ibv_gid);
-    return .{
-        .port = port,
-        .index = 0,
-        .gid = gid0,
-        .mtu = pattr.active_mtu,
-        .max_rd = max_rd,
-        .lid = lid,
-        .mode = .ib_lid,
-    };
+/// pickPortGid is the RoCEv2 GID a mutual probe addresses the device by
+/// (gidsel.preferred); error.Gid when the device has only link-local ones.
+fn pickPortGid(scan: *const Scan) !PortGid {
+    const i = gidsel.preferred(scan.candList()) orelse return error.Gid;
+    return gidToPort(scan.cands[i], scan.caps.max_rd);
 }
 
 fn storeSkipDetail(s: portaddr.Skip, ports: []const portaddr.Port) void {
@@ -237,49 +261,49 @@ fn storeSkipDetail(s: portaddr.Skip, ports: []const portaddr.Port) void {
     }
 }
 
-/// The address a device is probed through: RoCEv2 GIDs (collected by the
-/// caller, as before InfiniBand support) or one InfiniBand port's LID.
+/// The address a device is probed through: its RoCEv2 GIDs (the scan's
+/// candidates, as before InfiniBand support) or one InfiniBand port's LID.
 const Target = union(enum) {
     rocev2,
     ib: PortGid,
 };
 
-/// resolvePort decides how to address the device (portaddr.plan). A device
-/// with no usable port fails with the skip's error: error.Gid for RoCE, as
-/// it always did, error.PortDown or error.NoLid for InfiniBand.
-fn resolvePort(ctx: *c.ibv_context) !Target {
-    const caps = try deviceCaps(ctx);
-    var ports: [4]portaddr.Port = undefined;
-    const n = scanPorts(ctx, caps.nports, &ports);
-    return switch (portaddr.plan(ports[0..n])) {
+/// resolvePort decides how to address the device (portaddr.plan) from its
+/// scan. A device with no usable port fails with the skip's error: error.Gid
+/// for RoCE, as it always did, error.PortDown or error.NoLid for InfiniBand.
+fn resolvePort(ctx: *c.ibv_context, scan: *const Scan) !Target {
+    return switch (portaddr.plan(scan.portList())) {
         .rocev2 => .rocev2,
-        .ib => |ib| .{ .ib = try ibPortAddr(ctx, ib.port, ib.lid, caps.max_rd) },
+        .ib => |ib| .{ .ib = try scan.ibPortAddr(ctx, ib.port, ib.lid) },
         .skip => |s| {
-            storeSkipDetail(s, ports[0..n]);
+            storeSkipDetail(s, scan.portList());
             return portaddr.skipError(s);
         },
     };
 }
 
 /// Dev is one opened RNIC with what every probe sets up on it before its
-/// QPs, in this order: the device context, how the device is addressed
-/// (resolvePort) and the protection domain. A device with no usable port
-/// fails in open with the skip's error, before any PD exists. The CQs are
-/// not part of the bundle because each probe shapes them differently (one
-/// shared by a loopback pair, one per device for the RC mutual probe, a send
-/// and a notified receive CQ for a UD endpoint); createCq makes them.
-/// deinit releases the PD and closes the device, in that order.
+/// QPs, in this order: the device context, one scan of its ports and GID
+/// tables, how the device is addressed (resolvePort) and the protection
+/// domain. A device with no usable port fails in open with the skip's
+/// error, before any PD exists. The CQs are not part of the bundle because
+/// each probe shapes them differently (one shared by a loopback pair, one
+/// per device for the RC mutual probe, a send and a notified receive CQ for
+/// a UD endpoint); createCq makes them. deinit releases the PD and closes
+/// the device, in that order.
 const Dev = struct {
     ctx: *c.ibv_context,
+    scan: Scan,
     target: Target,
     pd: *c.ibv_pd,
 
     fn open(name: []const u8) !Dev {
         const ctx = openDevice(name) orelse return error.NoDevice;
         errdefer _ = c.ibv_close_device(ctx);
-        const target = try resolvePort(ctx);
+        const scan = try scanDevice(ctx);
+        const target = try resolvePort(ctx, &scan);
         const pd = c.ibv_alloc_pd(ctx) orelse return error.Pd;
-        return .{ .ctx = ctx, .target = target, .pd = pd };
+        return .{ .ctx = ctx, .scan = scan, .target = target, .pd = pd };
     }
 
     fn deinit(self: Dev) void {
@@ -295,9 +319,9 @@ const Dev = struct {
 
     /// portAddr is the address a mutual probe uses for the device: its
     /// InfiniBand port's LID, or the preferred RoCEv2 GID (pickPortGid).
-    fn portAddr(self: Dev) !PortGid {
+    fn portAddr(self: *const Dev) !PortGid {
         return switch (self.target) {
-            .rocev2 => pickPortGid(self.ctx),
+            .rocev2 => pickPortGid(&self.scan),
             .ib => |pg| pg,
         };
     }
@@ -689,18 +713,20 @@ pub fn loopbackVerbs(device: []const u8, numa: i32, gpu_index: i32, gpu_bdf: []c
     // that last worked on this port first (ModeCache). The second is tried
     // when the first one's RTR is refused, or when its WRITEs complete with a
     // remote error (portaddr.retryOtherMode).
-    var tries: [32]Attempt = undefined;
+    var tries: [max_gids]Attempt = undefined;
     var nk: usize = 0;
     var what: []const u8 = "gid(s)";
     switch (dev.target) {
         .rocev2 => {
-            var cands: [32]GidCand = undefined;
-            var max_rd: u8 = 16;
-            const nc = try collectRoceV2(dev.ctx, &cands, &max_rd);
-            var order: [32]usize = undefined;
-            const no = gidsel.loopbackOrder(cands[0..nc], &order);
+            // The plan chose RoCE because a port has a RoCEv2 GID, so the
+            // scan holds at least one candidate.
+            const cands = dev.scan.candList();
+            if (cands.len == 0) return error.Gid;
+            var order: [max_gids]usize = undefined;
+            const no = gidsel.loopbackOrder(cands, &order);
             for (order[0..no]) |oi| {
-                tries[nk] = .{ .pg = gidToPort(cands[oi], max_rd), .hop = if (cands[oi].link_local) 1 else 64 };
+                const cnd = cands[oi];
+                tries[nk] = .{ .pg = gidToPort(cnd, dev.scan.caps.max_rd), .hop = if (cnd.link_local) 1 else 64 };
                 nk += 1;
             }
         },
