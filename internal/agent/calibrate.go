@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sort"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/engine"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/monitor"
 	"github.com/yuuki/hostping/internal/sim"
@@ -71,7 +71,7 @@ type runner interface {
 // drawn from a host that does not stay idle.
 func Calibrate(cfg config.Config, opt CalibrateOptions) (CalibrateResult, error) {
 	cfg.Once = true
-	rt, err := newRig(cfg, log.Printf)
+	rt, err := newRig(cfg, logging.Infof)
 	if err != nil {
 		return CalibrateResult{}, err
 	}
@@ -90,7 +90,7 @@ func Calibrate(cfg config.Config, opt CalibrateOptions) (CalibrateResult, error)
 	} else {
 		gate = liveGate{mon: rt.mon, sampler: rt.sampler, g: rt.g, cfg: cfg}
 	}
-	reps, discarded, err := calibrateLoop(ctx, rt.eng, gate, opt, log.Printf)
+	reps, discarded, err := calibrateLoop(ctx, rt.eng, gate, opt, logging.Infof)
 	if err != nil {
 		return CalibrateResult{}, err
 	}

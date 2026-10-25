@@ -5,16 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/yuuki/hostping/internal/agent"
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/zigprobe"
 )
 
 func main() {
-	log.SetFlags(0)
+	logging.Setup()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -25,7 +27,7 @@ func main() {
 			if errors.Is(err, flag.ErrHelp) {
 				os.Exit(0)
 			}
-			log.Fatal(err)
+			log.Fatal().Err(err).Msg("hostpingctl failed")
 		}
 		return
 	}
@@ -37,11 +39,11 @@ func main() {
 	switch cmd {
 	case "diagnose", "once":
 		if err := agent.Run(cfg); err != nil {
-			log.Fatal(err)
+			log.Fatal().Err(err).Msg("hostpingctl failed")
 		}
 	case "topology":
 		if err := agent.PrintTopology(cfg); err != nil {
-			log.Fatal(err)
+			log.Fatal().Err(err).Msg("hostpingctl failed")
 		}
 	case "version":
 		fmt.Println(agent.BuildInfo().Line("hostpingctl"))

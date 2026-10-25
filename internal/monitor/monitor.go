@@ -2,11 +2,11 @@ package monitor
 
 import (
 	"context"
-	"log"
 	"math"
 	"time"
 
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/topology"
 )
@@ -94,8 +94,7 @@ type Monitor struct {
 	// that and by BusyCooldown.
 	MutualAlarm func() bool
 	// Logf receives the counter source reports (a PFC or drop counter with
-	// no source, one that stops or resumes reading). nil logs through the
-	// standard logger.
+	// no source, one that stops or resumes reading). nil logs through zerolog.
 	Logf func(format string, args ...any)
 	// pauseSrc and dropSrc follow each RNIC's counter sources across polls,
 	// re-baselines included.
@@ -120,7 +119,7 @@ func (m *Monitor) logf(format string, args ...any) {
 		m.Logf(format, args...)
 		return
 	}
-	log.Printf(format, args...)
+	logging.Infof(format, args...)
 }
 
 // sourceState is what the monitor knows about one RNIC's PFC pause or drop

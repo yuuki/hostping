@@ -3,14 +3,17 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/yuuki/hostping/internal/agent"
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 )
 
 func main() {
+	logging.Setup()
 	cfg := config.Defaults()
 	fs := flag.NewFlagSet("hostping", flag.ExitOnError)
 	cfg.RegisterFlags(fs)
@@ -22,6 +25,6 @@ func main() {
 		return
 	}
 	if err := agent.Run(cfg); err != nil {
-		log.Fatal(err)
+		log.Fatal().Err(err).Msg("hostping failed")
 	}
 }

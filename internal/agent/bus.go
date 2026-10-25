@@ -1,12 +1,12 @@
 package agent
 
 import (
-	"log"
 	"maps"
 	"slices"
 	"strings"
 
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/monitor"
 	"github.com/yuuki/hostping/internal/topology"
@@ -33,16 +33,16 @@ func liveSampler(g topology.Graph, cfg config.Config) (monitor.SysfsSampler, fun
 	}
 	u, err := monitor.NewUncore(g, monitor.UncoreOptions{UPIBytesPerFlit: cfg.UPIBytesPerFlit})
 	if err != nil {
-		log.Printf("hostping: uncore utilization unavailable, memory and inter-socket links stay unknown: %v", err)
+		logging.Infof("hostping: uncore utilization unavailable, memory and inter-socket links stay unknown: %v", err)
 		return s, func() {}
 	}
 	for _, id := range slices.Sorted(maps.Keys(u.Skipped)) {
-		log.Printf("hostping: uncore: %s stays unknown: %s", id, u.Skipped[id])
+		logging.Infof("hostping: uncore: %s stays unknown: %s", id, u.Skipped[id])
 	}
 	for _, die := range slices.Sorted(maps.Keys(u.SNCBoxes)) {
-		log.Printf("hostping: uncore: sub-NUMA clustering on package/die %s, IMC boxes measured per node: %s", die, u.SNCBoxes[die])
+		logging.Infof("hostping: uncore: sub-NUMA clustering on package/die %s, IMC boxes measured per node: %s", die, u.SNCBoxes[die])
 	}
-	log.Printf("hostping: uncore utilization on %s", strings.Join(u.Links(), ", "))
+	logging.Infof("hostping: uncore utilization on %s", strings.Join(u.Links(), ", "))
 	s.Uncore = u
 	return s, u.Close
 }

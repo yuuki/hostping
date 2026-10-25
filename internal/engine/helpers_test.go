@@ -230,7 +230,7 @@ func (c *cancelAfter) Loopback(ctx context.Context, n model.RNIC, ep model.Endpo
 }
 
 // logSink captures the aggregated lines the engine would otherwise write
-// through the standard logger.
+// through zerolog.
 type logSink struct{ lines []string }
 
 func (s *logSink) logf(format string, args ...any) {

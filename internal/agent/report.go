@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"time"
 
 	"github.com/yuuki/hostping/internal/baseline"
 	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 )
 
@@ -53,7 +53,7 @@ func newReporter(cfg config.Config, stdout io.Writer, build buildinfo.Info) (*re
 		stdout: stdout,
 		build:  build,
 		now:    time.Now,
-		logf:   log.Printf,
+		logf:   logging.Infof,
 	}
 	if r.file != "" {
 		f, err := openReportFile(r.file)
