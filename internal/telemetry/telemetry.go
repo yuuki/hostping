@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/exporter-toolkit/web"
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -24,6 +24,7 @@ import (
 
 	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 )
 
@@ -239,7 +240,8 @@ func newProvider(ctx context.Context, cfg config.Config) (*sdkmetric.MeterProvid
 		if err != nil {
 			return nil, fmt.Errorf("otlp exporter: %w", err)
 		}
-		log.Printf("hostping otlp exporter endpoint=%s tls=%v (%s)", tr.endpoint, !tr.insecure, tr.reason)
+		log.Info().Str("endpoint", tr.endpoint).Bool("tls", !tr.insecure).
+			Str("reason", tr.reason).Msg("hostping otlp exporter")
 		popts = append(popts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(otlp, sdkmetric.WithInterval(10*time.Second))))
 	}
 	return sdkmetric.NewMeterProvider(popts...), nil
@@ -262,9 +264,9 @@ func (t *Telemetry) serveMetrics(cfg config.Config, live *Liveness) error {
 	t.http = newMetricsServer(live)
 	webConfig := cfg.MetricsWebConfig
 	go func() {
-		err := web.Serve(ln, t.http, &web.FlagConfig{WebConfigFile: &webConfig}, slog.Default())
+		err := web.Serve(ln, t.http, &web.FlagConfig{WebConfigFile: &webConfig}, logging.Slog())
 		if err != nil && err != http.ErrServerClosed {
-			log.Printf("hostping metrics server %s: %v", cfg.PrometheusAddr, err)
+			log.Error().Err(err).Str("address", cfg.PrometheusAddr).Msg("hostping metrics server")
 		}
 	}()
 	return nil
@@ -299,6 +301,7 @@ func newMetricsServer(live *Liveness) *http.Server {
 	mux.Handle("/healthz", live)
 	return &http.Server{
 		Handler:           mux,
+		ErrorLog:          slog.NewLogLogger(logging.Slog().Handler(), slog.LevelError),
 		ReadHeaderTimeout: metricsReadHeaderTimeout,
 		ReadTimeout:       metricsReadTimeout,
 		WriteTimeout:      metricsWriteTimeout,

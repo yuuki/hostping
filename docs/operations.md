@@ -871,9 +871,10 @@ When series appear and disappear:
 
 ## Logs and reports under journald
 
-The daemon writes log lines to stderr: start-up, skipped endpoints, PFC pause
-and drop counter sources, discarded idle runs and diagnoses. It writes each
-confirmed report to stdout as one compact JSON object per line
+Both Go binaries use zerolog's console output on stderr, with timestamps and
+log levels and without ANSI colors. The daemon logs start-up, skipped endpoints,
+PFC pause and drop counter sources, discarded idle runs and diagnoses. It writes
+each confirmed report to stdout as one compact JSON object per line
 (`--report-format=json`, the daemon's default). Under the unit both go to the
 journal with one entry per line, so every report is a single journal entry:
 

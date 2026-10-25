@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/engine"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/monitor"
 	"github.com/yuuki/hostping/internal/mutual"
@@ -98,7 +98,7 @@ type rig struct {
 	sampler monitor.Sampler
 	mon     *monitor.Monitor
 	close   func()
-	// logf receives the operator log lines (log.Printf in the binaries).
+	// logf receives the operator log lines (logging.Infof in the binaries).
 	logf func(format string, args ...any)
 }
 
@@ -163,14 +163,14 @@ func Run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	rt, err := newRig(cfg, log.Printf)
+	rt, err := newRig(cfg, logging.Infof)
 	if err != nil {
 		return err
 	}
 	defer rt.close()
 	g := rt.g
 	// Before any exporter binds: an unusable --state-dir fails the start.
-	ps, err := newPersister(cfg, g, state.KernelBootID, time.Now, log.Printf)
+	ps, err := newPersister(cfg, g, state.KernelBootID, time.Now, logging.Infof)
 	if err != nil {
 		return err
 	}
@@ -196,15 +196,15 @@ func Run(cfg config.Config) error {
 		return runOnce(ctx, rt, tel, cfg, rp)
 	}
 
-	log.Printf("hostping agent version=%s commit=%s topology=%s rnics=%d endpoints=%d sim=%v metrics=%s", build.Version, build.Commit, g.Name, len(g.RNICs), len(g.Endpoints), cfg.Sim, cfg.PrometheusAddr)
-	loop, loopDone := startMutualLoop(ctx, cfg, g, rt.world, log.Printf)
+	logging.Infof("hostping agent version=%s commit=%s topology=%s rnics=%d endpoints=%d sim=%v metrics=%s", build.Version, build.Commit, g.Name, len(g.RNICs), len(g.Endpoints), cfg.Sim, cfg.PrometheusAddr)
+	loop, loopDone := startMutualLoop(ctx, cfg, g, rt.world, logging.Infof)
 	if loop != nil {
 		defer func() { <-loopDone }() // runs after stop(): the loop sees ctx end and closes its endpoints
 		rt.eng.Mutual = loop
 		rt.mon.MutualAlarm = loop.Alarm
 	}
 	ps.restore(rt.eng, rt.mon)
-	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, log.Printf)}
+	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof)}
 	defer ps.shutdown(rt.eng, &d.pending)
 	t := time.NewTicker(cfg.MetricInterval)
 	defer t.Stop()

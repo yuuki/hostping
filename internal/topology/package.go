@@ -2,17 +2,17 @@ package topology
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/sysfs"
 )
 
 // logf is where discovery reports a fallback; tests replace it.
-var logf = log.Printf
+var logf = logging.Infof
 
 // ParseCPUList parses a kernel CPU list such as "0,56" or "0-3,8". It is
 // sysfs.ParseCPUList, kept here for the callers that reach it through

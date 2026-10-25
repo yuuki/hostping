@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 
 	"github.com/yuuki/hostping/internal/config"
@@ -54,10 +54,11 @@ func quiet(t *testing.T) func() {
 	}
 	stdout := os.Stdout
 	os.Stdout = devnull
-	log.SetOutput(io.Discard)
+	logger := log.Logger
+	log.Logger = logger.Output(io.Discard)
 	return func() {
 		os.Stdout = stdout
-		log.SetOutput(os.Stderr)
+		log.Logger = logger
 		_ = devnull.Close()
 	}
 }

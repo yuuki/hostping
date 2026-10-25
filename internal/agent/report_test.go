@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
@@ -182,10 +183,11 @@ func TestRunOnceWritesReportFile(t *testing.T) {
 	}
 	stdout := os.Stdout
 	os.Stdout = w
-	log.SetOutput(io.Discard)
+	logger := log.Logger
+	log.Logger = logger.Output(io.Discard)
 	runErr := Run(cfg)
 	os.Stdout = stdout
-	log.SetOutput(os.Stderr)
+	log.Logger = logger
 	_ = w.Close()
 	printed, _ := io.ReadAll(r)
 	_ = r.Close()

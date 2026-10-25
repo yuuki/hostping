@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"slices"
 	"sort"
@@ -14,6 +13,7 @@ import (
 	"github.com/yuuki/hostping/internal/analyzer"
 	"github.com/yuuki/hostping/internal/baseline"
 	"github.com/yuuki/hostping/internal/config"
+	"github.com/yuuki/hostping/internal/logging"
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/topology"
 )
@@ -51,7 +51,7 @@ type Engine struct {
 	// confirmed it (analyzer.Input.OneShot).
 	OneShot bool
 	// Logf receives the aggregated engine reports (skipped endpoints, an empty
-	// mutual pair set). A nil Logf logs through the standard logger, which is
+	// mutual pair set). A nil Logf logs through zerolog, which is
 	// where the agent writes everything else.
 	Logf func(format string, args ...any)
 	// SkipLatencyRecheck turns off the paired latency re-measurement
@@ -937,7 +937,7 @@ func (e *Engine) logf(format string, args ...any) {
 		e.Logf(format, args...)
 		return
 	}
-	log.Printf(format, args...)
+	logging.Infof(format, args...)
 }
 
 func noLoopbackError(skips []probeSkip) error {
