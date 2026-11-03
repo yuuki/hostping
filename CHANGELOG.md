@@ -8,6 +8,23 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Security
+
+- `/etc/default/hostping`, where an OTLP bearer token can be set, is now
+  installed with mode 0600, and the package's post-install script removes
+  group and other access from an existing copy.
+- UD mutual probe (`--mutual-transport=ud`): an endpoint now accepts only
+  datagrams sent by the session's own QPs (a request from the QP its tag
+  names, a reply to the endpoint its tag names), so a forged reply cannot
+  hide a failure and a forged request is not answered. The Q_Key is random
+  per process instead of fixed, and the probe sequence starts at a random
+  value.
+- UD mutual probe: a receive completed in error (such as an oversized
+  datagram) no longer resets the QP unless the QP itself has failed, so one
+  bad datagram cannot discard the probes in flight, and one wait handles a
+  bounded number of completions per endpoint, so a request flood cannot keep
+  it from returning.
+
 ## [0.2.2] - 2026-11-03
 
 ### Changed

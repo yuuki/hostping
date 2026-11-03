@@ -66,6 +66,58 @@ pub fn mtuBytes(mtu: u32) u32 {
     return @as(u32, 128) << @as(u5, @intCast(mtu));
 }
 
+/// acceptRequest reports whether a request tagged `tag` that reached endpoint
+/// `self` from QP number `src_qp` was sent by the requester the tag names.
+/// qpns holds each endpoint's QP number (null when it is not open).
+pub fn acceptRequest(qpns: []const ?u32, self: usize, tag: u32, src_qp: u32) bool {
+    const from = srcOf(tag);
+    if (from == self or from >= qpns.len) return false;
+    const q = qpns[from] orelse return false;
+    return q == src_qp;
+}
+
+/// acceptReply reports whether a reply tagged `tag` that reached endpoint
+/// `self` from QP number `src_qp` answers one of self's requests and came from
+/// another endpoint. QP numbers are allocated per device, so two endpoints may
+/// share one; this asks whether any other endpoint has it, never which.
+pub fn acceptReply(qpns: []const ?u32, self: usize, tag: u32, src_qp: u32) bool {
+    if (srcOf(tag) != self) return false;
+    for (qpns, 0..) |maybe, i| {
+        if (i == self) continue;
+        if (maybe) |q| {
+            if (q == src_qp) return true;
+        }
+    }
+    return false;
+}
+
+test "requests are accepted only from the QP of the endpoint the tag names" {
+    const qpns = [_]?u32{ 17, 42, null };
+    try std.testing.expect(acceptRequest(&qpns, 0, request(5, 1), 42));
+    try std.testing.expect(!acceptRequest(&qpns, 0, request(5, 1), 17)); // wrong QP
+    try std.testing.expect(!acceptRequest(&qpns, 0, request(5, 1), 99)); // foreign QP
+    try std.testing.expect(!acceptRequest(&qpns, 0, request(5, 0), 17)); // from itself
+    try std.testing.expect(!acceptRequest(&qpns, 0, request(5, 2), 0)); // closed endpoint
+    try std.testing.expect(!acceptRequest(&qpns, 0, request(5, 9), 42)); // out of range
+}
+
+test "replies are accepted only for own requests and from another endpoint" {
+    const qpns = [_]?u32{ 17, 42 };
+    try std.testing.expect(acceptReply(&qpns, 0, reply(request(5, 0)), 42));
+    try std.testing.expect(!acceptReply(&qpns, 0, reply(request(5, 1)), 42)); // not ours
+    try std.testing.expect(!acceptReply(&qpns, 0, reply(request(5, 0)), 99)); // foreign QP
+    try std.testing.expect(!acceptReply(&qpns, 0, reply(request(5, 0)), 17)); // own QP only
+}
+
+test "endpoints on different devices may share a QP number" {
+    // QP numbers are per device: the first UD QP on two RNICs can both be 17.
+    const qpns = [_]?u32{ 17, 17 };
+    try std.testing.expect(acceptRequest(&qpns, 1, request(3, 0), 17));
+    try std.testing.expect(acceptRequest(&qpns, 0, request(3, 1), 17));
+    try std.testing.expect(acceptReply(&qpns, 0, reply(request(3, 0)), 17));
+    try std.testing.expect(acceptReply(&qpns, 1, reply(request(3, 1)), 17));
+}
+
 test "request and reply tags round-trip seq and src" {
     const t = request(0x12_3456, 77);
     try std.testing.expect(!isReply(t));

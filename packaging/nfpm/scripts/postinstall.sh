@@ -6,6 +6,13 @@
 # running daemon yourself after an upgrade.
 set -e
 
+# /etc/default/hostping may hold an OTLP bearer token. Packages up to 0.2.2
+# installed it world-readable, and a kept config file keeps its mode across
+# upgrades, so tighten it here.
+if [ -f /etc/default/hostping ]; then
+    chmod go-rwx /etc/default/hostping || true
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi

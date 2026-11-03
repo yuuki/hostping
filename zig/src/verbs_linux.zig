@@ -1029,7 +1029,32 @@ fn pingOnce(qp_s: [*c]c.ibv_qp, cq_s: [*c]c.ibv_cq, mr_s: [*c]c.ibv_mr, qp_r: [*
 // arrivals cannot starve the receive queue either.
 // ---------------------------------------------------------------------------
 
-const ud_qkey: u32 = 0x1111_1111;
+/// The Q_Key every UD endpoint of this process uses (see udQkey).
+var ud_qkey_state: u32 = 0;
+
+/// udQkey returns this process's UD Q_Key, drawn from getrandom on first use.
+/// All endpoints of a probe session live in this process, so nothing outside
+/// it needs the value; keeping it unpredictable means a host that is not one
+/// of the probed RNICs cannot get a datagram accepted by an endpoint without
+/// guessing it. The top bit stays clear: a controlled Q_Key needs CAP_NET_RAW.
+fn udQkey() u32 {
+    const cur = @atomicLoad(u32, &ud_qkey_state, .acquire);
+    if (cur != 0) return cur;
+    var b: [4]u8 = undefined;
+    var k: u32 = 0;
+    if (std.os.linux.getrandom(&b, b.len, 0) == b.len) k = std.mem.readInt(u32, &b, .little);
+    k &= 0x7fff_ffff;
+    if (k == 0) k = 0x1111_1111;
+    if (@cmpxchgStrong(u32, &ud_qkey_state, 0, k, .acq_rel, .acquire)) |winner| return winner;
+    return k;
+}
+
+/// Receive completions one endpoint handles per sweep. Requests are answered
+/// in place and do not fill `out`, so without a cap a flood of them would keep
+/// a sweep (and the Cgo call around it) from ever returning. It must stay at
+/// least ud_recv_depth: udWait's last sweep after arming the CQs has to drain
+/// every completion already queued, since those raise no event.
+const ud_sweep_budget: u32 = ud_recv_depth;
 /// Receive slots kept posted per endpoint. One endpoint receives, per probe
 /// round, at most one request from each peer plus the replies to its own
 /// requests, so this leaves ample headroom before a request could find no
@@ -1086,7 +1111,7 @@ fn udBringUp(ep: *UdEp) !void {
     attr.qp_state = c.IBV_QPS_INIT;
     attr.pkey_index = 0;
     attr.port_num = ep.pg.port;
-    attr.qkey = ud_qkey;
+    attr.qkey = udQkey();
     try modifyQp(ep.qp, &attr, c.IBV_QP_STATE | c.IBV_QP_PKEY_INDEX | c.IBV_QP_PORT | c.IBV_QP_QKEY, error.Init);
     attr = std.mem.zeroes(c.ibv_qp_attr);
     attr.qp_state = c.IBV_QPS_RTR;
@@ -1249,7 +1274,7 @@ pub fn udSend(src: *UdEp, dst: *const UdEp, tag: u32) !u64 {
     wr.unnamed_0.imm_data = tag;
     wr.wr.ud.ah = ah;
     wr.wr.ud.remote_qpn = dst.qp.qp_num;
-    wr.wr.ud.remote_qkey = ud_qkey;
+    wr.wr.ud.remote_qkey = udQkey();
     var bad: ?*c.ibv_send_wr = null;
     const t = try timespecNs();
     if (c.ibv_post_send(src.qp, &wr, &bad) != 0) {
@@ -1260,17 +1285,41 @@ pub fn udSend(src: *UdEp, dst: *const UdEp, tag: u32) !u64 {
     return t;
 }
 
+/// qpInError reports whether qp has left RTS for the error state (or its
+/// state cannot be read). A UD receive can complete in error, e.g. with a
+/// local length error for an oversized datagram, while the QP stays usable.
+fn qpInError(qp: [*c]c.ibv_qp) bool {
+    var attr: c.ibv_qp_attr = std.mem.zeroes(c.ibv_qp_attr);
+    var init_attr: c.ibv_qp_init_attr = std.mem.zeroes(c.ibv_qp_init_attr);
+    if (c.ibv_query_qp(qp, &attr, c.IBV_QP_STATE, &init_attr) != 0) return true;
+    return attr.qp_state != c.IBV_QPS_RTS;
+}
+
 /// sweep polls every endpoint's receive CQ once, without blocking. Requests
 /// are answered on the spot from the endpoint they reached; replies are
 /// appended to out. Returns the new length of out.
+///
+/// Only datagrams sent by this session's own endpoints count
+/// (udtag.acceptRequest/acceptReply). A request must come from the QP number
+/// of the endpoint its tag names, and a reply must reach the endpoint its tag
+/// names from the QP number of another endpoint. Anything else
+/// (a datagram from another process or host that got the Q_Key right) is
+/// dropped without an answer, so it can neither fake a reply nor use an
+/// endpoint to send traffic to someone else.
 fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
     var n = n0;
-    for (eps) |maybe| {
+    var qpns: [udtag.max_endpoints]?u32 = undefined;
+    const ne = @min(eps.len, qpns.len);
+    for (eps[0..ne], 0..) |maybe, i| {
+        qpns[i] = if (maybe) |ep| ep.qp.qp_num else null;
+    }
+    for (eps, 0..) |maybe, idx| {
         const ep = maybe orelse continue;
         if (ep.broken) {
             udReset(ep) catch continue;
         }
-        while (n < out.len) {
+        var budget: u32 = ud_sweep_budget;
+        while (n < out.len and budget > 0) : (budget -= 1) {
             var wc: c.ibv_wc = undefined;
             const got = c.ibv_poll_cq(ep.recv_cq, 1, &wc);
             if (got < 0) {
@@ -1279,10 +1328,19 @@ fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
             }
             if (got == 0) break;
             if (wc.status != c.IBV_WC_SUCCESS) {
-                // The QP is in error; its slots are flushed. udReset drains
-                // the rest and re-posts every slot.
-                ep.broken = true;
-                break;
+                if (qpInError(ep.qp)) {
+                    // Its slots are flushed. udReset drains the rest and
+                    // re-posts every slot.
+                    ep.broken = true;
+                    break;
+                }
+                // The QP still works (e.g. an oversized datagram): only this
+                // slot was consumed. Resetting here would let anyone who can
+                // send one bad datagram discard the probes in flight.
+                udPostRecv(ep, @intCast(wc.wr_id)) catch {
+                    ep.broken = true;
+                };
+                continue;
             }
             const t = timespecNs() catch 0;
             udPostRecv(ep, @intCast(wc.wr_id)) catch {
@@ -1291,16 +1349,13 @@ fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
             if (wc.wc_flags & c.IBV_WC_WITH_IMM == 0) continue;
             const tag = wc.unnamed_0.imm_data;
             if (!udtag.isReply(tag)) {
-                const from = udtag.srcOf(tag);
-                if (from < eps.len) {
-                    if (eps[from]) |peer| {
-                        // A failed reply is just a probe the requester will
-                        // see time out.
-                        _ = udSend(ep, peer, udtag.reply(tag)) catch {};
-                    }
-                }
+                if (!udtag.acceptRequest(qpns[0..ne], idx, tag, wc.src_qp)) continue;
+                // A failed reply is just a probe the requester will see time
+                // out.
+                _ = udSend(ep, eps[udtag.srcOf(tag)].?, udtag.reply(tag)) catch {};
                 continue;
             }
+            if (!udtag.acceptReply(qpns[0..ne], idx, tag, wc.src_qp)) continue;
             out[n] = .{ .ep = udtag.srcOf(tag), .seq = udtag.seqOf(tag), .t_ns = t };
             n += 1;
         }
