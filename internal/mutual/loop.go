@@ -155,6 +155,9 @@ func New(cfg Config, rnics []model.RNIC, pairs [][2]model.RNIC, t Transport, opt
 		peers:   make([][]int, len(rnics)),
 		pairs:   map[[2]int]int{},
 		pending: map[uint32]probe{},
+		// Start the sequence space at a random point so the tags of the
+		// first probes cannot be guessed from the agent's start time.
+		seq: rand.Uint32() & seqMask,
 	}
 	for _, o := range opts {
 		o(l)

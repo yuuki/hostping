@@ -80,7 +80,7 @@ install -d /opt/hostping/1.2.3
 install -m 0755 bin/linux-amd64/hostping bin/linux-amd64/hostpingctl /opt/hostping/1.2.3/
 install -m 0644 bin/linux-amd64/libhostping_probe.so /opt/hostping/1.2.3/
 ln -sfn 1.2.3 /opt/hostping/current
-install -m 0644 contrib/systemd/hostping.default /etc/default/hostping
+install -m 0600 contrib/systemd/hostping.default /etc/default/hostping
 install -m 0644 contrib/systemd/hostping.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now hostping

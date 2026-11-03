@@ -68,7 +68,9 @@ contents:
     dst: /etc/default/hostping
     type: config|noreplace
     file_info:
-      mode: 0644
+      # Not world-readable: it is where OTEL_EXPORTER_OTLP_HEADERS (a bearer
+      # token) is set. systemd reads it as root.
+      mode: 0600
 
   - src: LICENSE
     dst: /usr/share/doc/hostping/LICENSE
