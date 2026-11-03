@@ -8,6 +8,12 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-03
+
+### Changed
+
+- Update Go module dependencies (Go 1.27.3).
+
 ## [0.2.1] - 2026-10-22
 
 ### Added
