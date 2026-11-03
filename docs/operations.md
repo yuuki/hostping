@@ -206,7 +206,9 @@ so no value may contain a space. To disable a listener, write `--metrics=`, not
 `--metrics ""`.
 
 A flag the binary rejects exits non-zero, and `Restart=on-failure` retries it
-every 30 s with the same flags. Check a new option set before restarting:
+every 30 s with the same flags. Check a new option set before restarting, as
+root (the file is mode 0600, and sourcing an unreadable file only prints an
+error, leaving `$HOSTPING_OPTS` empty so the check passes vacuously):
 
 ```bash
 set -a; . /etc/default/hostping; set +a

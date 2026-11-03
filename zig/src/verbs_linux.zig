@@ -1051,7 +1051,9 @@ fn udQkey() u32 {
 
 /// Receive completions one endpoint handles per sweep. Requests are answered
 /// in place and do not fill `out`, so without a cap a flood of them would keep
-/// a sweep (and the Cgo call around it) from ever returning.
+/// a sweep (and the Cgo call around it) from ever returning. It must stay at
+/// least ud_recv_depth: udWait's last sweep after arming the CQs has to drain
+/// every completion already queued, since those raise no event.
 const ud_sweep_budget: u32 = ud_recv_depth;
 /// Receive slots kept posted per endpoint. One endpoint receives, per probe
 /// round, at most one request from each peer plus the replies to its own
@@ -1293,27 +1295,24 @@ fn qpInError(qp: [*c]c.ibv_qp) bool {
     return attr.qp_state != c.IBV_QPS_RTS;
 }
 
-/// localEpByQpn returns the index of the endpoint whose QP is qpn.
-fn localEpByQpn(eps: []const ?*UdEp, qpn: u32) ?usize {
-    for (eps, 0..) |maybe, i| {
-        const ep = maybe orelse continue;
-        if (ep.qp.qp_num == qpn) return i;
-    }
-    return null;
-}
-
 /// sweep polls every endpoint's receive CQ once, without blocking. Requests
 /// are answered on the spot from the endpoint they reached; replies are
 /// appended to out. Returns the new length of out.
 ///
-/// Only datagrams sent by this session's own endpoints count. A request must
-/// come from the QP of the endpoint its tag names, and a reply must reach the
-/// endpoint its tag names from another of the session's QPs. Anything else
+/// Only datagrams sent by this session's own endpoints count
+/// (udtag.acceptRequest/acceptReply). A request must come from the QP number
+/// of the endpoint its tag names, and a reply must reach the endpoint its tag
+/// names from the QP number of another endpoint. Anything else
 /// (a datagram from another process or host that got the Q_Key right) is
 /// dropped without an answer, so it can neither fake a reply nor use an
 /// endpoint to send traffic to someone else.
 fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
     var n = n0;
+    var qpns: [udtag.max_endpoints]?u32 = undefined;
+    const ne = @min(eps.len, qpns.len);
+    for (eps[0..ne], 0..) |maybe, i| {
+        qpns[i] = if (maybe) |ep| ep.qp.qp_num else null;
+    }
     for (eps, 0..) |maybe, idx| {
         const ep = maybe orelse continue;
         if (ep.broken) {
@@ -1349,17 +1348,14 @@ fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
             };
             if (wc.wc_flags & c.IBV_WC_WITH_IMM == 0) continue;
             const tag = wc.unnamed_0.imm_data;
-            const sender = localEpByQpn(eps, wc.src_qp) orelse continue;
-            if (sender == idx) continue;
             if (!udtag.isReply(tag)) {
-                const from = udtag.srcOf(tag);
-                if (from != sender) continue;
+                if (!udtag.acceptRequest(qpns[0..ne], idx, tag, wc.src_qp)) continue;
                 // A failed reply is just a probe the requester will see time
                 // out.
-                _ = udSend(ep, eps[from].?, udtag.reply(tag)) catch {};
+                _ = udSend(ep, eps[udtag.srcOf(tag)].?, udtag.reply(tag)) catch {};
                 continue;
             }
-            if (udtag.srcOf(tag) != idx) continue;
+            if (!udtag.acceptReply(qpns[0..ne], idx, tag, wc.src_qp)) continue;
             out[n] = .{ .ep = udtag.srcOf(tag), .seq = udtag.seqOf(tag), .t_ns = t };
             n += 1;
         }
