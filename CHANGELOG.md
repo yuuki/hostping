@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-04
+
 ### Security
 
 - `/etc/default/hostping`, where an OTLP bearer token can be set, is now
