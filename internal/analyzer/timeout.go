@@ -117,9 +117,10 @@ func deadAndSameRail(pairs []pairTimeout, idx []int) (all, same bool) {
 }
 
 // torTimeout is the host-wide total timeout: every RNIC times out on all of
-// its pairs, at least two of which are same-rail. It is nil otherwise. A
-// single dead pair is left out: with one pair either RNIC alone explains it,
-// so it stays a per-RNIC verdict.
+// its pairs, and at least two of the host's pairs are same-rail. It is nil
+// otherwise. Cross-rail pairs alone never make it, and neither does a single
+// same-rail pair: with one pair either RNIC alone explains it, so it stays a
+// per-RNIC verdict.
 func torTimeout(pairs []pairTimeout, ids []string, allDead map[string]bool) []model.RootCause {
 	if sameRailPairs(pairs) < 2 {
 		return nil
