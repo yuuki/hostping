@@ -8,6 +8,15 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-05
+
+### Changed
+
+- Split the analyzer's timeout, cross-rail, root-port, overlap and
+  down-train rules, the monitor's SNC counter mapping and the Zig UD sweep
+  into smaller steps, with tests that pin their causes, evidence and order.
+  Diagnoses are unchanged.
+
 ## [0.2.3] - 2026-11-04
 
 ### Security
