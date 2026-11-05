@@ -72,16 +72,32 @@ func regroupSNC(memLinks map[string]memLink, imc []uncoreEvent, open perfOpener)
 // the IMC events; those of die are opened for the measurement and closed
 // again. The result maps a box (PMU name) to its node.
 func mapSNCBoxes(die string, nodes []int, evs []uncoreEvent, open perfOpener) (map[string]int, error) {
-	type ctr struct {
-		ev uncoreEvent
-		c  perfCounter
+	ctrs, boxes, err := openSNCCounters(die, evs, open)
+	if err != nil {
+		return nil, err
 	}
-	var ctrs []ctr
-	defer func() {
-		for _, x := range ctrs {
-			_ = x.c.Close()
-		}
-	}()
+	defer closeSNCCounters(ctrs)
+	if len(boxes) < len(nodes) {
+		return nil, fmt.Errorf("%d IMC boxes for %d NUMA nodes", len(boxes), len(nodes))
+	}
+	moved, err := measureSNCMoves(ctrs, boxes, nodes)
+	if err != nil {
+		return nil, err
+	}
+	return assignSNCBoxes(moved, boxes, nodes)
+}
+
+// sncCounter is one IMC counter opened for the measurement.
+type sncCounter struct {
+	ev uncoreEvent
+	c  perfCounter
+}
+
+// openSNCCounters opens die's events among evs and returns the counters with
+// the set of boxes they belong to. On an error it closes the counters it had
+// opened.
+func openSNCCounters(die string, evs []uncoreEvent, open perfOpener) ([]sncCounter, map[string]bool, error) {
+	var ctrs []sncCounter
 	boxes := map[string]bool{}
 	for _, ev := range evs {
 		if ev.Die != die {
@@ -89,58 +105,78 @@ func mapSNCBoxes(die string, nodes []int, evs []uncoreEvent, open perfOpener) (m
 		}
 		c, err := open(ev)
 		if err != nil {
-			return nil, fmt.Errorf("%s/%s on cpu%d: %w", ev.PMU, ev.Name, ev.CPU, err)
+			closeSNCCounters(ctrs)
+			return nil, nil, fmt.Errorf("%s/%s on cpu%d: %w", ev.PMU, ev.Name, ev.CPU, err)
 		}
-		ctrs = append(ctrs, ctr{ev, c})
+		ctrs = append(ctrs, sncCounter{ev, c})
 		boxes[ev.PMU] = true
 	}
-	if len(boxes) < len(nodes) {
-		return nil, fmt.Errorf("%d IMC boxes for %d NUMA nodes", len(boxes), len(nodes))
+	return ctrs, boxes, nil
+}
+
+func closeSNCCounters(ctrs []sncCounter) {
+	for _, x := range ctrs {
+		_ = x.c.Close()
 	}
-	read := func() (map[string]float64, error) {
-		out := map[string]float64{}
-		for _, x := range ctrs {
-			n, _, _, err := x.c.Read()
-			if err != nil {
-				return nil, fmt.Errorf("%s/%s: %w", x.ev.PMU, x.ev.Name, err)
-			}
-			out[x.ev.PMU] += float64(n) * x.ev.BytesPerCount
-		}
-		return out, nil
-	}
-	moved := map[string]map[int]float64{} // box → node touched → bytes
+}
+
+// measureSNCMoves touches each node in turn and returns, per node touched,
+// the bytes each box counted during its touch.
+func measureSNCMoves(ctrs []sncCounter, boxes map[string]bool, nodes []int) (map[int]map[string]float64, error) {
+	moved := map[int]map[string]float64{}
 	for _, n := range nodes {
-		before, err := read()
+		delta, err := touchSNCNode(ctrs, boxes, n)
 		if err != nil {
 			return nil, err
 		}
-		if err := touchNode(n); err != nil {
-			return nil, fmt.Errorf("touching node %d: %w", n, err)
-		}
-		after, err := read()
-		if err != nil {
-			return nil, err
-		}
-		for b := range boxes {
-			if moved[b] == nil {
-				moved[b] = map[int]float64{}
-			}
-			moved[b][n] = max(after[b]-before[b], 0)
-		}
+		moved[n] = delta
 	}
+	return moved, nil
+}
+
+// touchSNCNode touches node n and returns the bytes each box counted
+// meanwhile.
+func touchSNCNode(ctrs []sncCounter, boxes map[string]bool, n int) (map[string]float64, error) {
+	before, err := readSNCBytes(ctrs)
+	if err != nil {
+		return nil, err
+	}
+	if err := touchNode(n); err != nil {
+		return nil, fmt.Errorf("touching node %d: %w", n, err)
+	}
+	after, err := readSNCBytes(ctrs)
+	if err != nil {
+		return nil, err
+	}
+	delta := map[string]float64{}
+	for b := range boxes {
+		delta[b] = max(after[b]-before[b], 0)
+	}
+	return delta, nil
+}
+
+// readSNCBytes is the bytes each box's counters have counted so far.
+func readSNCBytes(ctrs []sncCounter) (map[string]float64, error) {
+	out := map[string]float64{}
+	for _, x := range ctrs {
+		n, _, _, err := x.c.Read()
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s: %w", x.ev.PMU, x.ev.Name, err)
+		}
+		out[x.ev.PMU] += float64(n) * x.ev.BytesPerCount
+	}
+	return out, nil
+}
+
+// assignSNCBoxes gives each box the node whose touch moved it sncDominance
+// times more than any other node's did. It fails when a box falls clearly to
+// no node, or a node's boxes did not count a fair share of its touch.
+func assignSNCBoxes(moved map[int]map[string]float64, boxes map[string]bool, nodes []int) (map[string]int, error) {
 	out := map[string]int{}
 	share := map[int]float64{}
 	var unclear []string
 	for b := range boxes {
-		best, first, second := -1, 0.0, 0.0
-		for _, n := range nodes {
-			switch v := moved[b][n]; {
-			case v > first:
-				best, first, second = n, v, first
-			case v > second:
-				second = v
-			}
-		}
+		best, first, second := dominantNode(moved, b, nodes)
 		if best < 0 || first < sncDominance*second {
 			unclear = append(unclear, b)
 			continue
@@ -152,12 +188,36 @@ func mapSNCBoxes(die string, nodes []int, evs []uncoreEvent, open perfOpener) (m
 		sort.Strings(unclear)
 		return nil, fmt.Errorf("no node stands out for %s", strings.Join(unclear, ", "))
 	}
-	for _, n := range nodes {
-		if share[n] < sncMinShare*sncTouchBytes {
-			return nil, fmt.Errorf("node %d's boxes counted %.0f MiB of the %d MiB touched", n, share[n]/(1<<20), sncTouchBytes>>20)
-		}
+	if err := checkSNCShares(share, nodes); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// dominantNode is the node whose touch moved box b the most, with what it
+// moved and what the runner-up moved. best is -1 when no touch moved b.
+func dominantNode(moved map[int]map[string]float64, b string, nodes []int) (best int, first, second float64) {
+	best = -1
+	for _, n := range nodes {
+		switch v := moved[n][b]; {
+		case v > first:
+			best, first, second = n, v, first
+		case v > second:
+			second = v
+		}
+	}
+	return best, first, second
+}
+
+// checkSNCShares fails for the first node whose boxes counted less than
+// sncMinShare of what its touch wrote and read back.
+func checkSNCShares(share map[int]float64, nodes []int) error {
+	for _, n := range nodes {
+		if share[n] < sncMinShare*sncTouchBytes {
+			return fmt.Errorf("node %d's boxes counted %.0f MiB of the %d MiB touched", n, share[n]/(1<<20), sncTouchBytes>>20)
+		}
+	}
+	return nil
 }
 
 // describeSNC renders mapSNCBoxes results per die, e.g.
