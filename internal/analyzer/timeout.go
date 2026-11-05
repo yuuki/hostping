@@ -2,6 +2,8 @@ package analyzer
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -51,9 +53,27 @@ func (p pairTimeout) evidence() string {
 // cross-rail pair that answers still proves both RNICs are up. What the dead
 // cross-rail pairs show beyond that is judged by crossRailTimeouts.
 func diagnoseTimeouts(in Input) []model.RootCause {
+	pairs, of := timedPairs(in.Mutual)
+	if len(pairs) == 0 {
+		return nil
+	}
+	ids := slices.Sorted(maps.Keys(of))
+	allDead, down := rnicTimeoutStates(pairs, of, ids)
+	if tor := torTimeout(pairs, ids, allDead); tor != nil {
+		return tor
+	}
+	out := downRNICCauses(pairs, of, ids, down)
+	out = append(out, deadPairCauses(pairs, down)...)
+	out = append(out, crossRailTimeouts(pairs, ids, down)...)
+	return append(out, intermittentTimeouts(in, pairs, of, ids, down)...)
+}
+
+// timedPairs is the pairs of ms that have a timeout ratio, in measurement
+// order, and for each RNIC the indices of its pairs among them.
+func timedPairs(ms []model.MutualMeasurement) ([]pairTimeout, map[string][]int) {
 	var pairs []pairTimeout
 	of := map[string][]int{}
-	for _, m := range in.Mutual {
+	for _, m := range ms {
 		r, ok := m.TimeoutRatio()
 		if !ok {
 			continue
@@ -65,53 +85,70 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 			of[m.Dst] = append(of[m.Dst], i)
 		}
 	}
-	if len(pairs) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(of))
-	for id := range of {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	return pairs, of
+}
 
-	samePairs := 0
-	for _, p := range pairs {
-		if !p.m.CrossRail {
-			samePairs++
-		}
-	}
-	allDead := map[string]bool{}
-	down := map[string]bool{}
+// rnicTimeoutStates says per RNIC whether every one of its pairs times out
+// completely (allDead) and whether it is down: all dead, with a same-rail
+// pair among them.
+func rnicTimeoutStates(pairs []pairTimeout, of map[string][]int, ids []string) (allDead, down map[string]bool) {
+	allDead, down = map[string]bool{}, map[string]bool{}
 	for _, id := range ids {
-		all, same := true, false
-		for _, i := range of[id] {
-			if pairs[i].ratio < 1 {
-				all = false
-			}
-			if !pairs[i].m.CrossRail {
-				same = true
-			}
-		}
+		all, same := deadAndSameRail(pairs, of[id])
 		allDead[id] = all
 		down[id] = all && same
 	}
+	return allDead, down
+}
 
-	// Host-wide total timeout. A single dead pair is left out: with one pair
-	// either RNIC alone explains it, so it stays a per-RNIC verdict.
-	if samePairs >= 2 {
-		all := true
-		for _, id := range ids {
-			all = all && allDead[id]
+// deadAndSameRail reports whether every pair at the indices idx times out
+// completely, and whether any of them is same-rail.
+func deadAndSameRail(pairs []pairTimeout, idx []int) (all, same bool) {
+	all = true
+	for _, i := range idx {
+		if pairs[i].ratio < 1 {
+			all = false
 		}
-		if all {
-			return []model.RootCause{{
-				Code: model.CauseToRSwitchAnomaly, Summary: "every RNIC on the host times out on its mutual probes (ToR switch anomaly suspected)",
-				RNICs: ids, Confidence: model.ConfidenceMedium,
-				Evidence: fmt.Sprintf("all %d RNICs time out on all %d pairs", len(ids), len(pairs)),
-			}}
+		if !pairs[i].m.CrossRail {
+			same = true
 		}
 	}
+	return all, same
+}
 
+// torTimeout is the host-wide total timeout: every RNIC times out on all of
+// its pairs, and at least two of the host's pairs are same-rail. It is nil
+// otherwise. Cross-rail pairs alone never make it, and neither does a single
+// same-rail pair: with one pair either RNIC alone explains it, so it stays a
+// per-RNIC verdict.
+func torTimeout(pairs []pairTimeout, ids []string, allDead map[string]bool) []model.RootCause {
+	if sameRailPairs(pairs) < 2 {
+		return nil
+	}
+	for _, id := range ids {
+		if !allDead[id] {
+			return nil
+		}
+	}
+	return []model.RootCause{{
+		Code: model.CauseToRSwitchAnomaly, Summary: "every RNIC on the host times out on its mutual probes (ToR switch anomaly suspected)",
+		RNICs: ids, Confidence: model.ConfidenceMedium,
+		Evidence: fmt.Sprintf("all %d RNICs time out on all %d pairs", len(ids), len(pairs)),
+	}}
+}
+
+func sameRailPairs(pairs []pairTimeout) int {
+	n := 0
+	for _, p := range pairs {
+		if !p.m.CrossRail {
+			n++
+		}
+	}
+	return n
+}
+
+// downRNICCauses names each down RNIC once, with the peers of all its pairs.
+func downRNICCauses(pairs []pairTimeout, of map[string][]int, ids []string, down map[string]bool) []model.RootCause {
 	var out []model.RootCause
 	for _, id := range ids {
 		if !down[id] {
@@ -127,8 +164,14 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 			Evidence: fmt.Sprintf("%s timeout_ratio=1 on every pair (%s)", id, strings.Join(peers, ", ")),
 		})
 	}
-	// A dead same-rail pair between two RNICs that both reach someone else is
-	// that pair's routing or QP, not either RNIC as a whole.
+	return out
+}
+
+// deadPairCauses names each dead same-rail pair between two RNICs that are not
+// down: both reach someone else, so it is that pair's routing or QP, not
+// either RNIC as a whole.
+func deadPairCauses(pairs []pairTimeout, down map[string]bool) []model.RootCause {
+	var out []model.RootCause
 	for _, p := range pairs {
 		if p.ratio == 1 && !p.m.CrossRail && !down[p.m.Src] && !down[p.m.Dst] {
 			out = append(out, model.RootCause{
@@ -138,8 +181,7 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 			})
 		}
 	}
-	out = append(out, crossRailTimeouts(pairs, ids, down)...)
-	return append(out, intermittentTimeouts(in, pairs, of, ids, down)...)
+	return out
 }
 
 // crossRailTimeouts judges the cross-rail pairs that time out completely
@@ -164,11 +206,24 @@ func diagnoseTimeouts(in Input) []model.RootCause {
 //
 // Pairs with a down RNIC are already explained and take no part.
 func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) []model.RootCause {
-	// RNICs that are not down, grouped by the pairs that answered; an RNIC
-	// no such pair links is a group of its own (unionFind).
-	reach := unionFind{}
-	var dead []pairTimeout
-	crossAnswered := false
+	reach, dead, crossAnswered := crossRailReach(pairs, down)
+	if len(dead) == 0 {
+		return nil
+	}
+	if !crossAnswered {
+		return []model.RootCause{railsApartCause(dead)}
+	}
+	groups := reachGroups(reach, ids, down)
+	out := crossRailRouteCauses(reach, dead)
+	return append(out, cutGroupCauses(reach, dead, groups)...)
+}
+
+// crossRailReach links the RNICs that are not down by the pairs that answered
+// (unionFind; an RNIC no such pair links is a group of its own). It returns
+// that grouping, the cross-rail pairs between such RNICs that time out
+// completely, in pair order, and whether any cross-rail pair answered.
+func crossRailReach(pairs []pairTimeout, down map[string]bool) (reach unionFind, dead []pairTimeout, crossAnswered bool) {
+	reach = unionFind{}
 	for _, p := range pairs {
 		if down[p.m.Src] || down[p.m.Dst] {
 			continue
@@ -182,26 +237,28 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			dead = append(dead, p)
 		}
 	}
-	if len(dead) == 0 {
-		return nil
-	}
+	return reach, dead, crossAnswered
+}
 
-	if !crossAnswered {
-		involved := map[string]bool{}
-		ev := make([]string, 0, len(dead))
-		for _, p := range dead {
-			involved[p.m.Src], involved[p.m.Dst] = true, true
-			ev = append(ev, p.evidence())
-		}
-		return []model.RootCause{{
-			Code:       model.CauseRNICCrossRailUnreachable,
-			Summary:    "no RNIC of this host reaches another across subnets (isolated rails by design, or a ToR/fabric routing fault)",
-			RNICs:      sortedKeys(involved),
-			Confidence: model.ConfidenceLow,
-			Evidence:   fmt.Sprintf("all %d cross-rail pairs time out: %s", len(dead), joinLimited(ev, 8)),
-		}}
+// railsApartCause is the uniform pattern: no cross-rail pair answers, so no
+// rail reaches another.
+func railsApartCause(dead []pairTimeout) model.RootCause {
+	involved := map[string]bool{}
+	for _, p := range dead {
+		involved[p.m.Src], involved[p.m.Dst] = true, true
 	}
+	return model.RootCause{
+		Code:       model.CauseRNICCrossRailUnreachable,
+		Summary:    "no RNIC of this host reaches another across subnets (isolated rails by design, or a ToR/fabric routing fault)",
+		RNICs:      sortedKeys(involved),
+		Confidence: model.ConfidenceLow,
+		Evidence:   fmt.Sprintf("all %d cross-rail pairs time out: %s", len(dead), joinLimited(pairEvidence(dead), 8)),
+	}
+}
 
+// reachGroups lists the RNICs of ids that are not down by the root of their
+// group. ids is sorted, so each group lists its RNICs in sorted order.
+func reachGroups(reach unionFind, ids []string, down map[string]bool) map[string][]string {
 	groups := map[string][]string{}
 	for _, id := range ids {
 		if !down[id] {
@@ -209,28 +266,54 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 			groups[r] = append(groups[r], id)
 		}
 	}
-	largest, unique := "", false
-	for r, g := range groups {
-		switch n := len(groups[largest]); {
-		case largest == "" || len(g) > n:
-			largest, unique = r, true
-		case len(g) == n:
-			unique = false
-		}
-	}
+	return groups
+}
 
+// crossRailRouteCauses names each dead pair whose RNICs share a group.
+func crossRailRouteCauses(reach unionFind, dead []pairTimeout) []model.RootCause {
 	var out []model.RootCause
+	for _, p := range dead {
+		if reach.find(p.m.Src) != reach.find(p.m.Dst) {
+			continue
+		}
+		out = append(out, model.RootCause{
+			Code:    model.CauseRNICCrossRailUnreachable,
+			Summary: "RNIC pair cannot reach each other across subnets while both reach other RNICs (route between their subnets suspected)",
+			RNICs:   []string{p.m.Src, p.m.Dst}, Confidence: model.ConfidenceMedium,
+			Evidence: p.evidence(),
+		})
+	}
+	return out
+}
+
+// cutGroupCauses names each group that a dead pair between two groups cuts
+// off, other than the unique largest group, with the dead pairs it has.
+func cutGroupCauses(reach unionFind, dead []pairTimeout, groups map[string][]string) []model.RootCause {
+	cut, order := cutPairs(reach, dead, groups)
+	var out []model.RootCause
+	for _, r := range order {
+		g := groups[r]
+		out = append(out, model.RootCause{
+			Code:       model.CauseRNICCrossRailUnreachable,
+			Summary:    "RNICs reach no RNIC outside their group across subnets while other RNICs do (cabled onto an isolated subnet suspected)",
+			RNICs:      g,
+			Confidence: model.ConfidenceMedium,
+			Evidence:   fmt.Sprintf("group [%s] times out to every RNIC outside it: %s", strings.Join(g, " "), joinLimited(pairEvidence(cut[r]), 8)),
+		})
+	}
+	return out
+}
+
+// cutPairs files each dead pair between two groups under both of its groups,
+// except the unique largest one, and returns the filed groups (by root)
+// ordered by their first RNIC.
+func cutPairs(reach unionFind, dead []pairTimeout, groups map[string][]string) (map[string][]pairTimeout, []string) {
+	largest, unique := largestGroup(groups)
 	cut := map[string][]pairTimeout{}
 	var order []string
 	for _, p := range dead {
 		ra, rb := reach.find(p.m.Src), reach.find(p.m.Dst)
 		if ra == rb {
-			out = append(out, model.RootCause{
-				Code:    model.CauseRNICCrossRailUnreachable,
-				Summary: "RNIC pair cannot reach each other across subnets while both reach other RNICs (route between their subnets suspected)",
-				RNICs:   []string{p.m.Src, p.m.Dst}, Confidence: model.ConfidenceMedium,
-				Evidence: p.evidence(),
-			})
 			continue
 		}
 		for _, r := range []string{ra, rb} {
@@ -245,21 +328,29 @@ func crossRailTimeouts(pairs []pairTimeout, ids []string, down map[string]bool) 
 	}
 	// Groups list their RNICs in sorted order, so the first one orders them.
 	sort.Slice(order, func(i, j int) bool { return groups[order[i]][0] < groups[order[j]][0] })
-	for _, r := range order {
-		g := groups[r]
-		ev := make([]string, 0, len(cut[r]))
-		for _, p := range cut[r] {
-			ev = append(ev, p.evidence())
+	return cut, order
+}
+
+// largestGroup is the root of the largest group, and whether no other group
+// is as large.
+func largestGroup(groups map[string][]string) (largest string, unique bool) {
+	for r, g := range groups {
+		switch n := len(groups[largest]); {
+		case largest == "" || len(g) > n:
+			largest, unique = r, true
+		case len(g) == n:
+			unique = false
 		}
-		out = append(out, model.RootCause{
-			Code:       model.CauseRNICCrossRailUnreachable,
-			Summary:    "RNICs reach no RNIC outside their group across subnets while other RNICs do (cabled onto an isolated subnet suspected)",
-			RNICs:      g,
-			Confidence: model.ConfidenceMedium,
-			Evidence:   fmt.Sprintf("group [%s] times out to every RNIC outside it: %s", strings.Join(g, " "), joinLimited(ev, 8)),
-		})
 	}
-	return out
+	return largest, unique
+}
+
+func pairEvidence(ps []pairTimeout) []string {
+	ev := make([]string, 0, len(ps))
+	for _, p := range ps {
+		ev = append(ev, p.evidence())
+	}
+	return ev
 }
 
 func sortedKeys(m map[string]bool) []string {
