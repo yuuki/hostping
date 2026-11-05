@@ -52,6 +52,9 @@ func crossMesh(groups ...[]string) []model.MutualMeasurement {
 	return out
 }
 
+// mapOrderRuns is how often a case that walks maps is run.
+const mapOrderRuns = 200
+
 // Which timeout causes diagnoseTimeouts (and crossRailTimeouts and
 // intermittentTimeouts under it) reports, in what order, with what evidence.
 func TestDiagnoseTimeoutsCauses(t *testing.T) {
@@ -294,6 +297,49 @@ func TestDiagnoseTimeoutsCauses(t *testing.T) {
 			want: []model.RootCause{route(r2, r0, "rnic2 ↔ rnic0 64/64 timed out")},
 		},
 		{
+			// The root of {rnic0, rnic3} is rnic3 and that of {rnic1, rnic2}
+			// is rnic2: ordered by root, or by last RNIC, the groups would
+			// swap.
+			name: "named groups are ordered by their first RNIC",
+			ms: []model.MutualMeasurement{
+				xrail(r0, r3, 64), xrail(r1, r2, 64),
+				xrail(r0, r1, lost), xrail(r0, r2, lost), xrail(r3, r1, lost), xrail(r3, r2, lost),
+			},
+			want: []model.RootCause{
+				isolated("group [rnic0 rnic3] times out to every RNIC outside it: rnic0 ↔ rnic1 not connected, "+
+					"rnic0 ↔ rnic2 not connected, rnic3 ↔ rnic1 not connected, rnic3 ↔ rnic2 not connected", r0, r3),
+				isolated("group [rnic1 rnic2] times out to every RNIC outside it: rnic0 ↔ rnic1 not connected, "+
+					"rnic0 ↔ rnic2 not connected, rnic3 ↔ rnic1 not connected, rnic3 ↔ rnic2 not connected", r1, r2),
+			},
+		},
+		{
+			// {rnic2} and {rnic3} tie, and {rnic0, rnic1} is larger than
+			// both: it stays the unique largest group whichever of the three
+			// is met first.
+			name: "a group larger than two tied groups is the unique largest",
+			ms: []model.MutualMeasurement{
+				xrail(r0, r1, 64), xrail(r0, r2, lost), xrail(r1, r3, lost), xrail(r2, r3, lost),
+			},
+			want: []model.RootCause{
+				isolated("group [rnic2] times out to every RNIC outside it: rnic0 ↔ rnic2 not connected, rnic2 ↔ rnic3 not connected", r2),
+				isolated("group [rnic3] times out to every RNIC outside it: rnic1 ↔ rnic3 not connected, rnic2 ↔ rnic3 not connected", r3),
+			},
+		},
+		{
+			// Ordered by size either way, [rnic1 rnic2] would not sit between
+			// the two single RNICs.
+			name: "named groups of different sizes are ordered by their first RNIC",
+			ms: []model.MutualMeasurement{
+				xrail(r4, r5, 64), xrail(r5, r6, 64), xrail(r1, r2, 64),
+				xrail(r0, r4, lost), xrail(r1, r5, lost), xrail(r3, r6, lost),
+			},
+			want: []model.RootCause{
+				isolated("group [rnic0] times out to every RNIC outside it: rnic0 ↔ rnic4 not connected", r0),
+				isolated("group [rnic1 rnic2] times out to every RNIC outside it: rnic1 ↔ rnic5 not connected", r1, r2),
+				isolated("group [rnic3] times out to every RNIC outside it: rnic3 ↔ rnic6 not connected", r3),
+			},
+		},
+		{
 			// The two groups are as large as each other, so both are named;
 			// rnic3 ↔ rnic5 is inside one of them and is no part of its cut.
 			name: "a dead pair inside a named group is a route, not part of the cut",
@@ -342,9 +388,13 @@ func TestDiagnoseTimeoutsCauses(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := diagnoseTimeouts(Input{Cfg: config.Defaults(), Mutual: c.ms})
-			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("diagnoseTimeouts:\n got  %+v\n want %+v", got, c.want)
+			// The rules walk maps; each run meets them in another order, so
+			// an outcome that depends on it fails within one go test.
+			for range mapOrderRuns {
+				got := diagnoseTimeouts(Input{Cfg: config.Defaults(), Mutual: c.ms})
+				if !reflect.DeepEqual(got, c.want) {
+					t.Fatalf("diagnoseTimeouts:\n got  %+v\n want %+v", got, c.want)
+				}
 			}
 		})
 	}
