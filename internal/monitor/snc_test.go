@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,204 @@ func TestMapSNCBoxesRefusesUnclearReadings(t *testing.T) {
 			t.Errorf("%s: %d counters opened, want 8", name, len(fds.all))
 		}
 		fds.check(t, nil)
+	}
+}
+
+// sncBoxEvents is the CAS read and write events of each box on die 0/0,
+// opened on cpu2, and of one box on die 0/1 that a measurement of 0/0 leaves
+// alone. A count is one 64-byte line.
+func sncBoxEvents(boxes ...string) []uncoreEvent {
+	var evs []uncoreEvent
+	for _, b := range append(boxes, "uncore_imc_9") {
+		die, cpu := "0/0", 2
+		if b == "uncore_imc_9" {
+			die, cpu = "0/1", 4
+		}
+		for _, name := range []string{"cas_count_read", "cas_count_write"} {
+			evs = append(evs, uncoreEvent{PMU: b, Name: name, CPU: cpu, Die: die, Group: die, BytesPerCount: 64})
+		}
+	}
+	return evs
+}
+
+// What mapSNCBoxes concludes from given CAS traffic, and that it closes every
+// counter it opened whatever the outcome.
+func TestMapSNCBoxesOutcomes(t *testing.T) {
+	const (
+		imc0, imc1, imc2, imc3 = "uncore_imc_0", "uncore_imc_1", "uncore_imc_2", "uncore_imc_3"
+		imc4, imc5             = "uncore_imc_4", "uncore_imc_5"
+	)
+	two, three := []string{imc0, imc1}, []string{imc0, imc1, imc2}
+	cases := []struct {
+		name  string
+		boxes []string
+		nodes []int
+		// moves is the MiB each node's touch adds to a box: three quarters
+		// on its read counter, one quarter on its write counter.
+		moves map[int]map[string]uint64
+		// unreadable is a counter (counterKey) that cannot be read at all;
+		// breaks is one that the given node's touch leaves unreadable, and
+		// touchFails the nodes whose touch fails.
+		unreadable string
+		breaks     map[int]string
+		touchFails map[int]bool
+		openFails  string
+		want       map[string]int
+		wantErr    string
+		opened     int
+		touched    []int
+	}{
+		{
+			name:  "interleaved boxes go to the node that moves them",
+			boxes: []string{imc0, imc1, imc2, imc3},
+			moves: map[int]map[string]uint64{
+				0: {imc0: 400, imc2: 400, imc1: 10, imc3: 10},
+				1: {imc1: 400, imc3: 400, imc0: 10, imc2: 10},
+			},
+			want:   map[string]int{imc0: 0, imc1: 1, imc2: 0, imc3: 1},
+			opened: 8, touched: []int{0, 1},
+		},
+		{
+			// As many boxes as nodes is enough.
+			name:  "a box moved exactly four times more by one node is clear",
+			boxes: two,
+			moves: map[int]map[string]uint64{0: {imc0: 400, imc1: 100}, 1: {imc0: 100, imc1: 400}},
+			want:  map[string]int{imc0: 0, imc1: 1}, opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:    "a runner-up touched before the leader keeps the box unclear",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 200}, 1: {imc0: 300, imc1: 400}},
+			wantErr: "no node stands out for uncore_imc_0", opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:    "a runner-up touched after the leader keeps the box unclear",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 300}, 1: {imc0: 200, imc1: 400}},
+			wantErr: "no node stands out for uncore_imc_0", opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:    "a box no touch moves stands out for no node",
+			boxes:   three,
+			moves:   map[int]map[string]uint64{0: {imc2: 400}, 1: {imc1: 400}},
+			wantErr: "no node stands out for uncore_imc_0", opened: 6, touched: []int{0, 1},
+		},
+		{
+			name:    "every unclear box is named, in order",
+			boxes:   []string{imc5, imc4, imc3, imc2, imc1, imc0},
+			moves:   map[int]map[string]uint64{0: {imc0: 400}, 1: {imc1: 400}},
+			wantErr: "no node stands out for uncore_imc_2, uncore_imc_3, uncore_imc_4, uncore_imc_5",
+			opened:  12, touched: []int{0, 1},
+		},
+		{
+			name:    "an unclear box is reported before a node's short share",
+			boxes:   three,
+			moves:   map[int]map[string]uint64{0: {imc0: 100}, 1: {imc1: 100}},
+			wantErr: "no node stands out for uncore_imc_2", opened: 6, touched: []int{0, 1},
+		},
+		{
+			name:    "a node whose boxes counted under a quarter of the touch is refused",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 200}, 1: {imc1: 400}},
+			wantErr: "node 0's boxes counted 200 MiB of the 1024 MiB touched", opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:    "every node's share is checked",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 400}, 1: {imc1: 255}},
+			wantErr: "node 1's boxes counted 255 MiB of the 1024 MiB touched", opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:  "a node's boxes add up to exactly a quarter",
+			boxes: three,
+			moves: map[int]map[string]uint64{0: {imc0: 128, imc2: 128}, 1: {imc1: 400}},
+			want:  map[string]int{imc0: 0, imc1: 1, imc2: 0}, opened: 6, touched: []int{0, 1},
+		},
+		{
+			name:  "fewer boxes than nodes are refused before any touch",
+			boxes: two, nodes: []int{0, 1, 2},
+			wantErr: "2 IMC boxes for 3 NUMA nodes", opened: 4,
+		},
+		{
+			name:  "a box that cannot be opened fails the measurement",
+			boxes: three, openFails: imc1,
+			wantErr: "uncore_imc_1/cas_count_read on cpu2: perf_event_open denied", opened: 2,
+		},
+		{
+			name:  "a counter unreadable before the first touch fails the measurement",
+			boxes: two, unreadable: imc1 + "/cas_count_write/0/0",
+			wantErr: "uncore_imc_1/cas_count_write: read failed", opened: 4,
+		},
+		{
+			name:    "a counter the touch leaves unreadable fails the measurement",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 400}, 1: {imc1: 400}},
+			breaks:  map[int]string{1: imc0 + "/cas_count_read/0/0"},
+			wantErr: "uncore_imc_0/cas_count_read: read failed", opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:  "a failed touch fails the measurement",
+			boxes: two, touchFails: map[int]bool{1: true},
+			moves:   map[int]map[string]uint64{0: {imc0: 400}, 1: {imc1: 400}},
+			wantErr: "touching node 1: mbind: EINVAL", opened: 4, touched: []int{0, 1},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evs := sncBoxEvents(c.boxes...)
+			table := map[string]perfReading{}
+			// Counters do not start at zero.
+			for _, ev := range evs {
+				table[counterKey(ev)] = perfReading{ok: counterKey(ev) != c.unreadable, count: 1000}
+			}
+			var touched []int
+			stubTouch(t, func(n int) error {
+				touched = append(touched, n)
+				for box, mib := range c.moves[n] {
+					lines := mib << 20 / 64
+					for name, share := range map[string]uint64{"cas_count_read": lines / 4 * 3, "cas_count_write": lines / 4} {
+						k := box + "/" + name + "/0/0"
+						r := table[k]
+						r.count += share
+						table[k] = r
+					}
+				}
+				if k, ok := c.breaks[n]; ok {
+					r := table[k]
+					r.ok = false
+					table[k] = r
+				}
+				if c.touchFails[n] {
+					return errors.New("mbind: EINVAL")
+				}
+				return nil
+			})
+			fds := &fakeFDs{}
+			nodes := c.nodes
+			if nodes == nil {
+				nodes = []int{0, 1}
+			}
+			got, err := mapSNCBoxes("0/0", nodes, evs, fds.opener(table, func(ev uncoreEvent) error {
+				if ev.PMU == c.openFails {
+					return errors.New("perf_event_open denied")
+				}
+				return nil
+			}))
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != c.wantErr || !reflect.DeepEqual(got, c.want) {
+				t.Errorf("mapSNCBoxes = %v, %q; want %v, %q", got, gotErr, c.want, c.wantErr)
+			}
+			if !reflect.DeepEqual(touched, c.touched) {
+				t.Errorf("touched nodes %v, want %v", touched, c.touched)
+			}
+			if len(fds.all) != c.opened {
+				t.Errorf("%d counters opened, want %d", len(fds.all), c.opened)
+			}
+			fds.check(t, nil)
+		})
 	}
 }
 
