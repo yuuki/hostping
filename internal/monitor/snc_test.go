@@ -176,9 +176,13 @@ func TestMapSNCBoxesRefusesUnclearReadings(t *testing.T) {
 	}
 }
 
+// sncBytesPerCount is what one count of each CAS event in sncBoxEvents
+// stands for. The two differ, so a reading that ignores BytesPerCount is off.
+var sncBytesPerCount = map[string]uint64{"cas_count_read": 64, "cas_count_write": 32}
+
 // sncBoxEvents is the CAS read and write events of each box on die 0/0,
 // opened on cpu2, and of one box on die 0/1 that a measurement of 0/0 leaves
-// alone. A count is one 64-byte line.
+// alone.
 func sncBoxEvents(boxes ...string) []uncoreEvent {
 	var evs []uncoreEvent
 	for _, b := range append(boxes, "uncore_imc_9") {
@@ -187,7 +191,7 @@ func sncBoxEvents(boxes ...string) []uncoreEvent {
 			die, cpu = "0/1", 4
 		}
 		for _, name := range []string{"cas_count_read", "cas_count_write"} {
-			evs = append(evs, uncoreEvent{PMU: b, Name: name, CPU: cpu, Die: die, Group: die, BytesPerCount: 64})
+			evs = append(evs, uncoreEvent{PMU: b, Name: name, CPU: cpu, Die: die, Group: die, BytesPerCount: float64(sncBytesPerCount[name])})
 		}
 	}
 	return evs
@@ -236,6 +240,12 @@ func TestMapSNCBoxesOutcomes(t *testing.T) {
 			boxes: two,
 			moves: map[int]map[string]uint64{0: {imc0: 400, imc1: 100}, 1: {imc0: 100, imc1: 400}},
 			want:  map[string]int{imc0: 0, imc1: 1}, opened: 4, touched: []int{0, 1},
+		},
+		{
+			name:    "a box moved just under four times more by one node is unclear",
+			boxes:   two,
+			moves:   map[int]map[string]uint64{0: {imc0: 399, imc1: 100}, 1: {imc0: 100, imc1: 400}},
+			wantErr: "no node stands out for uncore_imc_0", opened: 4, touched: []int{0, 1},
 		},
 		{
 			name:    "a runner-up touched before the leader keeps the box unclear",
@@ -287,6 +297,14 @@ func TestMapSNCBoxesOutcomes(t *testing.T) {
 			want:  map[string]int{imc0: 0, imc1: 1, imc2: 0}, opened: 6, touched: []int{0, 1},
 		},
 		{
+			// imc0's 300 MiB clear the quarter; its 250 MiB lead over the
+			// runner-up would not.
+			name:  "a node's share is what its touch moved, not the lead over the runner-up",
+			boxes: two,
+			moves: map[int]map[string]uint64{0: {imc0: 300, imc1: 10}, 1: {imc0: 50, imc1: 400}},
+			want:  map[string]int{imc0: 0, imc1: 1}, opened: 4, touched: []int{0, 1},
+		},
+		{
 			name:  "fewer boxes than nodes are refused before any touch",
 			boxes: two, nodes: []int{0, 1, 2},
 			wantErr: "2 IMC boxes for 3 NUMA nodes", opened: 4,
@@ -327,11 +345,11 @@ func TestMapSNCBoxesOutcomes(t *testing.T) {
 			stubTouch(t, func(n int) error {
 				touched = append(touched, n)
 				for box, mib := range c.moves[n] {
-					lines := mib << 20 / 64
-					for name, share := range map[string]uint64{"cas_count_read": lines / 4 * 3, "cas_count_write": lines / 4} {
+					quarter := mib << 20 / 4
+					for name, bytes := range map[string]uint64{"cas_count_read": 3 * quarter, "cas_count_write": quarter} {
 						k := box + "/" + name + "/0/0"
 						r := table[k]
-						r.count += share
+						r.count += bytes / sncBytesPerCount[name]
 						table[k] = r
 					}
 				}
