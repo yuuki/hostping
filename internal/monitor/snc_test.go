@@ -392,6 +392,50 @@ func TestMapSNCBoxesOutcomes(t *testing.T) {
 	}
 }
 
+// A panic in the opener or in a touch still closes every counter opened so
+// far, and is not swallowed.
+func TestMapSNCBoxesClosesWhatItOpenedOnPanic(t *testing.T) {
+	cases := []struct {
+		name        string
+		openPanics  string
+		touchPanics bool
+		opened      int
+	}{
+		{name: "opener", openPanics: "uncore_imc_1", opened: 2},
+		{name: "touch", touchPanics: true, opened: 4},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evs := sncBoxEvents("uncore_imc_0", "uncore_imc_1")
+			stubTouch(t, func(int) error {
+				if c.touchPanics {
+					panic("touch")
+				}
+				return nil
+			})
+			fds := &fakeFDs{}
+			open := fds.opener(map[string]perfReading{}, func(ev uncoreEvent) error {
+				if ev.PMU == c.openPanics {
+					panic("open")
+				}
+				return nil
+			})
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Error("the panic did not reach the caller")
+					}
+				}()
+				_, _ = mapSNCBoxes("0/0", []int{0, 1}, evs, open)
+			}()
+			if len(fds.all) != c.opened {
+				t.Errorf("%d counters opened, want %d", len(fds.all), c.opened)
+			}
+			fds.check(t, nil)
+		})
+	}
+}
+
 func TestUncoreReadsMemoryUnderSubNUMAClustering(t *testing.T) {
 	root := sncHost(t)
 	table := map[string]perfReading{}

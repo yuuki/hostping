@@ -94,10 +94,16 @@ type sncCounter struct {
 }
 
 // openSNCCounters opens die's events among evs and returns the counters with
-// the set of boxes they belong to. On an error it closes the counters it had
-// opened.
+// the set of boxes they belong to. When an open fails or panics, it closes
+// the counters it had opened.
 func openSNCCounters(die string, evs []uncoreEvent, open perfOpener) ([]sncCounter, map[string]bool, error) {
 	var ctrs []sncCounter
+	opened := false
+	defer func() {
+		if !opened {
+			closeSNCCounters(ctrs)
+		}
+	}()
 	boxes := map[string]bool{}
 	for _, ev := range evs {
 		if ev.Die != die {
@@ -105,12 +111,12 @@ func openSNCCounters(die string, evs []uncoreEvent, open perfOpener) ([]sncCount
 		}
 		c, err := open(ev)
 		if err != nil {
-			closeSNCCounters(ctrs)
 			return nil, nil, fmt.Errorf("%s/%s on cpu%d: %w", ev.PMU, ev.Name, ev.CPU, err)
 		}
 		ctrs = append(ctrs, sncCounter{ev, c})
 		boxes[ev.PMU] = true
 	}
+	opened = true
 	return ctrs, boxes, nil
 }
 
