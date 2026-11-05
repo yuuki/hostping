@@ -70,7 +70,7 @@ DOCKER_RUN = $(DOCKER) run --rm --platform $(DOCKER_PLATFORM) \
 	-w /src \
 	$(IMAGE)
 
-.PHONY: all zig test bin bin-linux-amd64 package dist release check-glibc tidy setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
+.PHONY: all zig test bin bin-linux-amd64 package dist release check-glibc tidy complexity setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
 
 all: test bin
 
@@ -198,3 +198,8 @@ release: dist
 
 tidy:
 	$(GO) mod tidy
+
+# Rank the most complex functions with cccc (https://github.com/moznion/cccc);
+# what is analyzed is configured in cccc.toml.
+complexity:
+	cccc --table --top-cognitive 20 .
