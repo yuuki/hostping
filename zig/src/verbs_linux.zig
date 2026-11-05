@@ -1295,6 +1295,73 @@ fn qpInError(qp: [*c]c.ibv_qp) bool {
     return attr.qp_state != c.IBV_QPS_RTS;
 }
 
+/// retireRecvError retires a receive that completed in error on ep. It returns
+/// whether ep can still be polled in this sweep: false once its QP has left
+/// RTS.
+fn retireRecvError(ep: *UdEp, wc: *const c.ibv_wc) bool {
+    if (qpInError(ep.qp)) {
+        // Its slots are flushed. udReset drains the rest and re-posts every
+        // slot.
+        ep.broken = true;
+        return false;
+    }
+    // The QP still works (e.g. an oversized datagram): only this slot was
+    // consumed. Resetting here would let anyone who can send one bad datagram
+    // discard the probes in flight.
+    udPostRecv(ep, @intCast(wc.wr_id)) catch {
+        ep.broken = true;
+    };
+    return true;
+}
+
+/// recvDatagram handles a receive that completed on ep, which is eps[idx],
+/// polled at t: it re-posts the slot, answers a request on the spot, and
+/// returns the arrival of a reply. qpns holds each endpoint's QP number; a
+/// datagram that udtag.acceptRequest/acceptReply rejects is dropped.
+fn recvDatagram(eps: []const ?*UdEp, qpns: []const ?u32, idx: usize, ep: *UdEp, wc: *const c.ibv_wc, t: u64) ?udtag.Arrival {
+    udPostRecv(ep, @intCast(wc.wr_id)) catch {
+        ep.broken = true;
+    };
+    if (wc.wc_flags & c.IBV_WC_WITH_IMM == 0) return null;
+    const tag = wc.unnamed_0.imm_data;
+    if (!udtag.isReply(tag)) {
+        if (udtag.acceptRequest(qpns, idx, tag, wc.src_qp)) {
+            // A failed reply is just a probe the requester will see time
+            // out.
+            _ = udSend(ep, eps[udtag.srcOf(tag)].?, udtag.reply(tag)) catch {};
+        }
+        return null;
+    }
+    if (!udtag.acceptReply(qpns, idx, tag, wc.src_qp)) return null;
+    return .{ .ep = udtag.srcOf(tag), .seq = udtag.seqOf(tag), .t_ns = t };
+}
+
+/// sweepEndpoint polls the receive CQ of ep, which is eps[idx], for up to
+/// ud_sweep_budget completions while out has room, and returns the new length
+/// of out.
+fn sweepEndpoint(eps: []const ?*UdEp, qpns: []const ?u32, idx: usize, ep: *UdEp, out: []udtag.Arrival, n0: usize) usize {
+    var n = n0;
+    var budget: u32 = ud_sweep_budget;
+    while (n < out.len and budget > 0) : (budget -= 1) {
+        var wc: c.ibv_wc = undefined;
+        const got = c.ibv_poll_cq(ep.recv_cq, 1, &wc);
+        if (got < 0) {
+            ep.broken = true;
+            break;
+        }
+        if (got == 0) break;
+        if (wc.status != c.IBV_WC_SUCCESS) {
+            if (!retireRecvError(ep, &wc)) break;
+            continue;
+        }
+        const t = timespecNs() catch 0;
+        const arrival = recvDatagram(eps, qpns, idx, ep, &wc, t) orelse continue;
+        out[n] = arrival;
+        n += 1;
+    }
+    return n;
+}
+
 /// sweep polls every endpoint's receive CQ once, without blocking. Requests
 /// are answered on the spot from the endpoint they reached; replies are
 /// appended to out. Returns the new length of out.
@@ -1318,47 +1385,7 @@ fn sweep(eps: []const ?*UdEp, out: []udtag.Arrival, n0: usize) usize {
         if (ep.broken) {
             udReset(ep) catch continue;
         }
-        var budget: u32 = ud_sweep_budget;
-        while (n < out.len and budget > 0) : (budget -= 1) {
-            var wc: c.ibv_wc = undefined;
-            const got = c.ibv_poll_cq(ep.recv_cq, 1, &wc);
-            if (got < 0) {
-                ep.broken = true;
-                break;
-            }
-            if (got == 0) break;
-            if (wc.status != c.IBV_WC_SUCCESS) {
-                if (qpInError(ep.qp)) {
-                    // Its slots are flushed. udReset drains the rest and
-                    // re-posts every slot.
-                    ep.broken = true;
-                    break;
-                }
-                // The QP still works (e.g. an oversized datagram): only this
-                // slot was consumed. Resetting here would let anyone who can
-                // send one bad datagram discard the probes in flight.
-                udPostRecv(ep, @intCast(wc.wr_id)) catch {
-                    ep.broken = true;
-                };
-                continue;
-            }
-            const t = timespecNs() catch 0;
-            udPostRecv(ep, @intCast(wc.wr_id)) catch {
-                ep.broken = true;
-            };
-            if (wc.wc_flags & c.IBV_WC_WITH_IMM == 0) continue;
-            const tag = wc.unnamed_0.imm_data;
-            if (!udtag.isReply(tag)) {
-                if (!udtag.acceptRequest(qpns[0..ne], idx, tag, wc.src_qp)) continue;
-                // A failed reply is just a probe the requester will see time
-                // out.
-                _ = udSend(ep, eps[udtag.srcOf(tag)].?, udtag.reply(tag)) catch {};
-                continue;
-            }
-            if (!udtag.acceptReply(qpns[0..ne], idx, tag, wc.src_qp)) continue;
-            out[n] = .{ .ep = udtag.srcOf(tag), .seq = udtag.seqOf(tag), .t_ns = t };
-            n += 1;
-        }
+        n = sweepEndpoint(eps, qpns[0..ne], idx, ep, out, n);
     }
     return n;
 }

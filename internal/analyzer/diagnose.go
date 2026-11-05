@@ -241,49 +241,75 @@ func unique(in []string) []string {
 }
 
 func suppressOverlaps(causes []model.RootCause, g topology.Graph) []model.RootCause {
-	rpSockets := map[int]bool{}
-	hasACS := false
-	rnicWide := map[string]bool{}
-	for _, c := range causes {
-		if c.Code == model.CauseCPURootPortFailure {
-			for _, id := range c.Links {
-				if l, ok := g.Link(id); ok {
-					rpSockets[l.Socket] = true
-				}
-			}
-		}
-		if c.Code == model.CauseACSEnabled || c.Code == model.CauseATSDisabled {
-			hasACS = true
-		}
-		switch c.Code {
-		case model.CauseRNICPCIeFailure, model.CauseRNICSlowStart, model.CauseRNICTxWindow, model.CauseOverloadedRNICPCIe:
-			for _, id := range c.RNICs {
-				rnicWide[id] = true
-			}
-		}
-	}
+	o := newCauseOverlaps(g, causes)
 	var out []model.RootCause
 	for _, c := range causes {
-		if c.Code == model.CauseMemoryChannelFailure {
-			skip := false
-			for _, id := range c.Links {
-				if l, ok := g.Link(id); ok && rpSockets[l.Socket] {
-					skip = true
-				}
-			}
-			if skip {
-				continue
-			}
+		if !o.suppresses(c) {
+			out = append(out, c)
 		}
-		if c.Code == model.CauseGPUPCIeFailure && hasACS {
-			continue
-		}
-		if c.Code == model.CauseGPUPCIeFailure && gpuUnderWideRNIC(g, c, rnicWide) {
-			continue
-		}
-		out = append(out, c)
 	}
 	return out
+}
+
+// causeOverlaps is what suppressOverlaps reads from every cause of the run
+// before it filters any: the sockets of the failed CPU root ports, whether
+// ACS or ATS misconfiguration was found, and the RNICs with an RNIC-wide
+// cause.
+type causeOverlaps struct {
+	g         topology.Graph
+	rpSockets map[int]bool
+	hasACS    bool
+	rnicWide  map[string]bool
+}
+
+func newCauseOverlaps(g topology.Graph, causes []model.RootCause) causeOverlaps {
+	o := causeOverlaps{g: g, rpSockets: map[int]bool{}, rnicWide: map[string]bool{}}
+	for _, c := range causes {
+		o.add(c)
+	}
+	return o
+}
+
+func (o *causeOverlaps) add(c model.RootCause) {
+	switch c.Code {
+	case model.CauseCPURootPortFailure:
+		for _, id := range c.Links {
+			if l, ok := o.g.Link(id); ok {
+				o.rpSockets[l.Socket] = true
+			}
+		}
+	case model.CauseACSEnabled, model.CauseATSDisabled:
+		o.hasACS = true
+	case model.CauseRNICPCIeFailure, model.CauseRNICSlowStart, model.CauseRNICTxWindow, model.CauseOverloadedRNICPCIe:
+		for _, id := range c.RNICs {
+			o.rnicWide[id] = true
+		}
+	}
+}
+
+// suppresses reports whether another cause of the run already explains c: a
+// memory channel failure on the socket of a failed CPU root port, or a GPU
+// PCIe failure alongside ACS/ATS misconfiguration or under an RNIC-wide
+// cause.
+func (o causeOverlaps) suppresses(c model.RootCause) bool {
+	switch c.Code {
+	case model.CauseMemoryChannelFailure:
+		return o.onRootPortSocket(c)
+	case model.CauseGPUPCIeFailure:
+		return o.hasACS || gpuUnderWideRNIC(o.g, c, o.rnicWide)
+	}
+	return false
+}
+
+// onRootPortSocket reports whether a link of c is on the socket of a failed
+// CPU root port.
+func (o causeOverlaps) onRootPortSocket(c model.RootCause) bool {
+	for _, id := range c.Links {
+		if l, ok := o.g.Link(id); ok && o.rpSockets[l.Socket] {
+			return true
+		}
+	}
+	return false
 }
 
 func gpuUnderWideRNIC(g topology.Graph, c model.RootCause, wide map[string]bool) bool {
@@ -610,65 +636,9 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 		if st[l.ID].Status != model.LinkAbnormal {
 			continue
 		}
-		localOK := true
-		crossGPUAbn := false
-		var trans []string
-		for _, n := range g.RNICs {
-			if n.RootPort == l.ID && !localHealthy[n.ID] {
-				localOK = false
-			}
-		}
-		memAbn := false
-		for _, ml := range g.LinksByKind(model.LinkKindMemory) {
-			if ml.Socket != l.Socket {
-				continue
-			}
-			if st[ml.ID].Status == model.LinkAbnormal {
-				memAbn = true
-			}
-		}
-		for _, p := range g.Paths {
-			if !p.ContainsLink(l.ID) {
-				continue
-			}
-			n, okN := g.RNIC(p.RNIC)
-			e, okE := g.Endpoint(p.Endpoint)
-			if !okN || !okE || e.Kind != model.EndpointGPU {
-				continue
-			}
-			if e.RootPort == n.RootPort || !localHealthy[p.RNIC] {
-				continue
-			}
-			aff := affinitiveRNIC(g, e)
-			am, okAff := pm[pathKey(aff, e.ID)]
-			if aff == "" || !okAff || am.Status != model.PathNormal {
-				continue
-			}
-			m, ok := pm[pathKey(p.RNIC, p.Endpoint)]
-			if ok && m.Status == model.PathAbnormal {
-				crossGPUAbn = true
-				trans = append(trans, pathKey(p.RNIC, p.Endpoint))
-			}
-		}
-		// #5: isolated RP, healthy P2P, and either a healthy dest GPU fails
-		// in transit or memory on the socket is still normal.
-		if !localOK || (!crossGPUAbn && memAbn) {
+		ev, ok := rootPortEvidence(g, pm, st, localHealthy, l)
+		if !ok {
 			continue
-		}
-		ev := fmt.Sprintf("P2P under %s is healthy; cross-root GPU paths fail (%s)", l.ID, joinLimited(trans, 4))
-		if !crossGPUAbn {
-			// Fired on the memory branch: no cross-root GPU path is the
-			// evidence, the abnormal paths through the root port are.
-			var failing []string
-			for _, p := range g.Paths {
-				if !p.ContainsLink(l.ID) {
-					continue
-				}
-				if m, ok := pm[pathKey(p.RNIC, p.Endpoint)]; ok && m.Status == model.PathAbnormal {
-					failing = append(failing, pathKey(p.RNIC, p.Endpoint))
-				}
-			}
-			ev = fmt.Sprintf("P2P under %s is healthy and no memory link on socket %d is abnormal; paths through it fail (%s)", l.ID, l.Socket, joinLimited(failing, 4))
 		}
 		out = append(out, model.RootCause{
 			Code: model.CauseCPURootPortFailure, Summary: "CPU root port bandwidth degraded for transit traffic",
@@ -677,6 +647,95 @@ func diagnoseRootPorts(g topology.Graph, paths []model.PathMeasurement, st map[s
 		})
 	}
 	return out
+}
+
+// rootPortEvidence decides #5 for l, an abnormal root port, and renders its
+// evidence: an isolated RP with healthy P2P under it, where either a healthy
+// dest GPU fails in transit or memory on the socket is still normal.
+func rootPortEvidence(g topology.Graph, pm map[string]model.PathMeasurement, st map[string]model.LinkState, localHealthy map[string]bool, l model.Link) (string, bool) {
+	if !rootPortP2PHealthy(g, localHealthy, l.ID) {
+		return "", false
+	}
+	if trans := crossRootGPUTransit(g, pm, localHealthy, l.ID); len(trans) > 0 {
+		return fmt.Sprintf("P2P under %s is healthy; cross-root GPU paths fail (%s)", l.ID, joinLimited(trans, 4)), true
+	}
+	if socketMemoryAbnormal(g, st, l.Socket) {
+		return "", false
+	}
+	// Fired on the memory branch: no cross-root GPU path is the evidence, the
+	// abnormal paths through the root port are.
+	failing := abnormalPathsThrough(g, pm, l.ID)
+	return fmt.Sprintf("P2P under %s is healthy and no memory link on socket %d is abnormal; paths through it fail (%s)", l.ID, l.Socket, joinLimited(failing, 4)), true
+}
+
+// rootPortP2PHealthy reports whether every RNIC under root port rp reads its
+// local GPUs healthy.
+func rootPortP2PHealthy(g topology.Graph, localHealthy map[string]bool, rp string) bool {
+	for _, n := range g.RNICs {
+		if n.RootPort == rp && !localHealthy[n.ID] {
+			return false
+		}
+	}
+	return true
+}
+
+// socketMemoryAbnormal reports whether a memory link on socket is abnormal.
+func socketMemoryAbnormal(g topology.Graph, st map[string]model.LinkState, socket int) bool {
+	for _, ml := range g.LinksByKind(model.LinkKindMemory) {
+		if ml.Socket == socket && st[ml.ID].Status == model.LinkAbnormal {
+			return true
+		}
+	}
+	return false
+}
+
+// crossRootGPUTransit lists, in g.Paths order, the paths through root port rp
+// that fail in transit (crossRootGPUFails).
+func crossRootGPUTransit(g topology.Graph, pm map[string]model.PathMeasurement, localHealthy map[string]bool, rp string) []string {
+	var trans []string
+	for _, p := range g.Paths {
+		if p.ContainsLink(rp) && crossRootGPUFails(g, pm, localHealthy, p) {
+			trans = append(trans, pathKey(p.RNIC, p.Endpoint))
+		}
+	}
+	return trans
+}
+
+// crossRootGPUFails reports whether p reaches a GPU under another root port
+// than its RNIC's and is abnormal, while both ends are healthy on their own:
+// the RNIC reads its local GPUs healthy and the GPU's affinitive path is
+// normal.
+func crossRootGPUFails(g topology.Graph, pm map[string]model.PathMeasurement, localHealthy map[string]bool, p model.Path) bool {
+	n, okN := g.RNIC(p.RNIC)
+	e, okE := g.Endpoint(p.Endpoint)
+	if !okN || !okE || e.Kind != model.EndpointGPU {
+		return false
+	}
+	if e.RootPort == n.RootPort || !localHealthy[p.RNIC] {
+		return false
+	}
+	aff := affinitiveRNIC(g, e)
+	am, okAff := pm[pathKey(aff, e.ID)]
+	if aff == "" || !okAff || am.Status != model.PathNormal {
+		return false
+	}
+	m, ok := pm[pathKey(p.RNIC, p.Endpoint)]
+	return ok && m.Status == model.PathAbnormal
+}
+
+// abnormalPathsThrough lists, in g.Paths order, the abnormal paths through
+// link id.
+func abnormalPathsThrough(g topology.Graph, pm map[string]model.PathMeasurement, id string) []string {
+	var failing []string
+	for _, p := range g.Paths {
+		if !p.ContainsLink(id) {
+			continue
+		}
+		if m, ok := pm[pathKey(p.RNIC, p.Endpoint)]; ok && m.Status == model.PathAbnormal {
+			failing = append(failing, pathKey(p.RNIC, p.Endpoint))
+		}
+	}
+	return failing
 }
 
 // localGPUsHealthyByRNIC is rnicLocalGPUsHealthy decided once per RNIC ID
