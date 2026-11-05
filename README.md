@@ -141,7 +141,7 @@ subcommands.
 | [docs/metrics.md](docs/metrics.md) | Exported metrics, report format, metrics endpoint |
 | [docs/operations.md](docs/operations.md) | Install layout, privileges, systemd, unknown data sources, alerting, upgrades, cost to workloads, baseline calibration |
 | [docs/runbook.md](docs/runbook.md) | What each diagnosis code and alert means and what to check first |
-| [docs/building.md](docs/building.md) | Toolchain, build targets and the code complexity gate |
+| [docs/building.md](docs/building.md) | Toolchain, build targets and code complexity tracking |
 | [docs/releasing.md](docs/releasing.md) | Release artifacts and how to cut a release |
 | [contrib/](contrib) | systemd unit, Prometheus alerting rules |
 
