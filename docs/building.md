@@ -69,3 +69,14 @@ sysfs and ibverbs access stays Linux-only and fails closed.
 
 Zig 0.14 and 0.15 do not link the build runner on current Apple Silicon macOS.
 Use the pinned Go 1.27.3 and Zig 0.17.0 from `mise.toml`.
+
+## Code complexity
+
+CI measures Cognitive and Cyclomatic Complexity with
+[cccc](https://github.com/moznion/cccc) on pull requests and pushes to `main`
+and writes the totals and the 20 most complex functions to the job summary
+(`.github/workflows/complexity.yml`). It only reports; no complexity
+threshold fails the build. `cccc.toml` sets what is analyzed: tests, generated
+code and vendored sources are excluded. To see the same ranking locally,
+install cccc (a [release binary](https://github.com/moznion/cccc/releases) or
+`cargo install cccc-cli`) and run `make complexity`.
