@@ -74,8 +74,7 @@ func TestDiagnoseRootPorts(t *testing.T) {
 		{
 			// rnic2's own P2P is abnormal and gpu2's affinitive path is
 			// uncertain, so neither rnic2->gpu0 nor rnic0->gpu2 (nor rnic1's
-			// paths) is transit evidence; rnic0->gpu3 is. An unmeasured path
-			// is none either.
+			// paths) is transit evidence; rnic0->gpu3 is.
 			name:  "transit counts only from healthy P2P to a healthy GPU",
 			links: map[string]model.LinkStatus{"rp.0": model.LinkAbnormal},
 			paths: map[string]model.PathStatus{
@@ -83,8 +82,26 @@ func TestDiagnoseRootPorts(t *testing.T) {
 				"rnic1->gpu2": unc, "rnic0->gpu2": abn, "rnic1->gpu0": abn,
 				"rnic0->gpu3": abn,
 			},
-			unmeasured: []string{"rnic3->gpu1"},
-			want:       []model.RootCause{rp("rp.0", "P2P under rp.0 is healthy; cross-root GPU paths fail (rnic0->gpu3)")},
+			want: []model.RootCause{rp("rp.0", "P2P under rp.0 is healthy; cross-root GPU paths fail (rnic0->gpu3)")},
+		},
+		{
+			// gpu3's affinitive path is unmeasured, so rnic0->gpu3 is no
+			// transit evidence, only a path through the root port that fails.
+			name:       "transit needs a measured affinitive path to the GPU",
+			links:      map[string]model.LinkStatus{"rp.0": model.LinkAbnormal},
+			paths:      map[string]model.PathStatus{"rnic0->gpu3": abn},
+			unmeasured: []string{"rnic1->gpu3"},
+			want: []model.RootCause{rp("rp.0",
+				"P2P under rp.0 is healthy and no memory link on socket 0 is abnormal; paths through it fail (rnic0->gpu3)")},
+		},
+		{
+			// An uncertain cross-root path is neither transit evidence nor a
+			// path through the root port that fails.
+			name:  "uncertain paths are no evidence",
+			links: map[string]model.LinkStatus{"rp.0": model.LinkAbnormal},
+			paths: map[string]model.PathStatus{"rnic1->gpu0": unc, "rnic0->mem0": abn},
+			want: []model.RootCause{rp("rp.0",
+				"P2P under rp.0 is healthy and no memory link on socket 0 is abnormal; paths through it fail (rnic0->mem0)")},
 		},
 		{
 			// mem.1 is on the other socket; rnic1->mem0 does not cross rp.0.
@@ -164,6 +181,13 @@ func TestSuppressOverlaps(t *testing.T) {
 			name: "links the graph does not know",
 			in:   []model.RootCause{rp("rp.9"), mem("mem.0"), rp("rp.2"), mem("mem.9", "mem.1"), mem("mem.9")},
 			want: []model.RootCause{rp("rp.9"), mem("mem.0"), rp("rp.2"), mem("mem.9")},
+		},
+		{
+			// An unknown link is on no socket, not on socket 0 where rp.0
+			// failed; a known one beside it still counts.
+			name: "unknown links under a failed socket-0 root port",
+			in:   []model.RootCause{rp("rp.0"), mem("mem.9"), mem("mem.9", "mem.0")},
+			want: []model.RootCause{rp("rp.0"), mem("mem.9")},
 		},
 		{
 			name: "ACS enabled suppresses every GPU PCIe failure",

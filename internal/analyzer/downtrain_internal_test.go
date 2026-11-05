@@ -50,10 +50,12 @@ func TestDiagnosePCIeDownTrainCauses(t *testing.T) {
 			already: []model.RootCause{{Code: model.CauseACSEnabled}},
 		},
 		{
-			// rnic1 is undersized, not down-trained; rnic2's line rate is
-			// unknown and judged at 200G; rnic3 already carries
-			// rnic_pcie_failure, which skips the down-train but not the
-			// advisory; mem0's entry is not an RNIC or GPU link.
+			// rnic0's uncertain path to gpu1 is no symptom; rnic1 is
+			// undersized, not down-trained, and an rnic_pcie_failure it
+			// already carries does not skip that advisory; rnic2's line rate
+			// is unknown and judged at 200G; rnic3 is down-trained but
+			// already carries rnic_pcie_failure, which skips it; mem0's entry
+			// is not an RNIC or GPU link.
 			name: "RNIC links in graph order",
 			graph: func(g *topology.Graph) {
 				g.RNICs[2].LineRate = 0
@@ -62,11 +64,16 @@ func TestDiagnosePCIeDownTrainCauses(t *testing.T) {
 				"rnic0": gen4Link(gen4, 8, 16),
 				"rnic1": gen4Link(gen4, 8, 8),
 				"rnic2": gen4Link(gen3, 8, 16),
-				"rnic3": gen4Link(gen4, 8, 8),
+				"rnic3": gen4Link(gen4, 8, 16),
 				"mem0":  gen4Link(gen4, 8, 16),
 			},
-			paths:   map[string]model.PathStatus{"rnic0->gpu0": abn, "rnic0->mem0": abn, "rnic3->gpu6": abn},
-			already: []model.RootCause{{Code: model.CauseRNICPCIeFailure, RNICs: []string{"rnic3"}}},
+			paths: map[string]model.PathStatus{
+				"rnic0->gpu0": abn, "rnic0->gpu1": model.PathUncertain, "rnic0->mem0": abn, "rnic3->gpu6": abn,
+			},
+			already: []model.RootCause{
+				{Code: model.CauseRNICPCIeFailure, RNICs: []string{"rnic1"}},
+				{Code: model.CauseRNICPCIeFailure, RNICs: []string{"rnic3"}},
+			},
 			want: []model.RootCause{
 				{
 					Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link down-trained",
@@ -86,12 +93,6 @@ func TestDiagnosePCIeDownTrainCauses(t *testing.T) {
 					Links: []string{"pcie.rnic2"}, RNICs: []string{"rnic2"}, Confidence: model.ConfidenceMedium,
 					Evidence: "PCIe 8.0 GT/s PCIe x8 (max 16.0 GT/s PCIe x16, port max 16.0 GT/s PCIe x16) trained below its speed and width capability; " +
 						"63 Gb/s cannot carry the 200 Gb/s line rate; no affinitive path abnormal yet (config space only)",
-				},
-				{
-					Code: model.CauseRNICPCIeUndersized, Summary: "RNIC PCIe link narrower than its line rate by design",
-					Links: []string{"pcie.rnic3"}, RNICs: []string{"rnic3"}, Confidence: model.ConfidenceLow,
-					Evidence: "PCIe 16.0 GT/s PCIe x8 (max 16.0 GT/s PCIe x8, port max 16.0 GT/s PCIe x16) trained at its maximum; " +
-						"126 Gb/s cannot carry the 200 Gb/s line rate; not a down-train",
 				},
 			},
 		},
