@@ -5,6 +5,7 @@ import (
 
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/pci"
+	"github.com/yuuki/hostping/internal/topology"
 )
 
 // diagnosePCIeDownTrain reads NSDI'23 failures #1 and #2 (RNIC / GPU PCIe
@@ -53,12 +54,7 @@ func diagnosePCIeDownTrain(in Input, paths []model.PathMeasurement, already []mo
 	g := in.Graph
 	// ACS/ATS already explains an abnormal GPU path; it is not a symptom of
 	// the GPU link then.
-	misconfig := false
-	for _, c := range already {
-		if c.Code == model.CauseACSEnabled || c.Code == model.CauseATSDisabled {
-			misconfig = true
-		}
-	}
+	misconfig := hasMisconfigCause(already)
 	var out []model.RootCause
 	for _, n := range g.RNICs {
 		cfg, ok := in.PCIe[n.ID]
@@ -68,57 +64,93 @@ func diagnosePCIeDownTrain(in Input, paths []model.PathMeasurement, already []mo
 		if c, ok := rnicPCIeUndersized(n, cfg); ok {
 			out = append(out, c)
 		}
-		if hasCauseFor(already, model.CauseRNICPCIeFailure, n.ID, "") {
-			continue
+		if c, ok := rnicPCIeDownTrain(g, pm, n, cfg, already); ok {
+			out = append(out, c)
 		}
-		speed, width := pci.DownTrain(cfg)
-		if (!speed && !width) || healthyPCIeSpeed(cfg, n.LineRate) {
-			continue
-		}
-		var abn []string
-		for _, e := range g.AffinitiveEndpoints(n.ID) {
-			if m, ok := pm[pathKey(n.ID, e.ID)]; ok && m.Status == model.PathAbnormal {
-				abn = append(abn, e.ID)
-			}
-		}
-		lineRate := n.LineRate
-		if lineRate == 0 {
-			lineRate = assumedLineRateBPS
-		}
-		ev := fmt.Sprintf("PCIe %s trained below its %s capability; %s cannot carry the %s line rate",
-			pcieEvidence(cfg), downTrainHalves(speed, width), gbpsString(pci.NegotiatedBPS(cfg)), gbpsString(lineRate))
-		out = append(out, model.RootCause{
-			Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link down-trained",
-			Links: []string{model.PCIeLinkID(n.ID)}, RNICs: []string{n.ID}, Endpoints: abn,
-			Confidence: downTrainConfidence(len(abn) > 0),
-			Evidence:   ev + symptomEvidence(len(abn)),
-		})
 	}
 	for _, e := range g.Endpoints {
-		if e.Kind != model.EndpointGPU {
-			continue
-		}
 		cfg, ok := in.PCIe[e.ID]
-		if !ok || hasCauseFor(already, model.CauseGPUPCIeFailure, "", e.ID) {
+		if !ok || e.Kind != model.EndpointGPU {
 			continue
 		}
-		if _, width := pci.DownTrain(cfg); !width {
-			continue
+		if c, ok := gpuPCIeDownTrain(g, pm, e, cfg, already, misconfig); ok {
+			out = append(out, c)
 		}
-		abn := 0
-		if aff := affinitiveRNIC(g, e); aff != "" && !misconfig {
-			if m, ok := pm[pathKey(aff, e.ID)]; ok && m.Status == model.PathAbnormal {
-				abn = 1
-			}
-		}
-		out = append(out, model.RootCause{
-			Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link down-trained",
-			Links: []string{model.PCIeLinkID(e.ID)}, Endpoints: []string{e.ID},
-			Confidence: downTrainConfidence(abn > 0),
-			Evidence:   fmt.Sprintf("PCIe %s trained below its width capability", pcieEvidence(cfg)) + symptomEvidence(abn),
-		})
 	}
 	return out
+}
+
+// hasMisconfigCause reports whether causes name ACS or ATS misconfiguration.
+func hasMisconfigCause(causes []model.RootCause) bool {
+	for _, c := range causes {
+		if c.Code == model.CauseACSEnabled || c.Code == model.CauseATSDisabled {
+			return true
+		}
+	}
+	return false
+}
+
+// rnicPCIeDownTrain is diagnosePCIeDownTrain's rnic_pcie_failure for RNIC n,
+// whose link reads cfg: it trained below its capability and no longer
+// carries the line rate, and no rnic_pcie_failure names n already.
+func rnicPCIeDownTrain(g topology.Graph, pm map[string]model.PathMeasurement, n model.RNIC, cfg model.PCIeConfig, already []model.RootCause) (model.RootCause, bool) {
+	if hasCauseFor(already, model.CauseRNICPCIeFailure, n.ID, "") {
+		return model.RootCause{}, false
+	}
+	speed, width := pci.DownTrain(cfg)
+	if (!speed && !width) || healthyPCIeSpeed(cfg, n.LineRate) {
+		return model.RootCause{}, false
+	}
+	abn := abnormalAffinitiveEndpoints(g, pm, n.ID)
+	lineRate := n.LineRate
+	if lineRate == 0 {
+		lineRate = assumedLineRateBPS
+	}
+	ev := fmt.Sprintf("PCIe %s trained below its %s capability; %s cannot carry the %s line rate",
+		pcieEvidence(cfg), downTrainHalves(speed, width), gbpsString(pci.NegotiatedBPS(cfg)), gbpsString(lineRate))
+	return model.RootCause{
+		Code: model.CauseRNICPCIeFailure, Summary: "RNIC PCIe link down-trained",
+		Links: []string{model.PCIeLinkID(n.ID)}, RNICs: []string{n.ID}, Endpoints: abn,
+		Confidence: downTrainConfidence(len(abn) > 0),
+		Evidence:   ev + symptomEvidence(len(abn)),
+	}, true
+}
+
+// abnormalAffinitiveEndpoints lists the affinitive endpoints of RNIC rnic
+// whose path from it is abnormal.
+func abnormalAffinitiveEndpoints(g topology.Graph, pm map[string]model.PathMeasurement, rnic string) []string {
+	var abn []string
+	for _, e := range g.AffinitiveEndpoints(rnic) {
+		if m, ok := pm[pathKey(rnic, e.ID)]; ok && m.Status == model.PathAbnormal {
+			abn = append(abn, e.ID)
+		}
+	}
+	return abn
+}
+
+// gpuPCIeDownTrain is diagnosePCIeDownTrain's gpu_pcie_failure for GPU e,
+// whose link reads cfg: it trained narrower than its width capability, and no
+// gpu_pcie_failure names e already. Its affinitive path is a symptom unless
+// misconfig (ACS/ATS) already explains it.
+func gpuPCIeDownTrain(g topology.Graph, pm map[string]model.PathMeasurement, e model.Endpoint, cfg model.PCIeConfig, already []model.RootCause, misconfig bool) (model.RootCause, bool) {
+	if hasCauseFor(already, model.CauseGPUPCIeFailure, "", e.ID) {
+		return model.RootCause{}, false
+	}
+	if _, width := pci.DownTrain(cfg); !width {
+		return model.RootCause{}, false
+	}
+	abn := 0
+	if aff := affinitiveRNIC(g, e); aff != "" && !misconfig {
+		if m, ok := pm[pathKey(aff, e.ID)]; ok && m.Status == model.PathAbnormal {
+			abn = 1
+		}
+	}
+	return model.RootCause{
+		Code: model.CauseGPUPCIeFailure, Summary: "GPU PCIe link down-trained",
+		Links: []string{model.PCIeLinkID(e.ID)}, Endpoints: []string{e.ID},
+		Confidence: downTrainConfidence(abn > 0),
+		Evidence:   fmt.Sprintf("PCIe %s trained below its width capability", pcieEvidence(cfg)) + symptomEvidence(abn),
+	}, true
 }
 
 // rnicPCIeUndersized is the advisory for an RNIC whose PCIe link trained at
