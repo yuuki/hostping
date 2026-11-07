@@ -1,0 +1,37 @@
+# golangci-lint v2 configuration. `make lint` and the CI lint job run the
+# version pinned in the Makefile (GOLANGCI_LINT_VERSION) and ci.yml.
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nolintlint
+    - noctx
+    - unconvert
+    - usestdlibvars
+  settings:
+    errorlint:
+      # Errors deliberately wrap only their sentinel with %w and format the
+      # underlying cause with %v ("%w: ...: %v"), so that errors.Is sees the
+      # classification the caller acts on (model.ErrProbe,
+      # mutual.ErrUnavailable, errUncoreUnsupported) and not the cause's own
+      # sentinels. Wrapping the cause would change what errors.Is reports.
+      errorf: false
+    gosec:
+      excludes: []
+  exclusions:
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck, noctx]
+
+formatters:
+  enable:
+    - gofmt

@@ -39,7 +39,7 @@ func (t *SimTransport) clock() uint64 {
 	if t.start.IsZero() {
 		t.start = time.Now()
 	}
-	return uint64(time.Since(t.start))
+	return uint64(time.Since(t.start)) //nolint:gosec // G115: the monotonic clock never runs backwards, so this is not negative
 }
 
 func (t *SimTransport) Send(src, dst int, seq uint32) (uint64, error) {

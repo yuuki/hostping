@@ -4,24 +4,82 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  # Weekly, so a new Go or Zig release, a new vulnerability or a longer fuzz
+  # run is caught without a push.
+  schedule:
+    - cron: '36 12 * * 1'
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Go toolchain comes from go.mod; keep mise.toml and the Dockerfile
+      # in sync with it, and the Zig version with both.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      # cgo links internal/zigprobe and the commands against the probe
+      # library and libibverbs even to type-check them.
+      - name: Install libibverbs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libibverbs-dev
+
+      - name: Build Zig probe library
+        run: make zig
+
+      # Linters and gofmt, as configured in .golangci.yml. Keep the version in
+      # sync with GOLANGCI_LINT_VERSION in the Makefile.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy
+        run: go mod tidy -diff
+
+      - name: zig fmt
+        run: zig fmt --check src
+        working-directory: zig
+
   test:
     name: Build and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-
-      # Keep the toolchain versions in sync with mise.toml and the Dockerfile.
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.27.3'
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
           cache: true
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
@@ -32,52 +90,87 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libibverbs-dev
 
-      # Needed before vet/staticcheck: cgo has to link internal/zigprobe.
-      - name: Build Zig probe library
-        run: make zig
+      # zig build test, then every Go package with the race detector. No test
+      # needs an RNIC: live probes fail closed, and --sim covers diagnosis.
+      - name: make test-race
+        run: make test-race
 
-      - name: gofmt
+      - name: make bin
+        run: make bin
+
+      - name: hostpingctl diagnose --sim
         run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt'd:"
-            echo "$unformatted"
-            exit 1
-          fi
+          bin/hostpingctl version
+          bin/hostpingctl diagnose --sim > /dev/null
 
-      - name: go vet
-        run: go vet ./...
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    # A scheduled run fuzzes each target for 3 minutes.
+    timeout-minutes: 75
+    env:
+      FUZZTIME: ${{ github.event_name == 'schedule' && '3m' || '15s' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # staticcheck v0.8.1 pins an x/tools that cannot read Go 1.27.2 export
-      # data (dominikh/go-tools#1832), so build it against a newer x/tools.
-      # Go back to `go run ...@<version>` once a fixed release is out.
-      - name: staticcheck
-        run: |
-          sc=$(mktemp -d)
-          (cd "$sc" && go mod init staticcheck-build &&
-            go get honnef.co/go/tools/cmd/staticcheck@v0.8.1 golang.org/x/tools@v0.51.0 &&
-            go build -o "$sc/staticcheck" honnef.co/go/tools/cmd/staticcheck)
-          "$sc/staticcheck" ./...
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
 
-      - name: zig fmt
-        run: zig fmt --check src
-        working-directory: zig
+      # The fuzz targets are in pure-Go packages: no Zig or libibverbs needed.
+      - name: make test-fuzz
+        run: make test-fuzz
 
-      - name: make test
-        run: make test
+      # A failing input is written under testdata/fuzz/; keep it so it can be
+      # added as a regression seed.
+      - name: Upload failing fuzz inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failures
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
+
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # actionlint is built with go run.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # actionlint, and zizmor through pipx. The token lets zizmor run its
+      # online audits too (known-vulnerable and impostor actions).
+      - name: make lint-actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make lint-actions
 
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: '1.27.3'
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
           cache: true
 
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
@@ -86,9 +179,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libibverbs-dev
 
-      - name: Build Zig probe library
-        run: make zig
-
-      # Pinned so a govulncheck release cannot change the gate underneath us.
+      # Pinned (GOVULNCHECK_VERSION in the Makefile) so a govulncheck release
+      # cannot change the gate underneath us. make vuln builds the probe
+      # library first.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+        run: make vuln

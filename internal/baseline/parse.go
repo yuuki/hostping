@@ -155,12 +155,12 @@ func entriesToOverrides(raw map[string]fileEntry) (map[model.Distance]PathBaseli
 }
 
 func entryToBaseline(e fileEntry) (PathBaseline, error) {
-	b, err := e.fileValues.parse()
+	b, err := e.parse()
 	if err != nil {
 		return PathBaseline{}, err
 	}
 	for i, fs := range e.SubClasses {
-		v, err := fs.fileValues.parse()
+		v, err := fs.parse()
 		if err != nil {
 			return PathBaseline{}, fmt.Errorf("sub_classes[%d] %q: %w", i, fs.Name, err)
 		}
@@ -345,7 +345,7 @@ func ParseBandwidth(s string) (uint64, error) {
 		return 0, fmt.Errorf("bandwidth %q: invalid number", s)
 	}
 	scaled := n * mult
-	if scaled > float64(math.MaxUint64) {
+	if scaled >= float64(math.MaxUint64) { // the float rounds up to 2^64, which uint64 cannot hold
 		return 0, fmt.Errorf("bandwidth %q: overflow", s)
 	}
 	return uint64(scaled), nil
@@ -376,7 +376,7 @@ func ParseLatency(s string) (uint64, error) {
 		return 0, fmt.Errorf("latency %q: invalid number", s)
 	}
 	scaled := n * mult
-	if scaled > float64(math.MaxUint64) {
+	if scaled >= float64(math.MaxUint64) { // the float rounds up to 2^64, which uint64 cannot hold
 		return 0, fmt.Errorf("latency %q: overflow", s)
 	}
 	return uint64(scaled), nil

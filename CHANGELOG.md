@@ -8,6 +8,30 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Fixed
+
+- `/metrics` no longer fails as a whole (HTTP 500 for every series), and an
+  OTLP export no longer fails, when an RDMA device or netdev name is not
+  valid UTF-8, which the kernel allows. `hostping_rnic_info` and
+  `hostping_topology_node_info` export such a name with each invalid byte
+  sequence replaced by U+FFFD; UTF-8 names are unchanged.
+- An `nvidia-smi` or `ethtool` call that leaves a child process holding its
+  output open (a wrapper script, say) no longer holds the poll loop past the
+  call's timeout: the output is read for at most one more second after the
+  command was killed or exited.
+- A negative `--timeout` or `--mutual-timeout` no longer wraps around to a
+  probe timeout of about 49.7 days: it means the default, as a
+  sub-millisecond one already did. One longer than 49.7 days is capped there.
+- A `--baseline`, `--baseline-file`, `--mem-channel-capacity` or
+  `--upi-capacity` value of 2^64 or more is rejected as out of range; one
+  that rounds to 2^64 was read as 2^63.
+- An `nvidia-smi dmon` PCIe throughput that reads as `NaN` or `Inf` is
+  unreadable (the GPU's PCIe link stays unknown) instead of becoming a `NaN`
+  or infinite utilization.
+- A sysfs CPU list naming more than 2^20 CPUs is rejected as malformed
+  instead of being expanded without bound; one ending at the largest integer
+  never finished.
+
 ## [0.2.4] - 2026-11-05
 
 ### Changed

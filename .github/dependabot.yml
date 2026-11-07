@@ -1,0 +1,46 @@
+# Version updates arrive monthly, grouped into one PR per ecosystem, and only
+# after a release has been public for a week (compromised releases are usually
+# pulled within days). Security updates are not delayed by this schedule.
+#
+# Not covered: the Zig version (mise.toml, the Dockerfile's ZIG_VERSION and
+# checksums, mlugg/setup-zig's `version:` in the workflows) and nfpm
+# (NFPM_TOOL_VERSION in the Dockerfile). Bump those by hand, together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directories: ["/"]
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # The dev and release build container (golang base image). Keep the Go
+  # version in step with go.mod and mise.toml when this bumps it.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+    groups:
+      docker:
+        patterns: ["*"]

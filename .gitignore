@@ -12,3 +12,4 @@ core
 /vendor/
 coverage.out
 /dist/
+bench.txt

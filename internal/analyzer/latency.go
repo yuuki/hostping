@@ -190,7 +190,7 @@ func latencyClassOf(classes map[string]pathClass, m model.PathMeasurement) (latC
 // siblingLatencyHigh is the sibling verdict: lat exceeds the sibling
 // reference ref by more than cfg.AbnormalTh and by at least cfg.LatencyFloor.
 func siblingLatencyHigh(lat, ref uint64, cfg config.Config) bool {
-	return latencyHigh(lat, ref, cfg.AbnormalTh) && lat >= ref+uint64(max(cfg.LatencyFloor, 0).Nanoseconds())
+	return latencyHigh(lat, ref, cfg.AbnormalTh) && lat >= ref+uint64(max(cfg.LatencyFloor, 0).Nanoseconds()) //nolint:gosec // G115: max(_, 0) is not negative, and --latency-floor is at most 10µs
 }
 
 // latencyKey keys a path in the latency streaks, as "rnic->endpoint".

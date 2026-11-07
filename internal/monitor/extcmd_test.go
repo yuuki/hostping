@@ -266,3 +266,18 @@ func TestRunWithTimeoutKillsHungCommand(t *testing.T) {
 		t.Fatalf("runWithTimeout took %v; the child was not killed", d)
 	}
 }
+
+// A sampler that leaves a child behind holding its stdout (a wrapper script
+// around the real nvidia-smi, say) must still be bounded: killing the
+// sampler does not close the pipe, so without a WaitDelay the read waits for
+// the orphan to exit.
+func TestRunWithTimeoutBoundsChildHoldingStdout(t *testing.T) {
+	start := time.Now()
+	_, err := runWithTimeout(context.Background(), 50*time.Millisecond, "sh", "-c", "sleep 8 & wait")
+	if err == nil {
+		t.Fatal("want error from the timed-out command")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("runWithTimeout took %v; it waited for the orphan holding stdout", d)
+	}
+}

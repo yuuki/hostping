@@ -196,7 +196,7 @@ func (p pollutedProber) Loopback(ctx context.Context, n model.RNIC, ep model.End
 
 func hasFlapping(rep model.Report) bool {
 	for _, c := range rep.Causes {
-		if strings.HasSuffix(string(c.Code), "_flapping") {
+		if strings.HasSuffix(c.Code, "_flapping") {
 			return true
 		}
 	}

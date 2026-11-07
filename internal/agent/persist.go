@@ -142,7 +142,7 @@ func (p *persister) shutdown(eng *engine.Engine, pending *idleHold) {
 
 // setStreaks copies s into the file content.
 func (p *persister) setStreaks(s engine.Streaks) {
-	p.cur.Gray = maps.Clone(map[string]int(s.Gray))
+	p.cur.Gray = maps.Clone(s.Gray)
 	p.cur.SlowMR = maps.Clone(s.SlowMR)
 	p.cur.Latency = maps.Clone(s.Latency)
 }

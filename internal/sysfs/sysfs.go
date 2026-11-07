@@ -74,6 +74,12 @@ func ReadUint64OK(path string) (uint64, bool) {
 	return n, true
 }
 
+// maxCPUListLen bounds how many CPUs ParseCPUList returns, far above any
+// kernel's NR_CPUS (at most 8192): every CPU of a range is materialized, so an
+// unbounded range would allocate without limit, and one ending at MaxInt
+// never ended.
+const maxCPUListLen = 1 << 20
+
 // ParseCPUList parses a kernel CPU list such as "0,56" or "0-3,8". An empty
 // (or blank) list is nil with no error.
 func ParseCPUList(s string) ([]int, error) {
@@ -93,6 +99,9 @@ func ParseCPUList(s string) ([]int, error) {
 			if h, err = strconv.Atoi(hi); err != nil || h < l {
 				return nil, fmt.Errorf("cpu list %q", s)
 			}
+		}
+		if h >= maxCPUListLen || len(out)+(h-l+1) > maxCPUListLen {
+			return nil, fmt.Errorf("cpu list %q: more than %d CPUs", s, maxCPUListLen)
 		}
 		for c := l; c <= h; c++ {
 			out = append(out, c)

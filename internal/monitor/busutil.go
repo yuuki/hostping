@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -164,7 +165,9 @@ func parseDmonPCIe(out string, bdfByIndex map[string]string) map[string]float64 
 		}
 		rx, err1 := strconv.ParseFloat(f[rxCol], 64)
 		tx, err2 := strconv.ParseFloat(f[txCol], 64)
-		if err1 != nil || err2 != nil || rx < 0 || tx < 0 {
+		// ParseFloat also reads "NaN" and "Inf", which a rate is not; a NaN
+		// passes a < 0 test and would make the link's utilization NaN.
+		if err1 != nil || err2 != nil || !finiteRate(rx) || !finiteRate(tx) {
 			continue
 		}
 		// dmon prints MB/s.
@@ -175,6 +178,9 @@ func parseDmonPCIe(out string, bdfByIndex map[string]string) map[string]float64 
 	}
 	return res
 }
+
+// finiteRate reports whether v is a throughput: finite and not negative.
+func finiteRate(v float64) bool { return v >= 0 && !math.IsInf(v, 1) }
 
 // gpuPCIeCache rate-limits the nvidia-smi dmon pass like gpuUtilCache. It is
 // only consulted right before an engine run (Sampler.Bus), so a cached value
