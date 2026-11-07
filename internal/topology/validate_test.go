@@ -153,7 +153,7 @@ func TestLoadFileRejectsBrokenJSON(t *testing.T) {
 func TestRNICsCarryPCIeHopCapacity(t *testing.T) {
 	for _, n := range Fig2().RNICs {
 		if n.PCIeCapBPS != pcieGen4x16 {
-			t.Fatalf("Fig.2 %s: pcie capacity %d, want %d", n.ID, n.PCIeCapBPS, uint64(pcieGen4x16))
+			t.Fatalf("Fig.2 %s: pcie capacity %d, want %d", n.ID, n.PCIeCapBPS, pcieGen4x16)
 		}
 	}
 

@@ -416,7 +416,10 @@ identifiers:
 A label discovery could not fill reads `unknown` (`fabric` for an RNIC with no
 RoCEv2 GID, `link_layer` on a `--topology-file` that omits it). A memory
 endpoint has no `pcie_bdf` or `root_port`. An RNIC dropped by `--exclude-rnic`
-has no `hostping_rnic_info` series. The values are fixed at start-up. A
+has no `hostping_rnic_info` series. The kernel accepts device and netdev names
+that are not valid UTF-8, which Prometheus and OTLP labels must be: such a
+name is exported with each invalid byte sequence replaced by U+FFFD (`�`).
+The values are fixed at start-up. A
 renumbering after a device change shows up after the daemon restarts, together
 with every other series.
 

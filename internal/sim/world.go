@@ -485,7 +485,7 @@ func (w *World) Mutual(src, dst string) model.MutualMeasurement {
 		ppm = w.DropPPM[dst]
 	}
 	if ppm > 0 {
-		lost := uint32(uint64(m.Sent) * uint64(ppm) / 1_000_000)
+		lost := uint32(uint64(m.Sent) * uint64(ppm) / 1_000_000) //nolint:gosec // G115: the simulated faults drop at most 25% (DropPPM <= 1e6), so lost <= Sent
 		if lost >= m.Sent {
 			lost = m.Sent
 		}

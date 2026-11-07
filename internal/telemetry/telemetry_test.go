@@ -13,7 +13,7 @@ import (
 
 // newTestTelemetry wires the instruments to a manual reader so a test can
 // collect them without the Prometheus listener or an OTLP exporter.
-func newTestTelemetry(t *testing.T) (*Telemetry, *sdkmetric.ManualReader) {
+func newTestTelemetry(t testing.TB) (*Telemetry, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))

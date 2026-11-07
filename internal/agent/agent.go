@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -67,15 +68,31 @@ func loadGraph(cfg config.Config) (topology.Graph, error) {
 	return g, nil
 }
 
+// probeTimeoutMS is d in whole milliseconds for the probe library's uint32
+// timeout fields, saturated instead of wrapped: --timeout and --mutual-timeout
+// are plain durations, and a negative one, or one past the field's 49.7 days,
+// used to wrap around to an arbitrary bound. A negative d is 0, which the
+// prober reads as its default, as it already did for a sub-millisecond one.
+func probeTimeoutMS(d time.Duration) uint32 {
+	ms := d.Milliseconds()
+	switch {
+	case ms <= 0:
+		return 0
+	case ms > math.MaxUint32:
+		return math.MaxUint32
+	}
+	return uint32(ms)
+}
+
 func NewProber(cfg config.Config, g topology.Graph) (engine.Prober, *sim.World, error) {
 	p := zigprobe.Prober{
 		Graph:           g,
 		Iters:           cfg.Iters,
 		MutualIters:     cfg.MutualIters,
 		MemWarmup:       cfg.MemWarmup,
-		TimeoutMS:       uint32(cfg.Timeout.Milliseconds()),
+		TimeoutMS:       probeTimeoutMS(cfg.Timeout),
 		MutualMsg:       cfg.MutualMsgBytes,
-		MutualTimeoutMS: uint32(cfg.MutualTimeout.Milliseconds()),
+		MutualTimeoutMS: probeTimeoutMS(cfg.MutualTimeout),
 		MutualTransport: cfg.MutualTransport,
 	}
 	if cfg.Sim {

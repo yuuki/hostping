@@ -208,7 +208,7 @@ func TestLoadFileRejectsYAMLAndUnknownFields(t *testing.T) {
 		t.Fatal("YAML must be rejected")
 	}
 	typo := filepath.Join(dir, "typo.json")
-	if err := os.WriteFile(typo, []byte(`{"local_mem":{"bandwith":"270Gbps","latency":"1400ns"}}`), 0o644); err != nil {
+	if err := os.WriteFile(typo, []byte(`{"local_mem":{"bandwith":"270Gbps","latency":"1400ns"}}`), 0o644); err != nil { //nolint:misspell // the misspelt key is the point of the test
 		t.Fatal(err)
 	}
 	if _, err := LoadFile(typo); err == nil {

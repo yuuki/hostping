@@ -1,0 +1,69 @@
+name: Security
+
+# CodeQL code scanning. govulncheck runs in ci.yml (job govulncheck) and
+# zizmor audits the workflows there (job Workflows).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '36 13 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # upload the analysis to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Go only: CodeQL has no Zig extractor, and the C in the repository
+          # is headers for the cgo boundary.
+          - language: go
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      # go build ./... links internal/zigprobe and the commands against the
+      # Zig probe library and libibverbs, so autobuild cannot build them.
+      - name: Install libibverbs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libibverbs-dev
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build
+        run: |
+          make zig
+          go build ./...
+
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}

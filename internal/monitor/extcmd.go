@@ -22,6 +22,10 @@ const (
 	// counters for a netdev.
 	ethtoolRetryMin = 30 * time.Second
 	ethtoolRetryMax = 5 * time.Minute
+	// execWaitDelay bounds how long a sampler's stdout is read after the
+	// sampler was killed or exited: a child it left behind (a wrapper script
+	// around the real binary) can hold the pipe open long after.
+	execWaitDelay = time.Second
 )
 
 // runner runs an external sampler binary. Injectable for tests.
@@ -32,11 +36,13 @@ func runBounded(ctx context.Context, name string, args ...string) ([]byte, error
 }
 
 // runWithTimeout kills the child once the timeout elapses; a hung binary must
-// not stall the poll loop.
+// not stall the poll loop, and neither may a process it left holding stdout.
 func runWithTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, name, args...).Output()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = execWaitDelay
+	return cmd.Output()
 }
 
 // rateLimited serves the last result of an external query for every after it

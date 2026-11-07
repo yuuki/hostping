@@ -59,7 +59,7 @@ func (w *pairWindow) measurement(lossIsDrop bool) (model.MutualMeasurement, bool
 	if len(w.obs) == 0 {
 		return model.MutualMeasurement{}, false
 	}
-	m := model.MutualMeasurement{Src: w.src, Dst: w.dst, Sent: uint32(len(w.obs)), CrossRail: w.crossRail}
+	m := model.MutualMeasurement{Src: w.src, Dst: w.dst, Sent: uint32(len(w.obs)), CrossRail: w.crossRail} //nolint:gosec // G115: a window holds at most --mutual-window / --mutual-interval probes
 	var rtts []uint64
 	conn := 0
 	for _, o := range w.obs {

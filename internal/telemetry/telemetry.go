@@ -2,12 +2,14 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -199,7 +201,7 @@ func Start(ctx context.Context, cfg config.Config, build buildinfo.Info, opts ..
 		return fail(err)
 	}
 	if cfg.PrometheusAddr != "" {
-		if err := t.serveMetrics(cfg, o.live); err != nil {
+		if err := t.serveMetrics(ctx, cfg, o.live); err != nil {
 			return fail(err)
 		}
 	}
@@ -252,11 +254,11 @@ func newProvider(ctx context.Context, cfg config.Config) (*sdkmetric.MeterProvid
 // checked here rather than in the serving goroutine: a bad file or an address
 // that cannot be bound fails the start (and systemd restarts the unit)
 // instead of leaving a daemon running without its main output.
-func (t *Telemetry) serveMetrics(cfg config.Config, live *Liveness) error {
+func (t *Telemetry) serveMetrics(ctx context.Context, cfg config.Config, live *Liveness) error {
 	if err := web.Validate(cfg.MetricsWebConfig); err != nil {
 		return fmt.Errorf("--metrics-web-config %s: %w", cfg.MetricsWebConfig, err)
 	}
-	ln, err := net.Listen("tcp", cfg.PrometheusAddr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.PrometheusAddr)
 	if err != nil {
 		return fmt.Errorf("metrics listener: %w", err)
 	}
@@ -265,7 +267,7 @@ func (t *Telemetry) serveMetrics(cfg config.Config, live *Liveness) error {
 	webConfig := cfg.MetricsWebConfig
 	go func() {
 		err := web.Serve(ln, t.http, &web.FlagConfig{WebConfigFile: &webConfig}, logging.Slog())
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error().Err(err).Str("address", cfg.PrometheusAddr).Msg("hostping metrics server")
 		}
 	}()
@@ -582,11 +584,18 @@ func (t *Telemetry) constGauge(name, desc string, sets []attribute.Set) error {
 // fill, as topology discovery spells an unknown fabric.
 const unknownAttr = "unknown"
 
+// orUnknown is v as the value of an identity attribute: unknownAttr when
+// discovery could not fill it, and otherwise v with every byte sequence that
+// is not UTF-8 replaced by U+FFFD. Device and netdev names come from sysfs,
+// and the kernel accepts any bytes but '/' in them (a netdev name also not
+// ':' or whitespace). A label value that is not UTF-8 makes client_golang
+// fail the whole /metrics scrape, and an OTLP export with one fails as a
+// whole, since protobuf strings must be UTF-8. A UTF-8 v is returned as is.
 func orUnknown(v string) string {
 	if v == "" {
 		return unknownAttr
 	}
-	return v
+	return strings.ToValidUTF8(v, "\uFFFD")
 }
 
 // rnicInfoAttrs is the attribute set of one hostping.rnic.info series. rnic is
@@ -823,7 +832,7 @@ func (t *Telemetry) RecordRates(ctx context.Context, rates []model.RNICRates) {
 			t.pause.Record(ctx, r.PauseDurationRatio, attrs)
 		}
 		if r.DropKnown {
-			t.drops.Record(ctx, int64(r.DropDelta), attrs)
+			t.drops.Record(ctx, int64(r.DropDelta), attrs) //nolint:gosec // G115: one poll's drop delta never reaches 2^63
 		}
 	}
 }

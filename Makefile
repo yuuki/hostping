@@ -1,6 +1,27 @@
 ZIG ?= zig
 GO ?= go
 PREFIX ?= .
+
+# Tool versions. CI pins the same versions (.github/workflows); bump together.
+GOLANGCI_LINT_VERSION ?= v2.15.0
+GOVULNCHECK_VERSION   ?= v1.9.0
+ACTIONLINT_VERSION    ?= v1.7.12
+ZIZMOR_VERSION        ?= 1.32.0
+FUZZTIME              ?= 30s
+# Extra go test flags for each fuzz target, e.g. FUZZFLAGS=-parallel=2.
+FUZZFLAGS             ?=
+BENCH_COUNT           ?= 6
+
+# go run builds a tool with the toolchain its own go.mod names, which can be
+# older than this module's and then refuses to load it: build the tools with
+# the toolchain this module selects (go.mod), as `go env GOVERSION` reports it.
+GO_TOOLCHAIN = $(shell $(GO) env GOVERSION)
+GOLANGCI_LINT ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+ACTIONLINT ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+GOVULNCHECK ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+# uvx or pipx (preinstalled on GitHub-hosted runners) runs the pinned zizmor.
+ZIZMOR ?= $(if $(shell command -v uvx 2>/dev/null),uvx zizmor@$(ZIZMOR_VERSION),pipx run zizmor==$(ZIZMOR_VERSION))
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 LIBEXT := dylib
@@ -70,7 +91,7 @@ DOCKER_RUN = $(DOCKER) run --rm --platform $(DOCKER_PLATFORM) \
 	-w /src \
 	$(IMAGE)
 
-.PHONY: all zig test bin bin-linux-amd64 package dist release check-glibc tidy complexity setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
+.PHONY: all zig test test-race test-fuzz bench check lint fmt lint-actions vuln bin bin-linux-amd64 package dist release check-glibc tidy complexity setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
 
 all: test bin
 
@@ -120,6 +141,54 @@ endif
 test: zig
 	cd zig && $(ZIG) build test
 	CGO_ENABLED=1 $(GO) test ./...
+
+# make test with the race detector on the Go tests.
+test-race: zig
+	cd zig && $(ZIG) build test
+	CGO_ENABLED=1 $(GO) test -race ./...
+
+# Every Go fuzz target for FUZZTIME each (make test-fuzz FUZZTIME=3m). The
+# targets live in pure-Go packages, so this needs no probe library; plain
+# make test runs their seed corpora.
+test-fuzz:
+	@set -e; for dir in $$(grep -rl --include='*_test.go' '^func Fuzz' . | xargs -n1 dirname | sort -u); do \
+		for f in $$($(GO) test -list '^Fuzz' $$dir | grep '^Fuzz'); do \
+			echo "== $$dir $$f"; \
+			$(GO) test -run='^$$' -fuzz="^$$f\$$" -fuzztime=$(FUZZTIME) $(FUZZFLAGS) $$dir; \
+		done; \
+	done
+
+# Benchmarks in benchstat format, also written to bench.txt.
+bench: zig
+	CGO_ENABLED=1 $(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCH_COUNT) ./... | tee bench.txt
+
+# The local pre-PR gate: what the required CI jobs check, without root, RDMA
+# hardware or Docker.
+check: lint lint-actions test-race
+
+# golangci-lint (linters and gofmt, .golangci.yml), go vet, go.mod tidiness
+# and zig fmt. The probe library is built first: cgo links internal/zigprobe
+# and the commands even to type-check them.
+lint: zig
+	$(GOLANGCI_LINT) run
+	CGO_ENABLED=1 $(GO) vet ./...
+	$(GO) mod tidy -diff
+	cd zig && $(ZIG) fmt --check src
+
+# Apply the formatting make lint checks.
+fmt:
+	$(GOLANGCI_LINT) fmt
+	cd zig && $(ZIG) fmt src
+
+# Lint (actionlint) and audit (zizmor) the GitHub Actions workflows. Without
+# GH_TOKEN zizmor runs its offline audits only; CI sets it.
+lint-actions:
+	$(ACTIONLINT)
+	$(ZIZMOR) $(if $(GH_TOKEN),,--offline) .
+
+# Known vulnerabilities reachable from the code.
+vuln: zig
+	$(GOVULNCHECK) ./...
 
 bin: zig
 	mkdir -p bin

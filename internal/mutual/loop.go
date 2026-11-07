@@ -157,7 +157,7 @@ func New(cfg Config, rnics []model.RNIC, pairs [][2]model.RNIC, t Transport, opt
 		pending: map[uint32]probe{},
 		// Start the sequence space at a random point so the tags of the
 		// first probes cannot be guessed from the agent's start time.
-		seq: rand.Uint32() & seqMask,
+		seq: rand.Uint32() & seqMask, //nolint:gosec // G404: not a secret (the receiver checks the sender's QP); math/rand/v2's source is seeded from the OS, which is all this needs
 	}
 	for _, o := range opts {
 		o(l)

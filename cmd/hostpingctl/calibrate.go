@@ -91,7 +91,7 @@ func writeOut(path string, data []byte, stdout io.Writer) error {
 		_, err := stdout.Write(data)
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // G306: a baseline file holds no secret, and the daemon reading it may run as another user
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

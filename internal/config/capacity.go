@@ -111,7 +111,7 @@ func ParseCapacity(s string) (uint64, error) {
 	if bytes {
 		v *= 8
 	}
-	if v < 1 || v > float64(math.MaxUint64) {
+	if v < 1 || v >= float64(math.MaxUint64) { // the float rounds up to 2^64, which uint64 cannot hold
 		return 0, fmt.Errorf("capacity %q: out of range", s)
 	}
 	return uint64(v), nil
