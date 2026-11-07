@@ -114,6 +114,9 @@ const (
 	// countersUnread: a PFC pause or drop counter could not be read on the
 	// RNICs the detail names (comma-separated).
 	countersUnread unknownIdleKind = iota
+	// bytesReset: the byte counters of the RNICs the detail names
+	// (comma-separated) were reset, so their throughput is unknown.
+	bytesReset
 	// cpuUnread: the CPU load could not be read.
 	cpuUnread
 	// gpuOrRateUnread: GPU utilization or an RNIC line rate is unknown.
@@ -121,10 +124,14 @@ const (
 )
 
 // unknownIdleCause classifies why d could not classify the host, and names
-// the RNICs for countersUnread. Each caller words its own message.
+// the RNICs for countersUnread and bytesReset. Each caller words its own
+// message.
 func unknownIdleCause(d monitor.Decision) (unknownIdleKind, string) {
 	if len(d.UnreadCounters) > 0 {
 		return countersUnread, strings.Join(d.UnreadCounters, ",")
+	}
+	if len(d.BytesReset) > 0 {
+		return bytesReset, strings.Join(d.BytesReset, ",")
 	}
 	if d.CPUUnknown {
 		return cpuUnread, ""
@@ -139,6 +146,8 @@ func idleVerdict(d monitor.Decision) (bool, string) {
 		switch kind, rnics := unknownIdleCause(d); kind {
 		case countersUnread:
 			return false, "idle state could not be read (PFC pause or drop counters unread on " + rnics + ")"
+		case bytesReset:
+			return false, "idle state could not be read (RNIC byte counters reset on " + rnics + ")"
 		case cpuUnread:
 			return false, "idle state could not be read (CPU load unknown)"
 		default:

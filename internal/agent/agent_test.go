@@ -80,6 +80,15 @@ func TestRequestFromDecisionRefusesUnknownIdle(t *testing.T) {
 	if ok || !strings.Contains(why, "rnic3") {
 		t.Fatalf("idle hold must not confirm on unread counters: ok=%v why=%q", ok, why)
 	}
+	reset := monitor.Decision{Ready: true, BytesReset: []string{"rnic1", "rnic3"}}
+	_, err = requestFromDecision(reset)
+	if err == nil || !strings.Contains(err.Error(), "RNIC byte counters reset on rnic1,rnic3") {
+		t.Fatalf("reset byte counters must refuse and say so: %v", err)
+	}
+	ok, why = idleVerdict(reset)
+	if ok || !strings.Contains(why, "RNIC byte counters reset on rnic1,rnic3") {
+		t.Fatalf("idle hold must not confirm on reset byte counters: ok=%v why=%q", ok, why)
+	}
 }
 
 func TestRequestFromDecisionBusyAndIdle(t *testing.T) {

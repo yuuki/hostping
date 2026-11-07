@@ -10,6 +10,14 @@ becomes the notes of its GitHub Release (see
 
 ### Fixed
 
+- An RNIC byte or PFC pause-duration counter that is reset between two polls
+  (a driver reload, counters cleared by hand) is no longer read as a wrap, a
+  delta of nearly 2^32 or 2^64 that made the RNIC busy, discarded a held
+  idle-mode run or started a PFC run. As for drop counters, a decrease is a
+  wrap only from the upper half of the 32- or 64-bit range. A reset leaves
+  that poll's throughput or pause ratio unknown: the RNIC is neither idle nor
+  busy on it, so the host is not idle, and the gauge is not written. The new
+  reading is the next baseline.
 - `/metrics` no longer fails as a whole (HTTP 500 for every series), and an
   OTLP export no longer fails, when an RDMA device or netdev name is not
   valid UTF-8, which the kernel allows. `hostping_rnic_info` and

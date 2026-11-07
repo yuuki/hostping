@@ -34,9 +34,15 @@ type RNICRates struct {
 	DropDelta          uint64
 	// PauseKnown and DropKnown are set when PauseDurationRatio and DropDelta
 	// were measured on this poll. Otherwise the value is 0 but means nothing:
-	// the counter has no source, could not be read, or is being re-baselined.
+	// the counter has no source, could not be read, or is being re-baselined,
+	// which includes a pause counter that was reset.
 	PauseKnown bool
 	DropKnown  bool
+	// BytesReset is set when an RX or TX byte counter went down between the
+	// two samples without wrapping: it was reset (a driver reload, counters
+	// cleared by hand). ThroughputBPS is then 0 but means nothing, and the
+	// RNIC is neither idle nor busy on this poll.
+	BytesReset bool
 	Idle       bool
 }
 

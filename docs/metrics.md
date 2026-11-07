@@ -72,7 +72,7 @@ agent from one with nothing to report. See
 | `hostping.mutual.rtt` | gauge (µs) | `src`, `dst` | RNIC↔RNIC round trip, p50 of the last run's burst, or over the probe window when `--mutual-interval` is set (the JSON `mutual` entry marks a cross-rail pair with `cross_rail`) |
 | `hostping.mutual.loss_ratio` | gauge | `src`, `dst` | Simulated drop loss; on the live probe, whose losses are timeouts, 0, or 1 on a pair that cannot be reached |
 | `hostping.mutual.timeout_ratio` | gauge (0–1) | `src`, `dst` | Probes with no reply within `--mutual-timeout`, `1 − recv/sent` (over `--mutual-window` when the schedule is on); 1 on a pair that cannot be reached, absent when no probe count was reported |
-| `hostping.rnic.throughput` | gauge (bit/s) | `rnic` | Peak(rx,tx) bps |
+| `hostping.rnic.throughput` | gauge (bit/s) | `rnic` | Peak(rx,tx) bps; no sample on a poll whose byte counters were reset (see [Triggers](design.md#triggers)) |
 | `hostping.cpu.busy` | gauge (0–1) | `numa`, `socket` | CPU busy fraction of the NUMA node over the poll interval, from `/proc/stat`; no sample when unread (see [CPU load](design.md#cpu-load-on-an-idle-host)) |
 | `hostping.rnic.pause_duration_ratio` | gauge (ratio) | `rnic` | Tx pause seconds per second; `--pfc-high` (default 0.03 = 30 ms/s) compares against it |
 | `hostping.rnic.drop.delta` | gauge | `rnic` | Packet drop counter delta over the last poll |

@@ -29,14 +29,8 @@ func dropDeltas(prev, cur map[string]uint64) map[string]uint64 {
 // anything else is a reset, which yields no delta and becomes the new
 // baseline. Read as a wrap, a reset from 100 to 0 was a delta of 2^32.
 func dropCounterDelta(cur, prev uint64) uint64 {
-	switch {
-	case cur >= prev:
-		return cur - prev
-	case prev >= 1<<31 && prev <= 0xffffffff && cur <= 0xffffffff,
-		prev >= 1<<63:
-		return counterDelta(cur, prev)
-	}
-	return 0
+	d, _ := counterDelta(cur, prev)
+	return d
 }
 
 // sameCounters reports whether two samples read the same drop counters. One
