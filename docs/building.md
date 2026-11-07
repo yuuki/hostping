@@ -93,5 +93,6 @@ or Docker: golangci-lint (with gofmt and staticcheck), `go vet`,
 `go mod tidy -diff`, `zig fmt --check`, actionlint and zizmor on the
 workflows, and `zig build test` plus the Go tests with `-race`. `make test-fuzz`,
 `make bench` and `make vuln` run the fuzz targets, the benchmarks and
-govulncheck. [AGENTS.md](../AGENTS.md) lists every command and when it is
-needed; [CONTRIBUTING.md](../CONTRIBUTING.md) is the short version.
+govulncheck; `make help` lists every target. [AGENTS.md](../AGENTS.md) says
+which extra checks a change needs; [CONTRIBUTING.md](../CONTRIBUTING.md) is
+the short version.

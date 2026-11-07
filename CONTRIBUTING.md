@@ -27,14 +27,13 @@ the dev container). Before opening a pull request:
 make check     # golangci-lint, go vet, zig fmt, workflow lint, tests with -race
 ```
 
-[AGENTS.md](AGENTS.md) lists every command (fuzzing, benchmarks,
-vulnerability scan, golden files) and when each is needed.
+[AGENTS.md](AGENTS.md) lists the extra checks a change needs (fuzzing,
+golden files, hardware runs).
 
 ## Commit messages
 
-Short scoped subjects such as `fix: ...`, `feat(telemetry): ...`,
-`refactor(analyzer): ...`, `test(monitor): ...`, `ci: ...` or `docs: ...`,
-with the reason for the change in the body.
+Commits, branches and pull request titles follow the Git conventions in
+[AGENTS.md](AGENTS.md#git-conventions).
 
 ## License
 
