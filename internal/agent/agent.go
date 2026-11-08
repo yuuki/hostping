@@ -568,6 +568,8 @@ func requestFromDecision(dec monitor.Decision) (engine.RunRequest, error) {
 		switch kind, rnics := unknownIdleCause(dec); kind {
 		case countersUnread:
 			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (PFC pause or drop counters unread on %s); refusing to assume idle", rnics)
+		case bytesReset:
+			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (RNIC byte counters reset on %s); refusing to assume idle", rnics)
 		case cpuUnread:
 			return engine.RunRequest{}, fmt.Errorf("cannot classify idle vs busy (CPU load unread); refusing to assume idle")
 		default:

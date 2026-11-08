@@ -820,14 +820,17 @@ func (t *Telemetry) recordVerbs(ctx context.Context, p model.PathMeasurement) {
 
 // RecordRates writes one monitor poll to the RNIC counter instruments. A pause
 // ratio or drop delta that was not measured on this poll (no source, unread,
-// or re-baselining) is not recorded: an absent series, never a healthy 0.
+// or re-baselining) is not recorded: an absent series, never a healthy 0. Nor
+// is the throughput of a poll whose byte counters were reset.
 func (t *Telemetry) RecordRates(ctx context.Context, rates []model.RNICRates) {
 	if t == nil {
 		return
 	}
 	for _, r := range rates {
 		attrs := metric.WithAttributes(attribute.String("rnic", r.Device))
-		t.thp.Record(ctx, float64(r.ThroughputBPS), attrs)
+		if !r.BytesReset {
+			t.thp.Record(ctx, float64(r.ThroughputBPS), attrs)
+		}
 		if r.PauseKnown {
 			t.pause.Record(ctx, r.PauseDurationRatio, attrs)
 		}

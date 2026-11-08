@@ -118,6 +118,8 @@ Those two triggers leave one case unmeasured: a loaded host that raises neither 
 
 The run is an ordinary busy run. RNICs at or above `Thplow` are the loaded set, as for the PFC trigger and a manual `diagnose`. It probes only the §4.3 reduced set (every memory node plus the affinitive GPUs), and the paths of loaded RNICs that have a sibling are probed `--busy-samples` times each. The overhead per interval is therefore that reduced set × `--busy-samples` on loaded RNICs. Pick `D` so that this stays a small fraction of service time (minutes, not seconds). A host whose RNIC line rate is unread gets no periodic run, since its loaded set cannot be classified.
 
+An RNIC byte or PFC pause-duration counter that decreases follows the rule of the drop counters ([below](#drops-that-do-not-count-against-the-rnic)): it wrapped only from the upper half of its 32- or 64-bit range, and was reset otherwise (a driver reload, counters cleared by hand). A reset is read neither as a delta of nearly 2^32 or 2^64, which made the RNIC busy or started a PFC run, nor as 0. On that poll the RNIC's throughput (and with it its PCIe hop utilization) or pause ratio is unknown, and the new reading is the next baseline. Unknown throughput leaves the RNIC neither idle nor busy: the host is not idle on that poll, and no periodic run starts, since the loaded set cannot be classified. A reset pause counter is unread, like one that could not be read. The reset is logged, and the next poll measures again.
+
 Every run costs the workload some bandwidth or GPU memory; see [Cost to running workloads](operations.md#cost-to-running-workloads).
 
 ### Drops that do not count against the RNIC
@@ -165,7 +167,7 @@ read.
 
 ## Live runs
 
-A live (non-`--sim`) `diagnose` / `--once` warms RNIC counters and GPU util, then runs idle or busy mode from that sample. It refuses to run if GPU util, RNIC line rate, the CPU load, or a PFC pause or drop counter that has a source is unread (unknown ≠ idle).
+A live (non-`--sim`) `diagnose` / `--once` warms RNIC counters and GPU util, then runs idle or busy mode from that sample. It refuses to run if GPU util, RNIC line rate, an RNIC's throughput (its byte counters were just reset), the CPU load, or a PFC pause or drop counter that has a source is unread (unknown ≠ idle).
 
 ### GPU endpoints
 

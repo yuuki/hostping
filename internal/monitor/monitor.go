@@ -44,15 +44,22 @@ type Decision struct {
 	// measured and that --drop-ignore-rnic does not name.
 	DropDelta map[string]model.RNICDrops
 	Ready     bool
-	// IdleKnown is false when GPU util, an RNIC line rate, or a PFC pause or
-	// drop counter that has a source could not be read. Live one-shot
-	// diagnose must refuse rather than assume idle.
+	// IdleKnown is false when GPU util, an RNIC line rate, an RNIC's
+	// throughput (BytesReset), or a PFC pause or drop counter that has a
+	// source could not be read. Live one-shot diagnose must refuse rather
+	// than assume idle.
 	IdleKnown bool
 	// UnreadCounters lists, in graph order, the RNICs whose PFC pause or drop
 	// counter has a source but was not measured on this poll: it could not
-	// be read, or it is being re-baselined after reading again. Each clears
-	// HostIdle and IdleKnown.
+	// be read, it is being re-baselined after reading again, or (a pause
+	// counter) it was reset. Each clears HostIdle and IdleKnown.
 	UnreadCounters []string
+	// BytesReset lists, in graph order, the RNICs whose RX or TX byte counter
+	// was reset since the last poll (a driver reload, counters cleared by
+	// hand), so their throughput on this poll is unknown: they are neither
+	// idle nor busy, and this sample is the next baseline. Each clears
+	// HostIdle and IdleKnown, and no --busy-interval run starts.
+	BytesReset []string
 	// Util is the RNIC PCIe hop utilization (pcie.<rnic>) over this poll's
 	// counter delta, for every RNIC whose hop capacity was read. Because the
 	// first poll after a run is re-baselined, a decision that starts a run
@@ -252,14 +259,15 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	cpu, cpuKnown := m.pollCPU(ctx)
 
 	// Every RNIC of a ready poll went through rnicRates, so the flag covers
-	// every line rate; a poll that is not ready knows nothing anyway.
-	lineRateKnown := !rn.host.lineRateUnknown
+	// every line rate and byte counter; a poll that is not ready knows
+	// nothing anyway.
+	classified := rn.host.classified()
 	// Unknown CPU load, like an unknown GPU, is not idle: the paths through
 	// a loaded package would be judged against idle baselines.
 	cpuUnknown := rn.ready && !cpuKnown
 	hostIdle := rn.ready && rn.host.idle() && gpuIdle && !gpuUnknown && !cpuUnknown
-	idleKnown := rn.ready && !gpuUnknown && lineRateKnown && len(rn.unread) == 0 && !cpuUnknown
-	d := Decision{BusyRNICs: rn.busy, Rates: rn.rates, HostIdle: hostIdle, DropDelta: rn.drops, Ready: rn.ready, IdleKnown: idleKnown, UnreadCounters: rn.unread, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
+	idleKnown := rn.ready && !gpuUnknown && classified && len(rn.unread) == 0 && !cpuUnknown
+	d := Decision{BusyRNICs: rn.busy, Rates: rn.rates, HostIdle: hostIdle, DropDelta: rn.drops, Ready: rn.ready, IdleKnown: idleKnown, UnreadCounters: rn.unread, BytesReset: rn.bytesReset, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
 	if !rn.ready {
 		return d, nil
 	}
@@ -268,7 +276,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		d.Util = rn.util
 	}
 	d.Run, d.Trigger, d.Mode = m.cad.decide(now, &m.Cfg, triggerInputs{
-		pfc: rn.host.pfc, drop: rn.host.drop, hostIdle: hostIdle, lineRateKnown: lineRateKnown, alarm: m.MutualAlarm,
+		pfc: rn.host.pfc, drop: rn.host.drop, hostIdle: hostIdle, classified: classified, alarm: m.MutualAlarm,
 	})
 	return d, nil
 }
@@ -280,6 +288,9 @@ type rnicPoll struct {
 	drops  map[string]model.RNICDrops
 	util   map[string]float64
 	unread []string
+	// bytesReset lists the RNICs whose byte counters were reset since the
+	// last poll (Decision.BytesReset).
+	bytesReset []string
 	// host is what every RNIC's delta says about the host, merged.
 	host rnicFlags
 	// ready is false when an RNIC had no previous sample to take a delta
@@ -311,7 +322,13 @@ func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error
 			continue
 		}
 		r, f, deltas := rnicRates(n, p, c, m.sampleInterval(p, c), pauseState, dropState, m.Cfg.ThpLowFraction, m.Cfg.PFCHigh)
-		if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
+		if f.bytesReset || f.pauseReset {
+			m.logResets(n.ID, f)
+		}
+		if f.bytesReset {
+			// No throughput, so no hop utilization either: unknown, not 0.
+			rn.bytesReset = append(rn.bytesReset, n.ID)
+		} else if u, ok := rnicUtil(m.Graph, n.ID, r.ThroughputBPS); ok {
 			rn.util[model.PCIeLinkID(n.ID)] = u
 		}
 		if r.DropKnown && !m.Cfg.DropIgnored(n) {
@@ -336,6 +353,21 @@ func (m *Monitor) pollRNICs(ctx context.Context, now time.Time) (rnicPoll, error
 		rn.rates = append(rn.rates, r)
 	}
 	return rn, nil
+}
+
+// logResets logs, once per reset, the byte or PFC pause-duration counters of
+// one RNIC that went down between two polls without wrapping.
+func (m *Monitor) logResets(id string, f rnicFlags) {
+	var what string
+	switch {
+	case f.bytesReset && f.pauseReset:
+		what = "byte and PFC pause-duration counters"
+	case f.bytesReset:
+		what = "byte counters"
+	default:
+		what = "PFC pause-duration counter"
+	}
+	m.logf("hostping: %s %s went down (a reset, not a wrap); unknown on this poll, so the host is not idle on it; re-baselined", id, what)
 }
 
 // sampleInterval is the seconds between two counter samples of one RNIC, or
@@ -365,6 +397,14 @@ type rnicFlags struct {
 	// lineRateUnknown: the RNIC cannot be classified against Thplow.
 	// Unknown ≠ idle.
 	lineRateUnknown bool
+	// bytesReset: an RX or TX byte counter was reset since the last sample,
+	// so the RNIC's throughput is unknown and it cannot be classified
+	// against Thplow on this poll. Unknown ≠ idle, and ≠ busy.
+	bytesReset bool
+	// pauseReset: the PFC pause-duration counter was reset since the last
+	// sample. It also sets unread, which is what the verdicts read; this
+	// only names it in the log.
+	pauseReset bool
 }
 
 func (f *rnicFlags) merge(o rnicFlags) {
@@ -373,11 +413,17 @@ func (f *rnicFlags) merge(o rnicFlags) {
 	f.drop = f.drop || o.drop
 	f.unread = f.unread || o.unread
 	f.lineRateUnknown = f.lineRateUnknown || o.lineRateUnknown
+	f.bytesReset = f.bytesReset || o.bytesReset
+	f.pauseReset = f.pauseReset || o.pauseReset
 }
 
+// classified reports whether every RNIC can be classified against Thplow:
+// its line rate is known and its throughput was measured.
+func (f rnicFlags) classified() bool { return !f.lineRateUnknown && !f.bytesReset }
+
 // idle reports whether nothing the RNICs show keeps the host from an idle
-// run: no load, every counter read, every line rate known.
-func (f rnicFlags) idle() bool { return !f.busy && !f.unread && !f.lineRateUnknown }
+// run: no load, every counter read, every RNIC classified.
+func (f rnicFlags) idle() bool { return !f.busy && !f.unread && f.classified() }
 
 // rnicRates is one RNIC's rates over the dt seconds between prev and cur,
 // with the pause and drop counter states trackSource gave this poll, the
@@ -386,23 +432,34 @@ func (f rnicFlags) idle() bool { return !f.busy && !f.unread && !f.lineRateUnkno
 func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, drop sourceState, thpLowFraction, pfcHigh float64) (model.RNICRates, rnicFlags, map[string]uint64) {
 	r := model.RNICRates{Device: n.ID}
 	var f rnicFlags
-	dRx := counterDelta(cur.RxBytes, prev.RxBytes)
-	dTx := counterDelta(cur.TxBytes, prev.TxBytes)
-	// Unidirectional line-rate comparison (NSDI Thplow).
-	peak := dRx
-	if dTx > peak {
-		peak = dTx
+	dRx, rxOK := counterDelta(cur.RxBytes, prev.RxBytes)
+	dTx, txOK := counterDelta(cur.TxBytes, prev.TxBytes)
+	if rxOK && txOK {
+		// Unidirectional line-rate comparison (NSDI Thplow).
+		peak := dRx
+		if dTx > peak {
+			peak = dTx
+		}
+		r.ThroughputBPS = uint64((float64(peak) * 8) / dt)
+	} else {
+		// A reset byte counter says nothing about this interval's traffic:
+		// not 2^32 or 2^64 bytes (a busy RNIC), not 0 (an idle one).
+		r.BytesReset = true
+		f.bytesReset = true
 	}
-	r.ThroughputBPS = uint64((float64(peak) * 8) / dt)
 	// A counter is differenced only against a sample read from the same
 	// sources: one that could not be read, or that reads again after a
 	// gap, yields no ratio or delta on this poll, never one against 0.
 	if pause == sourceKnown && prev.PauseSources == cur.PauseSources {
-		r.PauseKnown = true
-		dPause := counterDelta(cur.TxPauseDurationUs, prev.TxPauseDurationUs)
-		r.PauseDurationRatio = (float64(dPause) / 1e6) / dt
-		if r.PauseDurationRatio < 0 || math.IsNaN(r.PauseDurationRatio) {
-			r.PauseDurationRatio = 0
+		// A reset leaves the ratio unmeasured, like a re-baseline.
+		if dPause, ok := counterDelta(cur.TxPauseDurationUs, prev.TxPauseDurationUs); ok {
+			r.PauseKnown = true
+			r.PauseDurationRatio = (float64(dPause) / 1e6) / dt
+			if r.PauseDurationRatio < 0 || math.IsNaN(r.PauseDurationRatio) {
+				r.PauseDurationRatio = 0
+			}
+		} else {
+			f.pauseReset = true
 		}
 	}
 	var drops map[string]uint64
@@ -417,11 +474,15 @@ func rnicRates(n model.RNIC, prev, cur model.RNICCounters, dt float64, pause, dr
 		// Unread ≠ no pauses and no drops; do not start a full-mesh run.
 		f.unread = true
 	}
-	if n.LineRate == 0 {
+	switch {
+	case n.LineRate == 0:
 		// Unknown line rate ≠ idle; do not start a full-mesh run.
 		r.Idle = false
 		f.lineRateUnknown = true
-	} else {
+	case r.BytesReset:
+		// Unknown throughput is neither idle nor busy (f.bytesReset).
+		r.Idle = false
+	default:
 		thLow := uint64(float64(n.LineRate) * thpLowFraction)
 		r.Idle = r.ThroughputBPS < thLow
 		if !r.Idle {
@@ -485,8 +546,9 @@ type triggerInputs struct {
 	pfc, drop bool
 	// hostIdle is the Decision's HostIdle.
 	hostIdle bool
-	// lineRateKnown: every RNIC can be classified against Thplow.
-	lineRateKnown bool
+	// classified: every RNIC can be classified against Thplow (its line
+	// rate is known and its byte counters were not reset).
+	classified bool
 	// alarm is Monitor.MutualAlarm, nil without a mutual probe.
 	alarm func() bool
 }
@@ -558,9 +620,9 @@ func (c *cadence) decide(now time.Time, cfg *config.Config, in triggerInputs) (r
 // alarmDue reports whether the mutual probe asks for a run now. Each alarm run
 // is at least one MutualWindow after the last, so one bad window is diagnosed
 // once rather than on every poll, and never inside BusyCooldown. A busy-mode
-// alarm run needs every line rate, for the same reason as periodicDue.
+// alarm run needs every RNIC classified, for the same reason as periodicDue.
 func (c *cadence) alarmDue(now time.Time, cfg *config.Config, in triggerInputs) bool {
-	if in.alarm == nil || (!in.hostIdle && !in.lineRateKnown) {
+	if in.alarm == nil || (!in.hostIdle && !in.classified) {
 		return false
 	}
 	gap := cfg.MutualWindow
@@ -578,24 +640,32 @@ func (c *cadence) alarmDue(now time.Time, cfg *config.Config, in triggerInputs) 
 
 // periodicDue reports whether --busy-interval asks for a busy run now. It is
 // off by default, never fires on an idle host (the idle run covers it), and
-// needs every line rate: without one the busy RNIC set cannot be classified,
-// and an unclassified loaded RNIC would be judged against the idle baseline.
+// needs every RNIC classified: without a line rate, or on the poll its byte
+// counters were reset, the busy RNIC set cannot be classified, and an
+// unclassified loaded RNIC would be judged against the idle baseline.
 func (c *cadence) periodicDue(now time.Time, cfg *config.Config, in triggerInputs) bool {
-	if cfg.BusyInterval <= 0 || in.hostIdle || !in.lineRateKnown {
+	if cfg.BusyInterval <= 0 || in.hostIdle || !in.classified {
 		return false
 	}
 	return now.Sub(c.lastPeriodic) >= cfg.BusyInterval
 }
 
-// counterDelta is wrap-safe for 64-bit and 32-bit sysfs counters.
-func counterDelta(cur, prev uint64) uint64 {
-	if cur >= prev {
-		return cur - prev
+// counterDelta is how far a cumulative 32- or 64-bit sysfs counter moved from
+// prev to cur, and whether that is known. A decrease is a wrap only from the
+// upper half of the 32- or 64-bit range. Any other decrease is a reset (a
+// driver reload, counters cleared by hand): ok is false and the delta is
+// unknown, neither the 2^32 or 2^64 a wrap would read nor 0. The caller
+// keeps cur as the next baseline either way.
+func counterDelta(cur, prev uint64) (delta uint64, ok bool) {
+	switch {
+	case cur >= prev:
+		return cur - prev, true
+	case prev >= 1<<31 && prev <= math.MaxUint32:
+		return (math.MaxUint32 - prev) + cur + 1, true
+	case prev >= 1<<63:
+		return (math.MaxUint64 - prev) + cur + 1, true
 	}
-	if prev <= 0xffffffff && cur <= 0xffffffff {
-		return (0xffffffff - prev) + cur + 1
-	}
-	return (0xffffffffffffffff - prev) + cur + 1
+	return 0, false
 }
 
 // StaticSampler is used in --sim and tests.

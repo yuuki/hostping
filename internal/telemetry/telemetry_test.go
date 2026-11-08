@@ -278,6 +278,32 @@ func TestRecordRatesSkipsUnmeasuredPauseAndDrops(t *testing.T) {
 	}
 }
 
+// A poll whose byte counters were reset measured no throughput: no sample,
+// neither the 2^32 or 2^64 bytes a wrap would read nor a 0. The pause ratio
+// and drop delta of the same poll are still recorded.
+func TestRecordRatesSkipsThroughputOfResetBytes(t *testing.T) {
+	tel, reader := newTestTelemetry(t)
+	tel.RecordRates(context.Background(), []model.RNICRates{
+		{Device: "rnic0", BytesReset: true, PauseKnown: true, DropKnown: true},
+		{Device: "rnic1", PauseKnown: true, DropKnown: true}, // a measured 0
+	})
+	ms := collect(t, reader)
+
+	thp := gaugeFloat(t, ms, "hostping.rnic.throughput")
+	if _, ok := thp["rnic=rnic0"]; ok {
+		t.Errorf("throughput of a byte-counter reset exported: %v", thp)
+	}
+	if v, ok := thp["rnic=rnic1"]; !ok || v != 0 {
+		t.Errorf("a measured 0 throughput must be exported: %v", thp)
+	}
+	if _, ok := gaugeFloat(t, ms, "hostping.rnic.pause_duration_ratio")["rnic=rnic0"]; !ok {
+		t.Error("the pause ratio of the same poll must still be exported")
+	}
+	if _, ok := gaugeInt(t, ms, "hostping.rnic.drop.delta")["rnic=rnic0"]; !ok {
+		t.Error("the drop delta of the same poll must still be exported")
+	}
+}
+
 // A nil *Telemetry is what a one-shot run without exporters gets.
 func TestNilTelemetryRecordsNothing(t *testing.T) {
 	var tel *Telemetry
