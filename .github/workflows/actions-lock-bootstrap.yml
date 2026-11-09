@@ -1,0 +1,70 @@
+# TEMPORARY: generates .github/workflows/actions.lock for each repository
+# with gh-actions-lock and prints the result as a patch in the job log, from
+# where it is applied and committed to each repository's branch. Removed
+# again before the branch is merged.
+name: actions-lock bootstrap
+
+on:
+  push:
+    branches: [agent/great-wright-ex8i0g]
+    paths: [.github/workflows/actions-lock-bootstrap.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    name: lock (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - {name: droot, repo: yuuki/droot, sha: 0c90a13b15a1f9ebff2ac187e9396e3b870fd5b3}
+          - {name: grafana-fleetgrid-panel, repo: yuuki/grafana-fleetgrid-panel, sha: 9560c8c1c38d4c847e9fa8d1a09c849c15560d04}
+          - {name: grafana-slurm-app, repo: yuuki/grafana-slurm-app, sha: 70703a8c9f97df9a45ecd558e55a30e21dbf5b73}
+          - {name: hostping, repo: yuuki/hostping, sha: f1515e10ecec9289c78b36a59f51add8def47ff4}
+          - {name: ipneigh_exporter, repo: yuuki/ipneigh_exporter, sha: 4b9df4ddba8f33f5a156a0b1f03045217efe1125}
+          - {name: lustre-ebpf-exporter, repo: yuuki/lustre-ebpf-exporter, sha: eeb228de3f9dba1b93e407214f03bd1186dedb0b}
+          - {name: lustre_client_exporter, repo: yuuki/lustre_client_exporter, sha: a88ed5fe1c03d09e5a9c3a4e19bd371135b9a439}
+          - {name: metricsifter, repo: ai4sre/metricsifter, sha: d0ee9b568593d83a046216acad8dd3d8a1829237}
+          - {name: mlxlink_exporter, repo: yuuki/mlxlink_exporter, sha: 14671de286f92baff88e6ee05cf20cce9c62827a}
+          - {name: rdma_exporter, repo: yuuki/rdma_exporter, sha: 6ff86eb3be2ffc0763eb09756326e8591a5dc0e7}
+          - {name: rpingmesh, repo: yuuki/rpingmesh, sha: 1127fba021d7fa4718a6ffbf2e3830b6c07336a1}
+          - {name: shawk, repo: yuuki/shawk, sha: 8b159c9897abc77d6b96de6d0a4f5dbd21f8ac58}
+          - {name: ssh_session_exporter, repo: yuuki/ssh_session_exporter, sha: a82578e668657e61aed0afbeb1a7ba43af6c1116}
+          - {name: tcpulse, repo: yuuki/tcpulse, sha: f83bb0940b8b6510b329b9b33179fabd2a54c037}
+          - {name: xtsdb, repo: yuuki/xtsdb, sha: 59ec39b4bdd0fae5f91849252ac28fb831c5396e}
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Install gh-actions-lock
+        run: go install github.com/github/gh-actions-lock/cmd/gh-actions-lock@v0.4.1
+
+      - name: Lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NO_COLOR: '1'
+          REPO: ${{ matrix.repo }}
+          SHA: ${{ matrix.sha }}
+        run: |
+          set -u
+          git clone --quiet --filter=blob:none "https://github.com/${REPO}.git" work
+          git -C work -c advice.detachedHead=false checkout --quiet "$SHA"
+          cd work
+          rc=0
+          "$(go env GOPATH)/bin/gh-actions-lock" --no-interactive || rc=$?
+          echo "gh-actions-lock exit status: $rc"
+          git add -A
+          git diff --cached --stat
+          git diff --cached --binary > ../lock.patch
+          echo "patch sha256: $(sha256sum < ../lock.patch | cut -d' ' -f1)"
+          echo "BEGIN-PATCH"
+          gzip -9n < ../lock.patch | base64
+          echo "END-PATCH"
+          exit "$rc"
