@@ -3,14 +3,15 @@ GO ?= go
 PREFIX ?= .
 
 # Tool versions. CI pins the same versions (.github/workflows); bump together.
-GOLANGCI_LINT_VERSION ?= v2.15.0
-GOVULNCHECK_VERSION   ?= v1.9.0
-ACTIONLINT_VERSION    ?= v1.7.12
-ZIZMOR_VERSION        ?= 1.32.0
-FUZZTIME              ?= 30s
+GOLANGCI_LINT_VERSION   ?= v2.15.0
+GOVULNCHECK_VERSION     ?= v1.9.0
+ACTIONLINT_VERSION      ?= v1.7.12
+ZIZMOR_VERSION          ?= 1.32.0
+GH_ACTIONS_LOCK_VERSION ?= v0.4.1
+FUZZTIME                ?= 30s
 # Extra go test flags for each fuzz target, e.g. FUZZFLAGS=-parallel=2.
-FUZZFLAGS             ?=
-BENCH_COUNT           ?= 6
+FUZZFLAGS               ?=
+BENCH_COUNT             ?= 6
 
 # go run builds a tool with the toolchain its own go.mod names, which can be
 # older than this module's and then refuses to load it: build the tools with
@@ -21,6 +22,8 @@ ACTIONLINT ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run github.com/rhysd/actionlint/
 GOVULNCHECK ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 # uvx or pipx (preinstalled on GitHub-hosted runners) runs the pinned zizmor.
 ZIZMOR ?= $(if $(shell command -v uvx 2>/dev/null),uvx zizmor@$(ZIZMOR_VERSION),pipx run zizmor==$(ZIZMOR_VERSION))
+# gh-actions-lock (the `gh actions-lock` extension) runs through `go run` too.
+GH_ACTIONS_LOCK ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run github.com/github/gh-actions-lock/cmd/gh-actions-lock@$(GH_ACTIONS_LOCK_VERSION)
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -91,7 +94,7 @@ DOCKER_RUN = $(DOCKER) run --rm --platform $(DOCKER_PLATFORM) \
 	-w /src \
 	$(IMAGE)
 
-.PHONY: all zig test test-race test-fuzz bench check lint fmt lint-actions vuln bin bin-linux-amd64 package dist release check-glibc tidy complexity setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
+.PHONY: all zig test test-race test-fuzz bench check lint fmt lint-actions lock-actions vuln bin bin-linux-amd64 package dist release check-glibc tidy complexity setup docker-image docker-test docker-bin docker-bin-amd64 docker-dist docker-setup docker-shell
 
 all: test bin
 
@@ -182,9 +185,17 @@ fmt:
 
 # Lint (actionlint) and audit (zizmor) the GitHub Actions workflows. Without
 # GH_TOKEN zizmor runs its offline audits only; CI sets it.
+# gh-actions-lock checks that .github/workflows/actions.lock pins every
+# action the workflows use; with GH_TOKEN it also verifies each pin upstream.
 lint-actions:
 	$(ACTIONLINT)
 	$(ZIZMOR) $(if $(GH_TOKEN),,--offline) .
+	$(GH_ACTIONS_LOCK) $(if $(GH_TOKEN),--verify,--verify-local)
+
+# Pin the actions in .github/workflows/actions.lock after a `uses:` changed,
+# then review the diff. Needs a GitHub token (GH_TOKEN or `gh auth login`).
+lock-actions:
+	$(GH_ACTIONS_LOCK)
 
 # Known vulnerabilities reachable from the code.
 vuln: zig
