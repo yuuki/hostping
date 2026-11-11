@@ -1,4 +1,4 @@
-FROM golang:1.27.3-bookworm
+FROM golang:1.27.4-bookworm
 
 ARG TARGETARCH
 # Bump these three together; checksums come from https://ziglang.org/download/index.json

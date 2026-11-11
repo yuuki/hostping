@@ -8,6 +8,14 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Changed
+
+- The binaries are built with Go 1.27.4, the 2026-11-10 security release,
+  which fixes an HTTP/1 server panic in `net/http` (CVE-2026-97054) and code
+  execution at build time through cgo flags and directives (CVE-2026-97033
+  to CVE-2026-97043). Source builds need Go 1.27.4 (see `mise.toml`).
+- Update Go module dependencies.
+
 ### Fixed
 
 - An RNIC byte or PFC pause-duration counter that is reset between two polls
