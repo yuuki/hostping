@@ -8,6 +8,8 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-11
+
 ### Changed
 
 - The binaries are built with Go 1.27.4, the 2026-11-10 security release,
