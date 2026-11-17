@@ -165,13 +165,18 @@ func parseDmonPCIe(out string, bdfByIndex map[string]string) map[string]float64 
 		}
 		rx, err1 := strconv.ParseFloat(f[rxCol], 64)
 		tx, err2 := strconv.ParseFloat(f[txCol], 64)
-		// ParseFloat also reads "NaN" and "Inf", which a rate is not; a NaN
-		// passes a < 0 test and would make the link's utilization NaN.
-		if err1 != nil || err2 != nil || !finiteRate(rx) || !finiteRate(tx) {
+		if err1 != nil || err2 != nil {
 			continue
 		}
-		// dmon prints MB/s.
-		res[b] = max(rx, tx) * 1e6
+		// dmon prints MB/s. ParseFloat also reads "NaN" and "Inf", which a
+		// rate is not; a NaN passes a < 0 test and would make the link's
+		// utilization NaN. The check follows the conversion, since a huge
+		// but finite MB/s overflows to +Inf in bytes/s.
+		rx, tx = rx*1e6, tx*1e6
+		if !finiteRate(rx) || !finiteRate(tx) {
+			continue
+		}
+		res[b] = max(rx, tx)
 	}
 	if len(res) == 0 {
 		return nil
