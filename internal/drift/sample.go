@@ -39,7 +39,7 @@ func Paths(g topology.Graph) (paths []PathIdent, rnicKeys []string) {
 		if !okN || !okE {
 			continue
 		}
-		key := bound(RNICKey(n) + "->" + endpointKey(e, memNodes) + "/" + p.Distance.Key())
+		key := bound(RNICKey(n) + "->" + endpointKey(e, memNodes) + "/" + p.Distance.String())
 		if seen[key] {
 			key = bound(key + "#" + p.RNIC + "->" + p.Endpoint)
 		}

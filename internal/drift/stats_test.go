@@ -58,25 +58,101 @@ func TestBestStep(t *testing.T) {
 	cases := []struct {
 		name string
 		in   []float64
+		ok   bool
 		at   int
 		rise float64
+		cost float64
 	}{
-		{"too short", []float64{1, 1, 1, 9, 9}, 0, 0},
-		{"flat", []float64{5, 5, 5, 5, 5, 5, 5, 5}, 3, 0},
-		{"step up", []float64{1, 1, 1, 1, 1, 9, 9, 9, 9}, 5, 8},
-		{"step up at the earliest split", []float64{1, 1, 1, 9, 9, 9, 9, 9}, 3, 8},
-		{"step up at the latest split", []float64{1, 1, 1, 1, 1, 9, 9, 9}, 5, 8},
-		{"step down", []float64{9, 9, 9, 9, 1, 1, 1, 1}, 4, -8},
+		{"too short", []float64{1, 1, 1, 9, 9}, false, 0, 0, 0},
+		{"flat", []float64{5, 5, 5, 5, 5, 5, 5, 5}, true, 3, 0, 0},
+		{"step up", []float64{1, 1, 1, 1, 1, 9, 9, 9, 9}, true, 5, 8, 0},
+		{"step up at the earliest split", []float64{1, 1, 1, 9, 9, 9, 9, 9}, true, 3, 8, 0},
+		{"step up at the latest split", []float64{1, 1, 1, 1, 1, 9, 9, 9}, true, 5, 8, 0},
+		{"step down", []float64{9, 9, 9, 9, 1, 1, 1, 1}, true, 4, -8, 0},
 		// One value off on each side does not move the split.
-		{"step with outliers", []float64{1, 7, 1, 1, 1, 9, 9, 2, 9, 9}, 5, 8},
-		// A steady rise has its best split in the middle, worth half of it.
-		{"ramp", []float64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, 5, 5},
+		{"step with outliers", []float64{1, 7, 1, 1, 1, 9, 9, 2, 9, 9}, true, 5, 8, 13},
+		// A steady rise has its best split in the middle, worth half of it,
+		// and every value but the two middle ones is off its side's median.
+		{"ramp", []float64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, true, 5, 5, 12},
 	}
 	for _, c := range cases {
-		at, rise := bestStep(c.in)
-		if at != c.at || rise != c.rise {
-			t.Errorf("%s: bestStep = (%d, %v), want (%d, %v)", c.name, at, rise, c.at, c.rise)
+		at, rise, cost, ok := bestStep(c.in)
+		if ok != c.ok || at != c.at || rise != c.rise || cost != c.cost {
+			t.Errorf("%s: bestStep = (%d, %v, %v, %v), want (%d, %v, %v, %v)", c.name, at, rise, cost, ok, c.at, c.rise, c.cost, c.ok)
 		}
+	}
+}
+
+// A straight line costs a ramp nothing and a step a lot; a step costs a step
+// nothing and a ramp a lot. That is what tells the two shapes apart.
+func TestLineCost(t *testing.T) {
+	days := func(n int) []float64 {
+		ts := make([]float64, n)
+		for i := range ts {
+			ts[i] = float64(20500 + i)
+		}
+		return ts
+	}
+	ramp := []float64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	if got := lineCost(days(10), ramp); got != 0 {
+		t.Errorf("ramp: line cost %v, want 0", got)
+	}
+	step := []float64{1, 1, 1, 1, 1, 9, 9, 9, 9, 9}
+	_, _, stepCost, _ := bestStep(step)
+	if line := lineCost(days(10), step); stepCost != 0 || line < 10 {
+		t.Errorf("step: step cost %v, line cost %v, want 0 and far above it", stepCost, line)
+	}
+	_, _, stepCost, _ = bestStep(ramp)
+	if stepCost <= lineCost(days(10), ramp) {
+		t.Errorf("ramp: step cost %v is not above the line's", stepCost)
+	}
+	// The line follows the days, not the positions: a ramp read on every
+	// third day is still a line.
+	gaps := []float64{20500, 20503, 20506, 20509, 20512, 20515, 20518, 20521}
+	if got := lineCost(gaps, []float64{0, 3, 6, 9, 12, 15, 18, 21}); got != 0 {
+		t.Errorf("ramp with gaps: line cost %v, want 0", got)
+	}
+	// One outlier costs its own distance and does not tilt the line.
+	bent := []float64{0, 1, 2, 30, 4, 5, 6, 7, 8, 9}
+	if got := lineCost(days(10), bent); got != 27 {
+		t.Errorf("ramp with an outlier: line cost %v, want 27", got)
+	}
+	if got := lineCost(nil, nil); got != 0 {
+		t.Errorf("no values: %v", got)
+	}
+	if got := lineCost([]float64{1, 1, 1}, []float64{4, 5, 6}); got != 2 {
+		t.Errorf("one day read three times: %v, want the deviation from the median", got)
+	}
+}
+
+// The day-to-day scatter of a series sees its noise and neither a trend nor
+// a step in it.
+func TestDayScatter(t *testing.T) {
+	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	if got := dayScatter([]float64{1, 2, 1, 2, 1, 2, 1}); got != 0 {
+		t.Errorf("fewer than %d values: %v, want 0", minScatterDays, got)
+	}
+	zigzag := []float64{1, 2, 1, 2, 1, 2, 1, 2}
+	if got := dayScatter(zigzag); !near(got, 1/diffSigmas) {
+		t.Errorf("zigzag: %v, want %v", got, 1/diffSigmas)
+	}
+	var onRamp, onStep []float64
+	for i, v := range zigzag {
+		onRamp = append(onRamp, v+0.1*float64(i))
+		if i >= 4 {
+			v += 100
+		}
+		onStep = append(onStep, v)
+	}
+	if got := dayScatter(onStep); !near(got, 1/diffSigmas) {
+		t.Errorf("zigzag on a step: %v, want the zigzag's %v", got, 1/diffSigmas)
+	}
+	// A trend adds no more than its slope to a difference: 0.1 a day here.
+	if got := dayScatter(onRamp); got < 0.9/diffSigmas || got > 1.1/diffSigmas+1e-9 {
+		t.Errorf("zigzag on a ramp: %v, want within the slope of %v", got, 1/diffSigmas)
+	}
+	if got := dayScatter([]float64{5, 5, 5, 5, 5, 5, 5, 5, 5}); got != 0 {
+		t.Errorf("constant: %v", got)
 	}
 }
 

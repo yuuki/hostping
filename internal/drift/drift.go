@@ -44,18 +44,24 @@ const (
 	openCap   = 16
 	maxStride = 1 << 20
 	maxSeen   = 1 << 30
-	// noiseK scales the reference days' scatter into the least change a
-	// signal must show: a path whose daily medians already scatter by more
-	// than DriftTh/noiseK needs a larger change than DriftTh.
+	// noiseK scales a path's day-to-day scatter into the least change a
+	// signal must show: a path whose daily medians scatter by more than the
+	// drift threshold over noiseK needs a larger change than the threshold.
 	noiseK = 3
 	// iqrSigmas is the interquartile range of a normal distribution in
 	// standard deviations.
 	iqrSigmas = 1.349
+	// diffSigmas is the median absolute difference of two independent
+	// normal values in standard deviations of one: 0.6745 times the square
+	// root of 2.
+	diffSigmas = 0.954
+	// minScatterDays is the fewest daily values the day-to-day scatter of
+	// the window is read from.
+	minScatterDays = 8
 	// stepShare is the share of a signal's change against its reference
 	// that the best single step through the window must account for, for
-	// the change to be a step. A steady decline over the whole window gives
-	// the best step half of the decline at most. stepSpan is the fewest
-	// daily values on either side of a step.
+	// the change to be a step. stepSpan is the fewest daily values on
+	// either side of a step.
 	stepShare = 2.0 / 3
 	stepSpan  = 3
 	// trendZ is the one-sided 1% point of the normal distribution, which
@@ -185,7 +191,7 @@ type PathIdent struct {
 	RNIC     string
 	Endpoint string
 	// Key identifies the path in the history across restarts and
-	// renumbering (see PathKey).
+	// renumbering (see Paths).
 	Key string
 	// EndpointSensor is set when the endpoint is a device that can carry a
 	// temperature sensor of its own (a GPU). A memory endpoint has none
@@ -552,6 +558,15 @@ func medianReading(rs []Reading, minTemps int) Reading {
 	}
 }
 
+// column is the daily values of the signal s over ds.
+func column(ds []Day, s signal) []float64 {
+	out := make([]float64, len(ds))
+	for i, d := range ds {
+		out[i] = s.value(d.Reading)
+	}
+	return out
+}
+
 // readings is the Reading of every day of ds.
 func readings(ds []Day) []Reading {
 	out := make([]Reading, len(ds))
@@ -619,7 +634,11 @@ func (t *Tracker) judge(p PathIdent, h *PathHistory, day int) (model.PathDrift, 
 			change = -change
 		}
 		pd.Changes = append(pd.Changes, model.DriftChange{Signal: s.name, Change: change})
-		enter := math.Max(t.th, noiseK*s.spread(*h.Ref)/ref)
+		// The bar is the threshold, or more for a path whose days scatter:
+		// by what the reference days showed, or by what the days of the
+		// window show now, whichever is larger.
+		noise := math.Max(s.spread(*h.Ref), dayScatter(column(h.Days, s)))
+		enter := math.Max(t.th, noiseK*noise/ref)
 		since, was := h.Drifted[s.name]
 		if !(change >= enter || (was && change >= enter/2)) {
 			if was {
@@ -759,15 +778,19 @@ func shapeOf(s signal, ds []Day, change float64) (model.DriftShape, int) {
 	if len(ds) < minShapeDays {
 		return model.DriftShapeUnknown, 0
 	}
-	// worse holds the daily values with "higher is worse" for every signal.
-	worse := make([]float64, len(ds))
+	// worse holds the daily values with "higher is worse" for every signal,
+	// and times the days they are of.
+	worse, times := make([]float64, len(ds)), make([]float64, len(ds))
 	for i, d := range ds {
-		worse[i] = s.value(d.Reading)
+		worse[i], times[i] = s.value(d.Reading), float64(d.Day)
 		if !s.higherIsWorse {
 			worse[i] = -worse[i]
 		}
 	}
-	if at, rise := bestStep(worse); rise >= stepShare*change {
+	// A step must carry most of the change and describe the window better
+	// than a straight line does. The second test is what keeps a decline
+	// that began inside the window from reading as a step in its middle.
+	if at, rise, cost, ok := bestStep(worse); ok && rise >= stepShare*change && cost < lineCost(times, worse) {
 		return model.DriftShapeStep, ds[at].Day
 	}
 	if mannKendallZ(worse) >= trendZ {

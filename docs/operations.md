@@ -1518,7 +1518,7 @@ What to expect:
   A path is `drifted` when the median of its last 7 idle days reads
   `--drift-th` (default 5%) worse than its reference on bandwidth, latency
   p50 or latency p99, and `stable` again below half of that. A path whose
-  days scatter needs more: three times the scatter of its reference week.
+  days scatter needs more: three times its day-to-day scatter.
 - **Existing verdicts do not change.** A drifted path is still `normal` or
   `uncertain`, `causes` does not name it, and no existing alert fires for it.
 

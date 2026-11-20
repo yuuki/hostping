@@ -48,28 +48,67 @@ func scatter(vs []float64) float64 {
 	return (quantile(vs, 0.75) - quantile(vs, 0.25)) / iqrSigmas
 }
 
+// dayScatter is a robust standard deviation of the day-to-day noise of xs,
+// a series in time order: the median absolute difference of consecutive
+// values over the 0.954 standard deviations that median has for independent
+// normal noise. It is 0 for fewer than minScatterDays values.
+//
+// Differences of neighbours see neither a slow trend, whose share of one
+// difference is small, nor a step, which is one difference among many. So
+// the series may hold the very drift it is the yardstick for.
+func dayScatter(xs []float64) float64 {
+	if len(xs) < minScatterDays {
+		return 0
+	}
+	diffs := make([]float64, len(xs)-1)
+	for i := range diffs {
+		diffs[i] = math.Abs(xs[i+1] - xs[i])
+	}
+	return median(diffs) / diffSigmas
+}
+
 // bestStep fits a single step to xs: the split that leaves the least total
 // absolute deviation from the medians of its two sides, each at least
-// stepSpan values long. at is the index of the first value after the split
-// and rise how far the later median lies above the earlier one (negative
-// when the series fell). A series too short for two sides has no step
-// (0, 0).
+// stepSpan values long. at is the index of the first value after the split,
+// rise how far the later median lies above the earlier one (negative when
+// the series fell) and cost the deviation that is left. A series too short
+// for two sides has no step: ok is false.
 //
 // The sides are whole, not a few values around the split, so that the
 // medians are steady against day-to-day scatter. The fit decides where the
 // step is: every split near a real step gives about the same two medians,
 // but only the right one leaves no value on the wrong side.
-func bestStep(xs []float64) (at int, rise float64) {
-	found := false
-	var least float64
+func bestStep(xs []float64) (at int, rise, cost float64, ok bool) {
 	for k := stepSpan; k+stepSpan <= len(xs); k++ {
 		before, after := median(xs[:k]), median(xs[k:])
-		cost := absDev(xs[:k], before) + absDev(xs[k:], after)
-		if !found || cost < least {
-			at, rise, least, found = k, after-before, cost, true
+		c := absDev(xs[:k], before) + absDev(xs[k:], after)
+		if !ok || c < cost {
+			at, rise, cost, ok = k, after-before, c, true
 		}
 	}
-	return at, rise
+	return at, rise, cost, ok
+}
+
+// lineCost is the total absolute deviation of xs, read at the times ts, from
+// the straight line through them that the Theil-Sen estimator fits: the
+// median of the slopes between every two points, and the median intercept
+// that slope leaves. Like the medians of bestStep it gives way to no single
+// value.
+func lineCost(ts, xs []float64) float64 {
+	var slopes []float64
+	for i := range xs {
+		for j := i + 1; j < len(xs); j++ {
+			if ts[j] != ts[i] {
+				slopes = append(slopes, (xs[j]-xs[i])/(ts[j]-ts[i]))
+			}
+		}
+	}
+	slope := median(slopes)
+	rest := make([]float64, len(xs))
+	for i := range xs {
+		rest[i] = xs[i] - slope*ts[i]
+	}
+	return absDev(rest, median(rest))
 }
 
 // absDev is the total absolute deviation of xs from m.

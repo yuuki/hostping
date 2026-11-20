@@ -13,7 +13,7 @@
   -cpu-busy-high value
     	CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1) (default 0.5)
   -drift-th value
-    	daemon, with --drift-tracking: fraction by which a path's bandwidth or latency must read worse than its own reference to be reported as drifted (0.01 to 0.5; a path whose daily medians scatter needs three times their scatter) (default 0.05)
+    	daemon, with --drift-tracking: fraction by which a path's bandwidth or latency must read worse than its own reference to be reported as drifted (0.01 to 0.5; a path whose daily medians scatter needs three times their day-to-day scatter) (default 0.05)
   -drift-tracking
     	daemon: keep each path's idle readings over months in DIR/drift.json of --state-dir (required) and report a path whose bandwidth or latency reads worse than its own first week by --drift-th: in the report's drift section, the hostping.path.drift.* series and the log (opt-in; one-shot runs ignore it)
   -drop-ignore-rnic value

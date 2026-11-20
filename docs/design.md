@@ -874,8 +874,10 @@ reference: lower for bandwidth, higher for the latencies. A signal becomes
 drifted when its change reaches the larger of:
 
 - `--drift-th` (default 0.05, between 0.01 and 0.5), and
-- three times the scatter of the reference days, as a fraction of the
-  reference.
+- three times the path's day-to-day scatter, as a fraction of the
+  reference. The scatter is the larger of two estimates, described below:
+  that of the 7 reference values, and that of the daily values of the
+  window.
 
 It stops being drifted when its change falls below half of that. In between,
 it keeps the verdict it had. Without that band a path sitting at the
@@ -886,14 +888,33 @@ without 3 recent days is `unknown`, not what it was.
 Medians do the outlier handling. One bad run does not move its day, and
 three bad days in seven do not move the recent level or the reference.
 
-The scatter is the interquartile range of the 7 reference values divided by
-1.349, the factor that makes it the standard deviation of a normal
-distribution. It is a guard for platforms whose paths do not read at one
-level. On a host whose memory paths read at two levels from day to day
-([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)),
-a week dominated by the lower level is not a drift. The median absolute
-deviation was rejected for this. It ignores any minority of the values, so
-four days at one level and three at another count as no scatter at all.
+The scatter guards against a threshold that is inside a path's own noise.
+Two estimates are needed, because each misses what the other sees:
+
+- The scatter of the reference: the interquartile range of the 7 reference
+  values divided by 1.349, the factor that makes it the standard deviation
+  of a normal distribution. It covers a path that does not read at one
+  level. On a host whose memory paths read at two levels from day to day
+  ([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)),
+  a week dominated by the lower level is not a drift. The median absolute
+  deviation was rejected for this. It ignores any minority of the values,
+  so four days at one level and three at another count as no scatter at
+  all. Seven values make a rough estimate, though. With it alone, 62
+  of 1000 synthetic paths at one level with a scatter of 3% were reported
+  within a year; with both estimates, 12
+  ([On synthetic series](#on-synthetic-series)).
+- The scatter of the window: the median absolute difference between
+  consecutive daily values of the last 30 days, divided by 0.954 (the same
+  normalization), once the window holds 8. Differences of neighbours see
+  neither a slow trend nor a step, so this estimate can be taken from the
+  very days that drift. It is steady, being drawn from up to 29
+  differences, but it does not see two levels that each last for days. It
+  also lags: a path that turns noisy after a quiet reference week can be
+  reported during the first weeks, until the window shows its scatter.
+
+The factor of three is on the scatter of single days, not on that of the two
+medians being compared, which is about two thirds of it. The bar is
+therefore about 4.5 standard deviations of the comparison.
 
 ### Shape
 
@@ -901,12 +922,13 @@ A drifted signal carries the shape of its change inside the 30-day window.
 The shape separates the causes the operator looks for:
 
 - `step`: the best single step through the window accounts for at least two
-  thirds of the change. The step is the split of the window, with at least 3
-  days on each side, that leaves the least total absolute deviation from the
-  medians of its two sides. `step_on` is the first day at the new level. A
-  steady decline over the whole window gives its best step half of the
-  decline at most, so it is not a step. A step points at one event: an
-  update, a replaced or reseated part.
+  thirds of the change, and fits the window better than a straight line
+  does. The step is the split of the window, with at least 3 days on each
+  side, that leaves the least total absolute deviation from the medians of
+  its two sides. The line is the Theil–Sen fit (the median slope between
+  every two days), and "better" compares the total absolute deviation left
+  by each. `step_on` is the first day at the new level. A step points at one
+  event: an update, a replaced or reseated part.
 - `gradual`: not a step, and the Mann–Kendall trend test over the daily
   values rejects "no trend" at the one-sided 1% level. This is aging or a
   slow thermal rise.
@@ -917,7 +939,40 @@ The shape separates the causes the operator looks for:
 
 The step is fitted over whole sides and not over a few days around the
 split. With a few days, day-to-day scatter of the size the noise guard
-admits would produce a step of that size somewhere in the window.
+admits would produce a step of that size somewhere in the window. The
+comparison with a line is what keeps a decline that began inside the window
+from reading as a step in its middle: its best step carries well over half
+of the change, but a line describes it better.
+
+### On synthetic series
+
+No hardware series exists yet to set these constants by. The tests hold
+them to synthetic ones instead (`internal/drift/noise_test.go`): a level, a
+decay or a step, one reading a day, with independent normal scatter of the
+daily values. The same generator over 1000 paths each gives:
+
+| Series | Scatter 0.5% | 1% | 2% | 3% | 5% |
+| --- | --- | --- | --- | --- | --- |
+| Level only, one year: paths ever `drifted` | 0 | 0 | 3 | 12 | 22 |
+| Decay of 0.3% a day: day of the decay it is found on (median) | 21 | 21 | 25 | 34 | |
+| Decay, 40 days in: findings read `gradual` | 100% | 100% | 99% | 93% | |
+| Decay, 25 days in (the window still holds days before it): `gradual` | 100% | 99% | 76% | 58% | |
+| Step of 8%: paths found within 30 days | 1000 | 1000 | 950 | 606 | |
+| Step of 8%: days until it is found (median) | 4 | 4 | 5 | 9 | |
+
+Read with care:
+
+- A path whose daily medians scatter by 3% cannot show a step of 8%
+  reliably, because the bar is then about 9%. That is the price of the
+  noise guard, and the `change_ratio` series still shows the level.
+- A young decay under a scatter of 2% or more reads as `step` in a quarter
+  of the cases and more. The shape of a finding is evidence, not a verdict.
+- Scatter that is not independent from day to day is not noise to this
+  rule. A level that wanders by ±3% over a quarter (a sine with a period of
+  90 days) is reported on one path in a thousand, and one that wanders by
+  ±4% on every second path, for the weeks it is low. Tracking cannot tell such a wander from a drift that
+  reverses: both are a path that reads worse than in its reference week.
+  Where healthy paths wander like that, raise `--drift-th`.
 
 ### Temperature
 

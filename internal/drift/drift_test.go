@@ -378,6 +378,46 @@ func TestTwoLevelPathIsNotDrift(t *testing.T) {
 	}
 }
 
+// A reference week that happened to be quiet does not make later scatter a
+// drift: the bar also follows the day-to-day scatter of the window, which
+// is read from the differences of neighbouring days and so holds for a path
+// that is drifting as well.
+func TestScatterOfTheWindowRaisesTheBar(t *testing.T) {
+	// From day 8 on the path reads 6% low and 6% high in turn, low on four
+	// days of every seven: the recent median is 6% below a reference whose
+	// own scatter is 0.
+	jitter := func(i int) float64 {
+		if i%7%2 == 0 {
+			return 0.94
+		}
+		return 1.06
+	}
+	s := newSeries(t)
+	s.days(refDays, flat)
+	// The window needs its 8 days, and the quiet reference days in it hold
+	// the estimate down for a while: the first weeks may report the path.
+	s.days(30, jitter)
+	if ref := s.tr.File().Paths[gpuPath.Key].Ref; ref.BandwidthSpread != 0 {
+		t.Fatalf("reference scatter %v, want 0", ref.BandwidthSpread)
+	}
+	// Once the window is the path's scatter, it is not reported again.
+	s.flips = 0
+	s.days(60, jitter)
+	if c := change(t, s.last, model.DriftBandwidth); c < 0.059 || c > 0.061 {
+		t.Fatalf("change %v, want the 6%% of the lower level", c)
+	}
+	if s.last.Status != model.DriftStable || s.flips != 0 {
+		t.Fatalf("status %s after %d flips, want stable: the path scatters by more than it moved", s.last.Status, s.flips)
+	}
+	// The same level without the scatter is a drift.
+	q := newSeries(t)
+	q.days(refDays, flat)
+	q.days(40, func(int) float64 { return 0.94 })
+	if q.last.Status != model.DriftDrifted {
+		t.Fatalf("6%% down on a quiet path: %s", q.last.Status)
+	}
+}
+
 // Latency is judged per signal and in the other direction: a p99 that creeps
 // up is reported as such while bandwidth and p50 stay stable.
 func TestLatencyP99Creep(t *testing.T) {

@@ -16,8 +16,8 @@ becomes the notes of its GitHub Release (see
   week, while it is still within its baseline: hardware that ages or runs
   hotter, or a regression after an update. A path is `drifted` when
   the median of its last 7 idle days is `--drift-th` (new flag, default 0.05)
-  worse than its reference, or three times the scatter of its reference week
-  if that is more, and `stable` again below half of that. Until it has been
+  worse than its reference, or three times its day-to-day scatter if that is
+  more, and `stable` again below half of that. Until it has been
   read on 7 idle days and 3 more it is `unknown`, with the reason. A finding
   says whether the change is a `step` (with its date), `gradual` or
   `sustained`, what the temperature of the path's RNIC and GPU did between
