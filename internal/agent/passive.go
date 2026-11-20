@@ -27,15 +27,17 @@ import (
 // also reported between runs, in a report with trigger and mode "passive"
 // that holds no path and no link state:
 //
-//   - at once when a cause appears that the last report of them did not
-//     name, and
-//   - again once --idle-interval has passed since a report last named all of
-//     them, whether that was a passive report or an engine run's. That is the
-//     pace at which an idle host repeats a standing cause, and it is what
-//     lets a rule that wants a code in two reports see a standing passive
-//     cause on a host that never goes idle.
+//   - at once when a cause appears that no report has named within the last
+//     --idle-interval, and
+//   - again once --idle-interval has passed since a report last named a
+//     standing cause, whether that was a passive report or an engine run's.
+//     That is the pace at which an idle host repeats a standing cause, and it
+//     is what lets a rule that wants a code in two reports see a standing
+//     passive cause on a host that never goes idle.
 //
-// A cause that goes away is logged, not reported.
+// So every standing passive cause is named by some report at least once per
+// --idle-interval, and a passive report is only written when no engine run
+// did it. A cause that goes away is logged, not reported.
 type passiveWatch struct {
 	g     topology.Graph
 	every time.Duration
@@ -45,18 +47,24 @@ type passiveWatch struct {
 	latest *model.PCIePassive
 	// causes is what latest proves on its own.
 	causes []model.RootCause
-	// reported is the keys of the causes the last report of them named, and
-	// at when that report was made.
-	reported map[string]bool
-	at       time.Time
+	// named is when a report last named each passive cause, by passiveKey.
+	// It holds at most one entry per PCIe link and code.
+	named map[string]time.Time
 }
 
 func newPassiveWatch(cfg config.Config, g topology.Graph, logf func(string, ...any)) *passiveWatch {
 	if cfg.PCIeInterval <= 0 || cfg.Once {
 		return nil
 	}
-	return &passiveWatch{g: g, every: cfg.IdleInterval, logf: logf, reported: map[string]bool{}}
+	// Never faster than the minute a link's errors are judged over: an
+	// --idle-interval of 0 must not turn a standing cause into a report per
+	// poll.
+	return &passiveWatch{g: g, every: max(cfg.IdleInterval, passiveMinPace), logf: logf, named: map[string]time.Time{}}
 }
+
+// passiveMinPace is the shortest time between two reports of one standing
+// passive cause, whatever --idle-interval says.
+const passiveMinPace = time.Minute
 
 // passiveKey is the identity of a passive cause: its code and the link it
 // names. The confidence and the endpoints of a cause differ between a passive
@@ -79,7 +87,6 @@ func (p *passiveWatch) observe(pcie *model.PCIePassive) {
 	p.causes = analyzer.PassiveCauses(p.g, *pcie)
 	if before > 0 && len(p.causes) == 0 {
 		p.logf("hostping: passive PCIe findings ended: no link is down-trained or counting link errors beyond its budget now")
-		p.reported = map[string]bool{}
 	}
 }
 
@@ -115,19 +122,21 @@ func (p *passiveWatch) need() []string {
 	return out
 }
 
-// due returns the passive report to make at now, if one is due.
+// due returns the passive report to make at now, if one is due: a cause
+// stands that no report has named within the last --idle-interval. The
+// report names every standing cause, not only that one.
 func (p *passiveWatch) due(now time.Time, hostIdle bool) (model.Report, bool) {
 	if p == nil || len(p.causes) == 0 {
 		return model.Report{}, false
 	}
-	fresh := false
+	stale := false
 	for _, c := range p.causes {
-		if !p.reported[passiveKey(c)] {
-			fresh = true
+		if at, ok := p.named[passiveKey(c)]; !ok || now.Sub(at) >= p.every {
+			stale = true
 			break
 		}
 	}
-	if !fresh && now.Sub(p.at) < p.every {
+	if !stale {
 		return model.Report{}, false
 	}
 	host, _ := os.Hostname()
@@ -144,29 +153,23 @@ func (p *passiveWatch) due(now time.Time, hostIdle bool) (model.Report, bool) {
 	}, true
 }
 
+// passiveCodes are the cause codes a passive report can hold.
+var passiveCodes = []string{model.CauseRNICPCIeFailure, model.CauseGPUPCIeFailure, model.CausePCIeLinkErrors}
+
 // emitted records that rep, a passive report or an engine run's, was written
-// at now. It counts as a report of the standing passive causes only when it
-// names every one of them: an engine run whose config-space reading differs,
-// or that started before a finding stood, does not put the next passive
-// report off.
+// at now: every cause in it that a passive report could hold counts as named
+// then. An engine run that names a link under the same code, from the same
+// config space or the findings it was handed, puts the passive report of
+// that cause off by one --idle-interval; one that does not, does not.
 func (p *passiveWatch) emitted(now time.Time, rep model.Report) {
-	if p == nil || len(p.causes) == 0 {
+	if p == nil {
 		return
 	}
-	named := map[string]bool{}
 	for _, c := range rep.Causes {
-		named[passiveKey(c)] = true
-	}
-	for _, c := range p.causes {
-		if !named[passiveKey(c)] {
-			return
+		if slices.Contains(passiveCodes, c.Code) && len(c.Links) > 0 {
+			p.named[passiveKey(c)] = now
 		}
 	}
-	p.reported = map[string]bool{}
-	for _, c := range p.causes {
-		p.reported[passiveKey(c)] = true
-	}
-	p.at = now
 }
 
 // livePCIeLinks is the PCIe links the live sampler reads passively, or nil

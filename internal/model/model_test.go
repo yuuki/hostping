@@ -925,9 +925,9 @@ func TestPCIeLinkFindingEvidence(t *testing.T) {
 			ErrorsPerMinute: 412.4, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
 			Ends: []model.PCIeLinkEnd{
 				{BDF: "0000:38:00.0", Port: true, Correctable: map[string]uint64{"RxErr": 95}},
-				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"Timeout": 3, "BadTLP": 412, "BadDLLP": 7}},
+				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"Timeout": 3, "BadTLP": 402, "BadDLLP": 7}},
 			},
-		}, "412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:38:00.0 (port): RxErr=95; 0000:39:00.0: BadDLLP=7 BadTLP=412 Timeout=3; last window 60s"},
+		}, "412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:38:00.0 (port): RxErr=95; 0000:39:00.0: BadDLLP=7 BadTLP=402 Timeout=3; last window 60s"},
 		{"uncorrectable only", model.PCIeLinkFinding{
 			BudgetPerMinute: 30.72, WindowSeconds: 61.4,
 			Ends: []model.PCIeLinkEnd{

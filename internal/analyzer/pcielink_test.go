@@ -11,7 +11,7 @@ import (
 	"github.com/yuuki/hostping/internal/topology"
 )
 
-// linkFinding is a passive finding on link: 412 Bad TLPs a minute at the
+// linkFinding is a passive finding on link: 412 link errors a minute at the
 // device end of a Gen4 x16 link, in the state given.
 func linkFinding(link string, state model.PCIeLinkState) model.PCIeLinkFinding {
 	f := model.PCIeLinkFinding{
@@ -19,7 +19,7 @@ func linkFinding(link string, state model.PCIeLinkState) model.PCIeLinkFinding {
 		ErrorsPerMinute: 412, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
 		Ends: []model.PCIeLinkEnd{
 			{BDF: "0000:16:00.0", Port: true},
-			{BDF: "0000:17:00.0", Correctable: map[string]uint64{"BadTLP": 412, "Timeout": 3}},
+			{BDF: "0000:17:00.0", Correctable: map[string]uint64{"BadTLP": 409, "Timeout": 3}},
 		},
 	}
 	if state == model.PCIeLinkUncorrectable {
@@ -60,11 +60,11 @@ func TestLinkErrorsAloneAreMedium(t *testing.T) {
 		rnics, endpoints        []string
 	}{
 		{"pcie.gpu5", "PCIe link reported an uncorrectable link error",
-			"AER: 0 link errors/min against a budget of 16/min; 0000:16:00.0 (port): uncorrectable SDES=1; last window 60s; no bottleneck measured at the link in this run (counters only)",
+			"AER: 0 link errors/min against a budget of 16/min; 0000:16:00.0 (port): uncorrectable SDES=1; last window 60s; the same run names no other cause at the link (counters only)",
 			nil, []string{"gpu5"}},
 		{"rp.2", "PCIe link counts link errors beyond its bit-error budget", "", nil, nil},
 		{"pcie.rnic1", "PCIe link counts link errors beyond its bit-error budget",
-			"AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:17:00.0: BadTLP=412 Timeout=3; last window 60s; no bottleneck measured at the link in this run (counters only)",
+			"AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:17:00.0: BadTLP=409 Timeout=3; last window 60s; the same run names no other cause at the link (counters only)",
 			[]string{"rnic1"}, nil},
 	}
 	for i, w := range want {
@@ -116,82 +116,83 @@ func TestSuspectLinkNamesNoCause(t *testing.T) {
 	}
 }
 
-// The counters are high only when the same run measured a bottleneck at the
-// same link, and they neither replace nor raise the cause the probes name.
-func TestLinkErrorsWithSymptomAreHigh(t *testing.T) {
+// The counters stay medium whatever the probes measure: they show a link that
+// errs, and the bottleneck the probes find at it is another cause of the same
+// report, which the evidence points to. They neither replace nor raise it.
+func TestLinkErrorsStayMediumNextToAMeasuredBottleneck(t *testing.T) {
 	g := fig2Gen5()
-	slow := func(rnic, ep string) analyzer.Input {
-		in := healthyRun(g,
-			linkFinding("pcie.rnic0", model.PCIeLinkSustained),
-			linkFinding("pcie.gpu0", model.PCIeLinkSustained),
-			linkFinding("pcie.gpu4", model.PCIeLinkSustained))
-		for i := range in.Measurements {
-			if in.Measurements[i].RNIC == rnic && in.Measurements[i].Endpoint == ep {
-				in.Measurements[i].BandwidthBPS = 60 * gbps
-			}
+	in := healthyRun(g,
+		linkFinding("pcie.rnic0", model.PCIeLinkSustained),
+		linkFinding("pcie.gpu0", model.PCIeLinkSustained),
+		linkFinding("pcie.gpu4", model.PCIeLinkSustained))
+	for i := range in.Measurements {
+		if in.Measurements[i].RNIC == "rnic0" && in.Measurements[i].Endpoint == "gpu0" {
+			in.Measurements[i].BandwidthBPS = 60 * gbps
 		}
-		return in
 	}
-	res := analyzer.Analyze(slow("rnic0", "gpu0"))
+	without := in
+	without.PCIeLinks = nil
+	res := analyzer.Analyze(in)
+
 	byLink := map[string]model.RootCause{}
 	for _, c := range causesOf(res, model.CausePCIeLinkErrors) {
+		if c.Confidence != model.ConfidenceMedium {
+			t.Fatalf("%s is %s, want medium", c.Links[0], c.Confidence)
+		}
 		byLink[c.Links[0]] = c
 	}
 	if len(byLink) != 3 {
 		t.Fatalf("pcie_link_errors causes %+v, want one per finding", byLink)
 	}
-	// rnic0 -> gpu0 is an affinitive path of rnic0 and gpu0's affinitive path.
-	for _, link := range []string{"pcie.rnic0", "pcie.gpu0"} {
-		c := byLink[link]
-		if c.Confidence != model.ConfidenceHigh || !strings.HasSuffix(c.Evidence, "; 1 affinitive path(s) abnormal") {
-			t.Fatalf("%s %+v, want high with the abnormal path as its symptom", link, c)
+	// The probes isolate gpu0's link; rnic0's and gpu4's carry no cause.
+	if ev := byLink["pcie.gpu0"].Evidence; !strings.HasSuffix(ev, "; the same run also names the link (gpu_pcie_failure)") {
+		t.Fatalf("pcie.gpu0 evidence %q, want it to point at the bandwidth cause", ev)
+	}
+	for _, link := range []string{"pcie.rnic0", "pcie.gpu4"} {
+		if ev := byLink[link].Evidence; !strings.HasSuffix(ev, "; the same run names no other cause at the link (counters only)") {
+			t.Fatalf("%s evidence %q", link, ev)
 		}
 	}
-	if c := byLink["pcie.rnic0"]; !slices.Equal(c.Endpoints, []string{"gpu0"}) {
-		t.Fatalf("pcie.rnic0 endpoints %v, want the abnormal affinitive endpoint", c.Endpoints)
-	}
-	// gpu4 is under another root port: nothing was measured wrong there.
-	if c := byLink["pcie.gpu4"]; c.Confidence != model.ConfidenceMedium {
-		t.Fatalf("pcie.gpu4 %+v, want medium", c)
-	}
-	got := causesOf(res, model.CauseGPUPCIeFailure)
-	if len(got) != 1 || got[0].Confidence != model.ConfidenceHigh || !slices.Equal(got[0].Endpoints, []string{"gpu0"}) {
-		t.Fatalf("gpu_pcie_failure %+v, want the bandwidth verdict on gpu0 as without the counters", got)
-	}
-
-	// A path of another RNIC to gpu0 is no symptom of gpu0's link errors:
-	// only its affinitive path is.
-	res = analyzer.Analyze(slow("rnic2", "gpu0"))
-	for _, c := range causesOf(res, model.CausePCIeLinkErrors) {
-		if c.Confidence != model.ConfidenceMedium {
-			t.Fatalf("%s is %s on a cross-socket path reading low", c.Links[0], c.Confidence)
+	// Every other cause is exactly what the run reports without the counters.
+	var other []model.RootCause
+	for _, c := range res.Causes {
+		if c.Code != model.CausePCIeLinkErrors {
+			other = append(other, c)
 		}
+	}
+	plain := analyzer.Analyze(without).Causes
+	if len(other) != len(plain) || len(plain) != 1 {
+		t.Fatalf("other causes %+v, without the counters %+v", other, plain)
+	}
+	if o, p := other[0], plain[0]; o.Code != p.Code || o.Confidence != p.Confidence || o.Evidence != p.Evidence || !slices.Equal(o.Links, p.Links) {
+		t.Fatalf("gpu_pcie_failure %+v changed next to the counters, was %+v", o, p)
 	}
 }
 
-// For the link below a root port the symptom is Algorithm 1 marking that hop
-// abnormal, which the sim's root-port fault produces.
-func TestLinkErrorsOnAbnormalRootPortAreHigh(t *testing.T) {
+// The link below a root port: Algorithm 1 isolates it in the sim's root-port
+// fault, and the counters on it point at that cause.
+func TestLinkErrorsNextToAFailedRootPort(t *testing.T) {
 	g := topology.Fig2()
 	rep := runWorld(t, "rp:rp.1", model.ModeIdle, nil)
 	res := analyzer.Analyze(analyzer.Input{
 		Graph: g, Cfg: config.Defaults(), Mode: model.ModeIdle, Measurements: rep.Paths,
 		PCIeLinks: []model.PCIeLinkFinding{linkFinding("rp.1", model.PCIeLinkSustained), linkFinding("rp.3", model.PCIeLinkSustained)},
 	})
-	if got := causesOf(res, model.CauseCPURootPortFailure); len(got) != 1 || got[0].Links[0] != "rp.1" {
-		t.Fatalf("cpu_root_port_failure %+v, want rp.1 from the probes", got)
+	if got := causesOf(res, model.CauseCPURootPortFailure); len(got) != 1 || got[0].Links[0] != "rp.1" || got[0].Confidence != model.ConfidenceHigh {
+		t.Fatalf("cpu_root_port_failure %+v, want rp.1 at high from the probes", got)
 	}
-	for _, c := range causesOf(res, model.CausePCIeLinkErrors) {
-		want := model.ConfidenceMedium
+	got := causesOf(res, model.CausePCIeLinkErrors)
+	if len(got) != 2 {
+		t.Fatalf("%d pcie_link_errors causes, want 2: %+v", len(got), res.Causes)
+	}
+	for _, c := range got {
+		want := "; the same run names no other cause at the link (counters only)"
 		if c.Links[0] == "rp.1" {
-			want = model.ConfidenceHigh
+			want = "; the same run also names the link (cpu_root_port_failure)"
 		}
-		if c.Confidence != want {
-			t.Fatalf("%s is %s, want %s: %s", c.Links[0], c.Confidence, want, c.Evidence)
+		if c.Confidence != model.ConfidenceMedium || !strings.HasSuffix(c.Evidence, want) {
+			t.Fatalf("%s: %s, evidence %q; want medium ending %q", c.Links[0], c.Confidence, c.Evidence, want)
 		}
-	}
-	if n := len(causesOf(res, model.CausePCIeLinkErrors)); n != 2 {
-		t.Fatalf("%d pcie_link_errors causes, want 2: %+v", n, res.Causes)
 	}
 }
 

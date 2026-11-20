@@ -485,9 +485,12 @@ func TestPassiveWatchPace(t *testing.T) {
 	}
 
 	// An engine run that names the cause counts as its report; one that
-	// does not, does not.
+	// names the link under another code, or another link, does not.
 	t1 := t0.Add(4 * time.Minute)
-	p.emitted(t1, model.Report{Trigger: model.TriggerIdle, Causes: []model.RootCause{{Code: model.CauseGPUPCIeFailure, Links: []string{"pcie.gpu1"}}}})
+	p.emitted(t1, model.Report{Trigger: model.TriggerIdle, Causes: []model.RootCause{
+		{Code: model.CauseGPUPCIeFailure, Links: []string{"pcie.gpu1"}},
+		{Code: model.CausePCIeLinkErrors, Links: []string{"pcie.gpu2"}},
+	}})
 	if _, ok := p.due(t0.Add(cfg.IdleInterval), false); !ok {
 		t.Fatal("a run that named another cause put the passive report off")
 	}
@@ -507,8 +510,10 @@ func TestPassiveWatchPace(t *testing.T) {
 		t.Fatalf("need %v", got)
 	}
 
-	// One goes away: nothing to report. Both go away: logged, and a cause
-	// that comes back later is new again.
+	// One goes away: nothing to report. Both go away: logged. A cause that
+	// comes back is reported again, but not within one idle interval of the
+	// last report that named it, so a link that hovers at the threshold
+	// cannot report every few minutes.
 	sample(finding("pcie.gpu1", model.PCIeLinkSustained))
 	if _, ok := p.due(t1.Add(2*time.Second), false); ok {
 		t.Fatal("a report because a cause went away")
@@ -521,8 +526,49 @@ func TestPassiveWatchPace(t *testing.T) {
 		t.Fatalf("logs %q, want the end of the findings once", logs)
 	}
 	sample(finding("pcie.gpu1", model.PCIeLinkSustained))
-	if _, ok := p.due(t1.Add(time.Hour+time.Second), false); !ok {
+	if _, ok := p.due(t1.Add(cfg.IdleInterval-time.Second), false); ok {
+		t.Fatal("a cause that came back is reported within one idle interval of its last report")
+	}
+	if _, ok := p.due(t1.Add(cfg.IdleInterval+time.Second), false); !ok {
 		t.Fatal("a cause that came back is not reported")
+	}
+
+	// A cause an engine run named before the passive reading proved it (the
+	// run read the same config space as it started) is not repeated by a
+	// passive report right after.
+	q := newPassiveWatch(cfg, g, nolog)
+	q.emitted(t0, model.Report{Trigger: model.TriggerIdle, Causes: []model.RootCause{
+		{Code: model.CauseGPUPCIeFailure, Links: []string{"pcie.gpu3"}, Confidence: model.ConfidenceHigh},
+		{Code: model.CauseUnknown},
+	}})
+	narrow := model.PCIeConfig{Speed: "16.0 GT/s PCIe", Width: 4, MaxSpeed: "16.0 GT/s PCIe", MaxWidth: 16, PortMaxSpeed: "16.0 GT/s PCIe", PortMaxWidth: 16}
+	q.observe(&model.PCIePassive{Sampled: true, Configs: map[string]model.PCIeConfig{"gpu3": narrow}})
+	if rep, ok := q.due(t0.Add(10*time.Second), true); ok {
+		t.Fatalf("passive report %+v ten seconds after an idle run named the same cause", rep.Causes)
+	}
+	if rep, ok := q.due(t0.Add(cfg.IdleInterval), true); !ok || len(rep.Causes) != 1 || rep.Causes[0].Code != model.CauseGPUPCIeFailure {
+		t.Fatalf("report %+v (due %v) one idle interval later, want the down-train cause", rep, ok)
+	}
+}
+
+// An --idle-interval shorter than a minute does not make a standing cause a
+// report per poll: the pace has a floor.
+func TestPassiveWatchPaceFloor(t *testing.T) {
+	cfg := passiveConfig()
+	cfg.IdleInterval = 0
+	p := newPassiveWatch(cfg, topology.Fig2(), nolog)
+	p.observe(&model.PCIePassive{Sampled: true, Findings: []model.PCIeLinkFinding{{Link: "pcie.gpu1", State: model.PCIeLinkSustained}}})
+	t0 := time.Unix(1_700_000_000, 0)
+	rep, ok := p.due(t0, false)
+	if !ok {
+		t.Fatal("no report for a new cause")
+	}
+	p.emitted(t0, rep)
+	if _, ok := p.due(t0.Add(59*time.Second), false); ok {
+		t.Fatal("a second report within a minute at --idle-interval 0")
+	}
+	if _, ok := p.due(t0.Add(time.Minute), false); !ok {
+		t.Fatal("no report a minute later")
 	}
 }
 

@@ -315,8 +315,12 @@ func (d *daemon) tick(ctx context.Context) bool {
 	}
 	if !dec.Run {
 		// No run starts on this poll to carry them: report what the passive
-		// reading proves on its own, when that is due.
-		d.reportPassive(ctx, dec)
+		// reading proves on its own, when that is due. Not while an
+		// idle-mode report is held: once confirmed it names the same causes,
+		// and a passive report a poll ahead of it would say them twice.
+		if !d.pending.held {
+			d.reportPassive(ctx, dec)
+		}
 		return true
 	}
 	if dec.Trigger == model.TriggerIdle {

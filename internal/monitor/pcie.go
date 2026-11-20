@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/yuuki/hostping/internal/model"
@@ -108,14 +109,17 @@ type pcieLinkTrack struct {
 	// cfg is the previous sample's link; cfgOK whether it was read.
 	cfg   model.PCIeConfig
 	cfgOK bool
-	// winStart is when the window being counted began.
-	winStart time.Time
+	// winStart is when the window being counted began, and winBudget the
+	// largest budget a sample of it gave: a link that changes speed inside
+	// a window, as an idle GPU does, is held to the faster one.
+	winStart  time.Time
+	winBudget float64
 	// over counts the consecutive measured windows over the budget; within
 	// those that were judged and were not.
 	over, within int
-	// sustained is set once over reaches model.PCIeSustainWindows and
-	// cleared once within does.
-	sustained bool
+	// hot is set by a window over the budget and sustained once over
+	// reaches model.PCIeSustainWindows; both are cleared once within does.
+	hot, sustained bool
 	// uncorrectable counts down the measured windows an uncorrectable link
 	// error still stands for.
 	uncorrectable int
@@ -179,8 +183,11 @@ func (w *pcieWatch) observe(now time.Time, samples []PCIeLinkSample) model.PCIeP
 		if measured {
 			out.Errors = append(out.Errors, model.PCIeLinkErrors{Link: s.Link, Correctable: cor, Uncorrectable: unc, BudgetPerMinute: budget})
 		}
+		t.winBudget = math.Max(t.winBudget, budget)
 		if now.Sub(t.winStart) >= pcieWindow {
-			w.closeWindow(now, s, t, budget)
+			w.closeWindow(now, s, t, t.winBudget)
+			// This sample ends one window and starts the next.
+			t.winBudget = budget
 		}
 		if t.finding != nil {
 			out.Findings = append(out.Findings, *t.finding)
@@ -303,7 +310,7 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 	if len(ends) == 0 {
 		// Unknown is not within budget: the streak ends, and so does a
 		// finding, whose evidence is no longer current.
-		t.over, t.within, t.sustained, t.uncorrectable, t.finding = 0, 0, false, 0, nil
+		t.over, t.within, t.hot, t.sustained, t.uncorrectable, t.finding = 0, 0, false, false, 0, nil
 		if before != "" {
 			w.logf("hostping: pcie: %s: its AER counters were not read throughout the last window; the %s finding is dropped, not cleared", s.Link, before)
 		}
@@ -315,9 +322,9 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 	case budget <= 0:
 		// No negotiated link, or --pcie-ber 0: the rate is not judged, so
 		// nothing shows the link over its budget now. Like an unknown
-		// window, that ends a streak and a sustained finding; it is not a
-		// window within the budget.
-		t.over, t.within, t.sustained = 0, 0, false
+		// window, that ends a streak and a suspect or sustained finding;
+		// it is not a window within the budget.
+		t.over, t.within, t.hot, t.sustained = 0, 0, false, false
 		ended = "its link-error rate can no longer be judged"
 		if w.ber > 0 && !t.unjudged {
 			t.unjudged = true
@@ -327,15 +334,19 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 		t.unjudged = false
 		t.over++
 		t.within = 0
+		t.hot = true
 		if t.over >= model.PCIeSustainWindows {
 			t.sustained = true
 		}
 	default:
+		// A finding ends only after as many windows within the budget as
+		// it takes to prove one, so a link that hovers at the threshold is
+		// one finding, logged once, not a new one every other minute.
 		t.unjudged = false
 		t.over = 0
 		t.within++
 		if t.within >= model.PCIeSustainWindows {
-			t.sustained = false
+			t.hot, t.sustained = false, false
 		}
 	}
 	if uncorrectable {
@@ -350,7 +361,7 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 		state = model.PCIeLinkUncorrectable
 	case t.sustained:
 		state = model.PCIeLinkSustained
-	case t.over > 0:
+	case t.hot:
 		state = model.PCIeLinkSuspect
 	}
 	if state == "" {
@@ -557,10 +568,11 @@ func PCIeLinkSpecs(sysroot string, g topology.Graph) (specs []PCIeLinkSpec, note
 	}
 	ends := func(link, port, lower string) []PCIeEndSpec {
 		var out []PCIeEndSpec
+		var absent []string
 		add := func(bdf string, isPort bool) {
 			_, err := pci.ReadLinkErrors(sysroot, bdf)
 			if errors.Is(err, pci.ErrAERAbsent) {
-				note("%s: no AER statistics at %s (no AER capability, or a kernel without them)", link, bdf)
+				absent = append(absent, bdf)
 				return
 			}
 			if err != nil {
@@ -576,6 +588,11 @@ func PCIeLinkSpecs(sysroot string, g topology.Graph) (specs []PCIeLinkSpec, note
 		}
 		for _, fn := range pci.DeviceFunctions(sysroot, lower) {
 			add(fn, false)
+		}
+		if len(absent) > 0 {
+			// One line per link: a card with virtual functions has many
+			// functions without the capability.
+			note("%s: no AER statistics at %s (no AER capability, or a kernel without them)", link, strings.Join(absent, ", "))
 		}
 		return out
 	}

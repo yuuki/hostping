@@ -18,8 +18,9 @@ import (
 // ends count are a cause of their own, pcie_link_errors: an error rate over
 // the link's bit-error budget shows the link is marginal, not that it has
 // lost bandwidth, so it never becomes rnic_pcie_failure, gpu_pcie_failure or
-// cpu_root_port_failure and never changes a path or link status. Whether the
-// link is also a bottleneck is what the probes say.
+// cpu_root_port_failure, never raises their confidence and never changes a
+// path or link status. Whether the link is also a bottleneck is what the
+// probes say.
 
 // passiveOnlyEvidence replaces the symptom half of a down-train cause's
 // evidence when no engine run is behind it.
@@ -28,18 +29,12 @@ const passiveOnlyEvidence = "; read without a probe on two consecutive samples (
 // diagnoseLinkErrors reports each proven passive link-error finding of the
 // run as pcie_link_errors. A suspect finding is a hint and names no cause.
 //
-// Confidence follows the down-train rule: the counters alone are one line of
-// evidence, medium. They are high when this run also measured a bottleneck at
-// the same link: an abnormal affinitive path of the RNIC or to the GPU whose
-// link it is, or, for the link below a root port or between switches,
-// Algorithm 1 marking that hop abnormal.
-func diagnoseLinkErrors(in Input, paths []model.PathMeasurement, links []model.LinkState, already []model.RootCause) []model.RootCause {
-	if len(in.PCIeLinks) == 0 {
-		return nil
-	}
-	pm := pathMap(paths)
-	st := linkMap(links)
-	misconfig := hasMisconfigCause(already)
+// The cause is medium whatever the probes measured: the counters are one line
+// of evidence, and they show a link that errs, not one that has lost
+// bandwidth. When the probes of the same run name the same link, that is
+// another cause of the report, with its own confidence; this one only says
+// so in its evidence, so the two are read together.
+func diagnoseLinkErrors(in Input, already []model.RootCause) []model.RootCause {
 	var out []model.RootCause
 	for _, f := range in.PCIeLinks {
 		if !f.State.Proven() {
@@ -50,39 +45,31 @@ func diagnoseLinkErrors(in Input, paths []model.PathMeasurement, links []model.L
 			continue
 		}
 		c := linkErrorsCause(l, f)
-		symptom := ""
-		switch l.Kind {
-		case model.LinkKindPCIeRNIC:
-			if abn := abnormalAffinitiveEndpoints(in.Graph, pm, l.Device); len(abn) > 0 {
-				c.Endpoints = abn
-				symptom = symptomEvidence(len(abn))
-			}
-		case model.LinkKindPCIeGPU:
-			e, _ := in.Graph.Endpoint(l.Device)
-			if aff := affinitiveRNIC(in.Graph, e); aff != "" && !misconfig {
-				if m, ok := pm[pathKey(aff, e.ID)]; ok && m.Status == model.PathAbnormal {
-					symptom = symptomEvidence(1)
-				}
-			}
-		default:
-			if st[l.ID].Status == model.LinkAbnormal {
-				symptom = "; Algorithm 1 marks the hop abnormal in this run"
-			}
-		}
-		if symptom == "" {
-			symptom = "; no bottleneck measured at the link in this run (counters only)"
+		if codes := causesNaming(already, l.ID); len(codes) > 0 {
+			c.Evidence += "; the same run also names the link (" + strings.Join(codes, ", ") + ")"
 		} else {
-			c.Confidence = model.ConfidenceHigh
+			c.Evidence += "; the same run names no other cause at the link (counters only)"
 		}
-		c.Evidence += symptom
 		out = append(out, c)
 	}
 	return out
 }
 
-// linkErrorsCause is the pcie_link_errors cause of finding f on link l, at
-// the confidence the counters carry on their own and without the symptom
-// half of its evidence.
+// causesNaming lists the codes of the causes that name link, each once, in
+// the order given.
+func causesNaming(causes []model.RootCause, link string) []string {
+	var codes []string
+	for _, c := range causes {
+		if slices.Contains(c.Links, link) && !slices.Contains(codes, c.Code) {
+			codes = append(codes, c.Code)
+		}
+	}
+	return codes
+}
+
+// linkErrorsCause is the pcie_link_errors cause of finding f on link l,
+// without the half of its evidence that says what else is known of the
+// link.
 func linkErrorsCause(l model.Link, f model.PCIeLinkFinding) model.RootCause {
 	c := model.RootCause{
 		Code:       model.CausePCIeLinkErrors,

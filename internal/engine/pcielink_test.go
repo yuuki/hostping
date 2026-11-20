@@ -164,7 +164,7 @@ func TestPCIeLinkRunConfirmsABottleneck(t *testing.T) {
 	}
 
 	// The link errs and has lost bandwidth: the probes name the GPU, and the
-	// counters are high because they agree.
+	// counters, still medium, point at that cause.
 	w := world("gpu_pcie:gpu3;busy:rnic1")
 	rep := runWith(t, New(config.Defaults(), g, sim.Prober{World: w}), req(w))
 	var gpu, link *model.RootCause
@@ -179,8 +179,9 @@ func TestPCIeLinkRunConfirmsABottleneck(t *testing.T) {
 	if gpu == nil || gpu.Confidence != model.ConfidenceHigh || !slices.Equal(gpu.Endpoints, []string{"gpu3"}) {
 		t.Fatalf("causes %+v, want gpu_pcie_failure [high] on gpu3 from the sibling comparison", rep.Causes)
 	}
-	if link == nil || link.Confidence != model.ConfidenceHigh || !slices.Equal(link.Links, []string{"pcie.gpu3"}) {
-		t.Fatalf("causes %+v, want pcie_link_errors [high] on pcie.gpu3", rep.Causes)
+	if link == nil || link.Confidence != model.ConfidenceMedium || !slices.Equal(link.Links, []string{"pcie.gpu3"}) ||
+		!strings.HasSuffix(link.Evidence, "; the same run also names the link (gpu_pcie_failure)") {
+		t.Fatalf("causes %+v, want pcie_link_errors [medium] on pcie.gpu3 pointing at gpu_pcie_failure", rep.Causes)
 	}
 
 	// The link errs but carries its bandwidth: the counters stay medium and

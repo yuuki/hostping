@@ -876,7 +876,7 @@ func (t *Telemetry) RecordPCIe(ctx context.Context, p *model.PCIePassive) {
 		return
 	}
 	for _, e := range p.Errors {
-		link := attribute.String("link", e.Link)
+		link := attribute.String("link", orUnknown(e.Link))
 		t.pcieErrors.Add(ctx, countValue(e.Correctable), metric.WithAttributes(link, attribute.String("severity", PCIeCorrectable)))
 		t.pcieErrors.Add(ctx, countValue(e.Uncorrectable), metric.WithAttributes(link, attribute.String("severity", PCIeUncorrectable)))
 		if e.BudgetPerMinute > 0 {

@@ -21,10 +21,11 @@ import (
 // The counts are what the kernel's AER handler recorded for the function
 // (pci_dev_aer_stats_incr in drivers/pci/pcie/aer.c): one per handled error
 // report and status bit, not one per error. Several errors behind one report
-// count once, a masked status bit counts nothing, and a platform whose
-// firmware keeps AER to itself (no _OSC grant) counts nothing at all. A
-// count is therefore a lower bound, and a count that does not move is no
-// proof of a clean link.
+// count once, a masked status bit counts nothing, and on a platform whose
+// firmware keeps AER to itself (no _OSC grant) the kernel counts only what
+// the firmware passes on, which for corrected errors may be nothing. A count
+// is therefore a lower bound, and a count that does not move is no proof of
+// a clean link.
 
 // The rows that report on the link itself: the ones the kernel classes as
 // Physical Layer or Data Link Layer errors (AER_PHYSICAL_LAYER_ERROR_MASK and

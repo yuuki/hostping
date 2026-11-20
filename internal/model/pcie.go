@@ -12,10 +12,10 @@ import (
 type PCIeLinkState string
 
 const (
-	// PCIeLinkSuspect: the link's last measured window counted more link
-	// errors than its bit-error budget allows, but not yet for long enough
-	// to be a verdict. It is a hint: it can start a targeted probe
-	// (--pcie-probe-interval) and names no cause.
+	// PCIeLinkSuspect: one of the link's last PCIeSustainWindows measured
+	// windows counted more link errors than its bit-error budget allows,
+	// but never that many in a row. It is a hint: it can start a targeted
+	// probe (--pcie-probe-interval) and names no cause.
 	PCIeLinkSuspect PCIeLinkState = "suspect"
 	// PCIeLinkSustained: PCIeSustainWindows consecutive measured windows
 	// were over the budget. It is a verdict, pcie_link_errors.
@@ -50,11 +50,13 @@ type PCIeLinkFinding struct {
 	// that counted the most in the last measured window.
 	ErrorsPerMinute float64 `json:"errors_per_minute"`
 	// BudgetPerMinute is the link errors per minute one direction of the
-	// link may show at --pcie-ber, for the speed and width it trained to;
-	// 0 when the negotiated link could not be read.
+	// link may show at --pcie-ber, for the fastest speed and width it was
+	// trained to in the window; 0 when the negotiated link could not be
+	// read.
 	BudgetPerMinute float64 `json:"budget_per_minute"`
 	// OverBudgetWindows is the number of consecutive measured windows over
-	// the budget, the last one included.
+	// the budget, the last one included; 0 when the last one was within
+	// it and the finding stands on earlier windows.
 	OverBudgetWindows int `json:"over_budget_windows"`
 	// WindowSeconds is the length of the last measured window.
 	WindowSeconds float64 `json:"window_seconds"`

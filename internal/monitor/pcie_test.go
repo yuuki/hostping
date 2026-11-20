@@ -228,22 +228,75 @@ func TestPCIeWatchSuspectThenSustainedThenEnds(t *testing.T) {
 }
 
 // A burst over the budget in one window that does not come back is a hint
-// that goes away: it never becomes a verdict.
+// that goes away after three windows within the budget: it never becomes a
+// verdict. Neither does a link that is over the budget again and again but
+// never three windows in a row; it stays one suspect, logged once.
 func TestPCIeWatchOneBurstIsOnlyAHint(t *testing.T) {
 	s := newLinkScript(t, 1e-12)
 	s.sample(0)
 	if s.minute(5000); s.state() != model.PCIeLinkSuspect {
 		t.Fatalf("burst: state %q, want suspect", s.state())
 	}
-	if s.minute(0); s.state() != "" {
-		t.Fatalf("window after the burst: %+v", s.last.Findings)
-	}
-	// Two windows over, one within, two over: never three in a row.
-	for _, n := range []uint64{100, 100, 0, 100, 100, 0} {
-		s.minute(n)
-		if s.state().Proven() {
-			t.Fatalf("after %d errors: %q without three consecutive windows over the budget", n, s.state())
+	for i := 0; i < 2; i++ {
+		if s.minute(0); s.state() != model.PCIeLinkSuspect || s.last.Findings[0].OverBudgetWindows != 0 {
+			t.Fatalf("window %d after the burst: %+v, want the suspect to stand with no window over the budget", i+1, s.last.Findings)
 		}
+	}
+	if s.minute(0); s.state() != "" {
+		t.Fatalf("third window after the burst: %+v", s.last.Findings)
+	}
+	logs := len(s.logs)
+	// Two windows over, one within, again and again: never three in a row.
+	for i, n := range []uint64{100, 100, 0, 100, 100, 0, 100, 100, 0, 0} {
+		s.minute(n)
+		if s.state() != model.PCIeLinkSuspect {
+			t.Fatalf("window %d (%d errors): state %q, want a standing suspect", i, n, s.state())
+		}
+	}
+	if got := len(s.logs) - logs; got != 1 {
+		t.Fatalf("%d log lines for one suspect that never ended: %q", got, s.logs[logs:])
+	}
+	if s.minute(0); s.state() != "" {
+		t.Fatalf("after three windows within the budget: %+v", s.last.Findings)
+	}
+}
+
+// A window is held to the largest budget one of its samples gave. A GPU that
+// drops its link speed while idle and retrains under load is not over a
+// Gen1 budget for the errors it counted at Gen4.
+func TestPCIeWatchBudgetFollowsTheFastestSpeedInTheWindow(t *testing.T) {
+	s := newLinkScript(t, 1e-12)
+	s.cfg.Speed = "2.5 GT/s PCIe" // 2.4 a minute at x16: over it from 4
+	s.sample(0)
+	for i := 0; i < 3; i++ {
+		s.minute(10)
+	}
+	if s.state() != model.PCIeLinkSustained {
+		t.Fatalf("state %q for 10 errors a minute at Gen1 x16, want sustained", s.state())
+	}
+	for i := 0; i < 3; i++ {
+		s.minute(0)
+	}
+	if s.state() != "" {
+		t.Fatalf("finding %+v outlived three quiet windows", s.last.Findings)
+	}
+	// Each window now has one sample at Gen4, in its middle.
+	for i := 0; i < 4; i++ {
+		for j := 0; j < 6; j++ {
+			s.cfg.Speed = "2.5 GT/s PCIe"
+			if j == 2 {
+				s.cfg.Speed = gen4
+			}
+			s.dev.Correctable[pci.AERBadTLP] += 2 // 12 a minute, under Gen4 x16's 16
+			s.sample(10 * time.Second)
+		}
+		if s.state() != "" {
+			t.Fatalf("window %d: %+v for 12 errors a minute on a link that ran at Gen4 in it", i, s.last.Findings)
+		}
+	}
+	// The gauge follows the sample, not the window.
+	if e := s.last.Errors; len(e) != 1 || math.Abs(e[0].BudgetPerMinute-2.4) > 1e-9 {
+		t.Fatalf("errors %+v, want the budget of the speed the last sample read", e)
 	}
 }
 
@@ -416,7 +469,12 @@ func TestPCIeWatchUnreadLinkIsNotJudged(t *testing.T) {
 	if s.state() != model.PCIeLinkSustained {
 		t.Fatalf("state %q, want sustained", s.state())
 	}
+	// The window that begins on a sample that still read the link keeps
+	// that sample's budget; the next one has none.
 	s.cfgOK = false
+	if s.minute(100); s.state() != model.PCIeLinkSustained {
+		t.Fatalf("state %q in the window that began with a known link, want sustained", s.state())
+	}
 	if s.minute(100); s.state() != "" {
 		t.Fatalf("finding %+v with no budget to hold the rate to", s.last.Findings)
 	}
@@ -1021,17 +1079,17 @@ func TestPCIeLinkSpecs(t *testing.T) {
 		t.Fatalf("specs:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	for _, n := range []string{
-		"pcie.rnic1: no AER statistics at 0000:5b:00.1",
-		"pcie.gpu1: no AER statistics at 0000:7b:00.0",
-		"pcie.gpu1: no AER statistics at 0000:7c:00.0",
+		"pcie.rnic1: no AER statistics at 0000:5b:00.1 (",
+		// One line per link, however many of its functions lack them.
+		"pcie.gpu1: no AER statistics at 0000:7b:00.0, 0000:7c:00.0 (",
 		"pcie.gpu1: the links above it are not read",
 	} {
 		if !slices.ContainsFunc(notes, func(s string) bool { return strings.HasPrefix(s, n) }) {
 			t.Fatalf("notes %q lack %q", notes, n)
 		}
 	}
-	if len(notes) != 4 {
-		t.Fatalf("notes %q, want the four above and each once", notes)
+	if len(notes) != 3 {
+		t.Fatalf("notes %q, want the three above and each once", notes)
 	}
 }
 

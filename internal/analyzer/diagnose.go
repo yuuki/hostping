@@ -155,7 +155,7 @@ func Analyze(in Input) Result {
 	causes = append(causes, diagnosePCIeDownTrain(in, paths, causes)...)
 	causes = append(causes, diagnoseLatency(in.Graph, paths, causes, in.Cfg.AbnormalTh, in.OneShot)...)
 	// Last, so the passive evidence is read by none of the rules above.
-	causes = append(causes, diagnoseLinkErrors(in, paths, links, causes)...)
+	causes = append(causes, diagnoseLinkErrors(in, causes)...)
 	slices.SortStableFunc(causes, compareCauses)
 
 	return Result{Paths: paths, Links: links, Causes: causes, GrayHits: gray, SlowMRHits: mrHits, LatencyHits: latHits}
