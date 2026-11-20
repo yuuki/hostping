@@ -27,6 +27,14 @@ HOSTPING_OPTS=""
 #                              script that exits 1 while a scheduler job holds
 #                              the host and 2 when it cannot query the
 #                              scheduler (see docs/operations.md)
+#   --pcie-interval 10s        read PCIe link training and AER link-error
+#                              counters without a probe; a link that trained
+#                              narrow or errs beyond its budget is reported
+#                              when it shows, on a loaded host too (off by
+#                              default; see docs/operations.md)
+#   --pcie-probe-interval 30m  with --pcie-interval: on a loaded host, probe
+#                              only the RNICs under a link with such a finding
+#                              (off by default; costs those RNICs a busy run)
 #   --mutual-scope host        also probe across rails (only where rails route
 #                              to each other)
 #   --exclude-rnic mlx5_4,mlx5_5

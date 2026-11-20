@@ -8,6 +8,55 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- Passive PCIe link monitoring, opt-in with `--pcie-interval D` (daemon only,
+  off by default). Without sending a probe, the hardware monitor reads the
+  negotiated link of every RNIC and GPU and the kernel's AER link-error
+  counters (`aer_dev_correctable`, `aer_dev_nonfatal`, `aer_dev_fatal`) at
+  both ends of the PCIe links the probes cross, every `D`:
+  - A link that trained below its capability is reported between engine runs,
+    by the existing `rnic_pcie_failure` / `gpu_pcie_failure` down-train rules
+    and at their `medium` for config space alone, once it read the same on two
+    samples. A host that stays loaded without PFC pauses or drops no longer
+    has to go idle first.
+  - New cause `pcie_link_errors`: an end of a link counted more correctable
+    link errors per minute (Receiver Error, Bad TLP, Bad DLLP, REPLAY_NUM
+    Rollover, Replay Timer Timeout) than a bit error ratio of `--pcie-ber`
+    (default `1e-12`) gives at the link's negotiated speed and width, in three
+    consecutive one-minute windows; or an end counted a Data Link Protocol
+    Error or a Surprise Down. It is always `medium`, changes no path or link
+    status and no other cause, and the packaged alerting rules ticket it
+    without paging. A bottleneck the probes measure at the same link is
+    reported next to it under its own code.
+  - These causes are written between runs as a report with `"trigger"` and
+    `"mode"` `"passive"`, empty `paths` and `links`, at once and then once per
+    `--idle-interval` while they stand. A passive report counts in
+    `hostping_diagnosis_count_total` and in no run or liveness series.
+  - New report field `pcie_links` (omitted when empty): the standing findings
+    with the counters behind them. New metrics
+    `hostping_pcie_link_errors_total{link,severity}` and
+    `hostping_pcie_link_error_budget{link}`.
+  - A counter is evidence only as a difference between two samples. The first
+    sample, a counter that went down (the device was enumerated again) and a
+    function that stopped reading are baselines or unknown, never zero, and
+    the totals counted before the daemon started are never read.
+- `--pcie-probe-interval D` (opt-in, needs `--pcie-interval`): on a host that
+  is not idle, a PCIe link with a passive finding starts a busy-mode run with
+  trigger `pcie_link` that sweeps only the RNICs whose probes cross that link
+  (plus up to two unloaded RNICs as references for the bandwidth recheck), at
+  most once per link and `D` and never inside `--busy-cooldown`. Such a run
+  rewrites `hostping_link_status_code` and `hostping_link_abnormal_count` only
+  for the links it tested.
+- `--sim` fault `aer:<link>` (`aer:pcie.gpu3`, or `aer:pcie.gpu3=12` for a
+  rate per minute): the AER counters of an RNIC or GPU link count link errors,
+  for the daemon with `--pcie-interval`.
+
+Not validated on hardware: the passive reading was developed against the
+kernel's documented sysfs format and fixtures of it. AMD uncore and IOMMU
+counters, which the same proposal asked for, are not read;
+[docs/design.md](docs/design.md#what-is-not-read) says why.
+
 ## [0.2.5] - 2026-11-11
 
 ### Changed

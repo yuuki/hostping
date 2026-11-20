@@ -122,6 +122,7 @@ The unit runs `hostping` as root. What it uses, and why:
 | `RLIMIT_MEMLOCK` | Host-memory MRs (`ibv_reg_mr`) | See below. |
 | `/dev/nvidia*`, `libcuda.so.1` (or `libcudart.so.*`), and `nvidia-peermem` or dma-buf support | GPU loopback (GPUDirect RDMA) | AMD: `libamdhip64.so`. Missing pieces skip the GPU endpoints with a reason; they never stop the daemon. |
 | sysfs: `/sys/class/infiniband`, `/sys/class/net`, `/sys/bus/pci/devices`, `/sys/class/drm`; `/proc/stat` | Discovery, line rate, counters, PCIe link speed and width, AMD GPU busy; CPU load per NUMA node | Read only. |
+| sysfs: `/sys/bus/pci/devices/*/aer_dev_*` | `--pcie-interval` only: AER link-error counters | Read only, world-readable; no privilege needed. |
 | PCI config space (`/sys/bus/pci/devices/*/config`) beyond the first 64 bytes | ACS / ATS | Root only; see below. |
 | `nvidia-smi` on `PATH` | GPU utilization, compute mode, GPU PCIe throughput | Each call bounded (2 s; 5 s for `nvidia-smi dmon`). |
 | `ethtool` on `PATH` | PFC pause duration and drops not exposed in sysfs (RoCE only) | Each call bounded to 2 s, backed off per netdev when it answers nothing. Without it a RoCE RNIC with no sysfs pause counter has no PFC trigger; the start-up log says so. Unprivileged `ethtool -S` is not verified. |
@@ -217,7 +218,8 @@ set -a; . /etc/default/hostping; set +a
 
 This parses every flag and runs discovery, including `--mem-channel-capacity`
 link IDs and `--drop-ignore-rnic` names, without probing. It does not read `--baseline-file` or check the
-`--mutual-interval` / `--mutual-transport` combination.
+`--mutual-interval` / `--mutual-transport` combination, or that
+`--pcie-probe-interval` comes with `--pcie-interval`.
 
 `hostpingctl diagnose` and the daemon do not coordinate. Running a live
 `diagnose` while the daemon is up puts both runs' probe traffic on the same
@@ -244,6 +246,11 @@ or idle. Where a source has no unknown state, the table says so.
 | Loopback port address | RoCE: no active-port RoCEv2 GID. InfiniBand (`ports/N/link_layer`): no ACTIVE port, or an ACTIVE port with LID 0 (no subnet manager) | Every endpoint of that RNIC is skipped through the same channels, with reason `no active rocev2 gid`, `infiniband port not active` or `infiniband port has no lid`. The RNIC's fabric is `unknown`. The addressing a probe did use is logged once per RNIC and on change: `hostping: loopback addressing rnic=rnic0 device=… link_layer=InfiniBand mode=ib_lid port=1 lid=…`. The log shows `mode=ib_lid_grh` when the LID-only connect was refused or its WRITEs completed with a remote error, and `mode=rocev2_gid` on RoCE. The mode that worked is remembered per device and port. A WRITE that fails in every mode is skipped as `probe failed: Wc: <ibv_wc_status_str> (<status>)`, e.g. `transport retry counter exceeded (12)`. The same text names RoCE completion errors. Port-level failures on InfiniBand are described after the table. |
 | Mutual probe | No active-port RoCEv2 GID or usable InfiniBand LID, or no RNIC pair in `--mutual-scope` | No pairs, logged once per fabric set, and no `hostping.mutual.*` series. InfiniBand RNICs are left out in every scope unless `--mutual-infiniband` is set (logged once: `hostping: mutual probe leaves out N InfiniBand RNIC(s) […]`). With it, they pair under `rail` by subnet prefix (`ib:` key). Separate fabrics left at the default prefix `fe80::/64` then look like one rail and time out as false connectivity failures, so opt in only when the host's InfiniBand ports share one fabric. RoCE and InfiniBand RNICs never pair. |
 | PCIe link speed / width | Unreadable `current_link_speed` | No `rnic_pcie_failure` / `gpu_pcie_failure` from the negotiated link of that device. A hop whose maxima are unreadable is assumed Gen4 x16 and marked `capacity_assumed`. |
+| PCIe link speed / width, read passively (`--pcie-interval`) | The link read once, or its speed or width differs from the previous sample (a link retraining) | That sample judges no down-train for the device. The next sample that reads the same does. |
+| AER link-error counters (`--pcie-interval`): never found | The function has no `aer_dev_*` files: no AER capability, or a kernel older than 4.19 or without `CONFIG_PCIEAER` | **Not applicable**, logged once at start: `hostping: pcie: pcie.gpu1: no AER statistics at 0000:7c:00.0 (…)`. That function is no end of the link. The link is still counted from its other end when that has the files, and still read for its negotiated link. A link with no end at all has no `hostping.pcie.link.errors` series and can have no `pcie_link_errors`. |
+| AER link-error counters: quiet | The files read and do not move. A platform whose firmware keeps AER to itself may show this whatever the link does, and so does a function whose error reporting is masked | Read as no errors counted, which is all it says. hostping never reports a link healthy for it; it only reports a link that errs. `dmesg \| grep -i aer` at boot says whether the kernel owns AER (`AER: enabled with IRQ`). |
+| AER link-error counters: lost or reset | A function that read before does not now (the device left the bus, the files stopped parsing), or a counter went down (the device was removed and enumerated again) | **Unknown**, logged once per change: `hostping: pcie: pcie.gpu3: AER counters of 0000:39:00.0 could not be read (…)` or `… went down (the device was enumerated again); re-baselined`. No difference is taken across the gap, and that end does not count for the window it fell in. `hostping.pcie.link.errors` is written from the other end only, or not at all. A window no end was read through ends a standing finding, logged as `… the sustained finding is dropped, not cleared`. The first sample that reads again is a baseline. |
+| PCIe link-error budget | The negotiated speed or width of the link is unread (`Unknown`, width 0) | The link's errors are still counted and exported, but its rate is not judged: no suspect, no `pcie_link_errors` from the rate. Logged once per link. `hostping.pcie.link.error_budget` is not written. An uncorrectable link error is still reported. |
 | ACS / ATS | Not root (see above), or the device has no such capability | `acs_enabled` / `ats_disabled` not reported. Not logged. |
 | GPU PCIe utilization | No `nvidia-smi` | `pcie.<gpu>` utilization unknown. |
 | Memory utilization | No `--uncore-util`, no `--mem-channel-capacity`, no perf access, AMD, sub-NUMA clustering whose start-up IMC mapping was not clear (a host loading memory hard while the agent starts) | `mem.N` unknown. The reason is logged at start. |
@@ -770,9 +777,11 @@ host. Notation:
 | `hostping_mutual_rtt_microseconds`, `hostping_mutual_loss_ratio`, `hostping_mutual_timeout_ratio` | 3 M | `src` × `dst` |
 | `hostping_rnic_throughput_bit_per_second`, `hostping_rnic_pause_duration_ratio`, `hostping_rnic_drop_delta` | ≤ 3 R | `rnic` |
 | `hostping_cpu_busy` | ≤ N | `numa` × `socket`: one per NUMA node with an RNIC or memory endpoint (N) |
+| `hostping_pcie_link_errors_total` | 2 Q | `link` × `severity` (`correctable`, `uncorrectable`): Q is the PCIe links read passively that have AER counters, at most one per RNIC, GPU, root port and switch; 0 without `--pcie-interval` |
+| `hostping_pcie_link_error_budget` | ≤ Q | `link`; only links whose negotiated speed and width read |
 | `hostping_endpoint_skipped` | 2 | `kind` |
-| `hostping_diagnosis_count_total` | D ≤ 29 | `code` × `confidence`: only the pairs the analyzer emits (23 codes, most at one confidence) |
-| `hostping_engine_run_count_total` | T ≤ 6 for the daemon | `trigger` × `mode`: idle × {`idle`, `mutual_timeout`}, busy × {`pfc`, `packet_drops`, `periodic`, `mutual_timeout`} |
+| `hostping_diagnosis_count_total` | D ≤ 30 | `code` × `confidence`: only the pairs the analyzer emits (24 codes, most at one confidence; `pcie_link_errors` only with `--pcie-interval`) |
+| `hostping_engine_run_count_total` | T ≤ 7 for the daemon | `trigger` × `mode`: idle × {`idle`, `mutual_timeout`}, busy × {`pfc`, `packet_drops`, `periodic`, `mutual_timeout`, `pcie_link`}. A passive report is no run and is not counted here |
 | `hostping_rnic_info` | R | `rnic` (the other labels are fixed per RNIC) |
 | `hostping_endpoint_info` | E | `endpoint` (the other labels are fixed per endpoint) |
 | `hostping_topology_node_info` | R + E + K | `node` (the other labels are fixed per node) |
@@ -784,7 +793,7 @@ host. Notation:
 Per host:
 
 ```
-series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T + G
+series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T + G + 3 Q
 ```
 
 U ≤ L is the number of links with a utilization source. The Prometheus client
@@ -814,6 +823,8 @@ Worked example: the Fig.2 host of `--sim`.
 - U = 0, because there is no live bus utilization.
 - N = 0, because no CPU load is read.
 - G = 0, because no `--idle-gate-command` is set.
+- Q = 0, because `--pcie-interval` is off. With it the simulated host reads
+  its 12 RNIC and GPU links, for 36 more series.
 
 ```
 11 × 32 + 10 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
@@ -855,6 +866,10 @@ When series appear and disappear:
   - `hostping_rnic_pause_duration_ratio` and `hostping_rnic_drop_delta` for an
     RNIC with no source (InfiniBand, or no counter found);
   - `hostping_cpu_busy` for a NUMA node whose CPU load was not read;
+  - `hostping_pcie_link_errors_total` for a link none of whose ends has AER
+    counters, or has not been differenced yet, and
+    `hostping_pcie_link_error_budget` for a link whose negotiated speed or
+    width is unread;
   - `hostping_mutual_timeout_ratio` for a pair that reported no probe count;
   - every `hostping_mutual_*` series on a host with no qualifying pair;
   - path and verb series for a skipped endpoint (it is counted in
@@ -932,7 +947,9 @@ it back.
 
 Without `--state-dir`, a restart loses in-memory state: flapping streaks
 (`--flap-window`), a held idle-mode report awaiting confirmation, and the
-mutual probe window. The idle timer also restarts. On an idle host the first
+mutual probe window. The passive PCIe state (`--pcie-interval`) is lost with
+or without it: every link starts from a new baseline, and a sustained
+`pcie_link_errors` is reported again after three windows. The idle timer also restarts. On an idle host the first
 idle full-mesh run then follows within seconds of the restart instead of
 `--idle-interval` later. On a fleet whose agents restart regularly, a link that
 flaps slowly relative to `--idle-interval` × `--flap-window` may never be
@@ -1017,6 +1034,8 @@ with a two-node all-to-all collective between two multi-GPU RDMA hosts:
 | Situation | What the workload sees |
 | --- | --- |
 | Busy-mode run during service traffic (PFC/drop trigger, `--busy-interval`, or a manual `diagnose` on a loaded host) | Bus bandwidth 10–15% lower for 1–2 s per run, in every repetition. The loopback probes share the loaded RNICs and their PCIe hops with the service. |
+| `pcie_link` run (`--pcie-probe-interval`) | Not measured. It is the same busy-mode sweep on fewer RNICs: only those whose probes cross the link with the passive finding, plus up to two unloaded RNICs. The cost falls on those RNICs' workloads. |
+| Passive PCIe reading (`--pcie-interval`) | No probe, no RDMA traffic, no GPU context: a few small sysfs reads per link and interval. See [Passive PCIe link monitoring](#passive-pcie-link-monitoring). |
 | Idle-mode run already in flight when a job starts | Job launch about 0.4 s slower and the first ~2 s a few percent slower, then back to normal. hostping detects that the host became busy and discards the report (see the idle-mode hold in [Triggers](design.md#triggers)). An idle run that starts inside a quiet stretch of a job is not caught this way; see [Keeping idle runs out of scheduler jobs](#keeping-idle-runs-out-of-scheduler-jobs). |
 | GPU endpoint being probed | One GPU context per probed GPU, on the order of 0.5 GiB of device memory, held only while the run probes that GPU (a few seconds) and released after the run. |
 
@@ -1281,6 +1300,101 @@ rolls the streaks back, and `--state-dir` keeps them across a restart. A
 one-shot run cannot see persistence, so it reports a sibling verdict only when
 the paired recheck confirmed it. A verdict against a `LAT` you set needs
 neither.
+
+## Passive PCIe link monitoring
+
+`--pcie-interval D` turns on a reading that needs no probe (see
+[Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring) for
+what it reads and how it judges). It is off by default and daemon-only. It has
+not been run on hardware yet, so turn it on for a few hosts first and read
+what it logs.
+
+```bash
+# /etc/default/hostping
+HOSTPING_OPTS="--metrics 10.0.0.10:9464 --pcie-interval 10s"
+```
+
+At start the daemon says what it reads:
+
+```
+hostping: pcie: pcie.gpu1: no AER statistics at 0000:7c:00.0 (no AER capability, or a kernel without them)
+hostping: passive PCIe reading every 10s: 21 links, 20 of them with AER counters (link errors beyond a bit error ratio of 1e-12 are reported as pcie_link_errors)
+```
+
+A link without a line reads from both of its ends. A count of links far below
+your RNICs plus GPUs means discovery did not find their PCI addresses.
+
+What it adds, and when:
+
+| Event | After | What you see |
+| --- | --- | --- |
+| An RNIC or GPU link trains below its capability | Two samples that read the same (at most 2 × `D`) | A passive report with `rnic_pcie_failure` or `gpu_pcie_failure` at `medium`, as an engine run would name it from config space alone. An RNIC is named only when the link no longer carries its line rate; a GPU only for its width. |
+| A link end counts more link errors than its budget | One window (a minute) | A log line, `hostping: pcie: pcie.gpu3: suspect (…): a hint, no verdict yet`. No report. The suspect stands until three windows in a row are within the budget. |
+| It stays over the budget | Three windows in a row (three minutes) | `hostping: pcie: pcie.gpu3: sustained (…): reported as pcie_link_errors`, and a passive report with `pcie_link_errors` at `medium`. |
+| A link end counts a Data Link Protocol Error or a Surprise Down | The window it happened in closes (within a minute) | A passive report with `pcie_link_errors` at `medium`, summary "reported an uncorrectable link error". |
+| A cause still stands | Every `--idle-interval` | The next engine run names it. If no run did, a passive report repeats it. |
+
+A passive report is one JSON line like any other report, with
+`"trigger":"passive","mode":"passive"`, empty `paths` and `links`, and the
+findings in `pcie_links`:
+
+```bash
+journalctl -u hostping --since -1h -o cat \
+  | jq -cR 'fromjson? | select(.trigger == "passive") | {started, causes, pcie_links}'
+```
+
+It counts in `hostping_diagnosis_count_total` like the causes of a run, so the
+packaged [alerting rules](#alerting-rules) need no change: a passive cause
+that stands for two reports opens a ticket. Nothing else is written for it.
+In particular it is no engine run: `hostping_engine_run_count_total` and
+`hostping_engine_last_success_timestamp_seconds` do not move, so the liveness
+alerts still say whether the engine runs.
+
+The error counters are exported whether or not they amount to a finding:
+
+```promql
+# Correctable link errors per minute, per link, against what the link is allowed.
+60 * rate(hostping_pcie_link_errors_total{severity="correctable"}[5m])
+hostping_pcie_link_error_budget
+
+# Links that counted an uncorrectable link error in the last day.
+increase(hostping_pcie_link_errors_total{severity="uncorrectable"}[1d]) > 0
+```
+
+The counter sums both ends of a link; the verdict holds each end to the
+budget on its own. A link at the budget in both directions therefore graphs at
+twice the budget without being a finding. A series exists from the first
+sample that could be differenced, at 0 while the link is quiet. No series
+means the link has no AER counters, or they do not read (see
+[What "unknown" means](#what-unknown-means-per-data-source)).
+
+**Tuning.** `--pcie-ber` is the bit error ratio a link is allowed, `1e-12` by
+default. A platform that counts link errors steadily without harm (some do
+around link power-state changes) will show suspects, or a sustained finding,
+on links you know are fine. Raise the ratio there, for example
+`--pcie-ber 1e-10` for a hundred times the budget, and keep the counters on a
+dashboard. `--pcie-ber 0` judges no rate and keeps the down-train reports and
+the uncorrectable link errors.
+
+**Cost.** Per sample and link, the daemon reads the link attributes of one
+function and three small files per function at the link's ends. Reading the
+link attributes is a config-space access, for which the kernel resumes the
+function's parent bridge, and the function itself when it is in D3cold
+(`pci_config_pm_runtime_get`). On a server whose RNICs and GPUs are in use
+that changes nothing. If your GPUs are meant to power down to D3cold between
+jobs, a short `--pcie-interval` keeps waking them; use minutes there. The AER
+files are kernel counters and touch no hardware.
+
+**Probing on a finding.** By default a passive finding sends no probe.
+`--pcie-probe-interval D` lets one start a busy-mode run (trigger `pcie_link`)
+on a host that is not idle: only the RNICs whose probes cross the link, at
+most once per `D` and link. It costs those RNICs' workloads what any busy run
+costs (see [Cost to running workloads](#cost-to-running-workloads)), so set it
+in tens of minutes. It is most useful for GPU links, where the busy sibling
+comparison can say whether the link is also a bottleneck; see
+[Probing the affected RNICs](design.md#probing-the-affected-rnics) for what
+such a run can and cannot see. On an idle host the next idle run answers
+instead.
 
 ## Calibrating baselines
 

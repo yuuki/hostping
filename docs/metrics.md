@@ -45,6 +45,21 @@ Every report carries `reported_at` (UTC), `version` and `commit` next to its
 own fields. A discarded idle-mode run reaches neither output. See
 [Logs and reports under journald](operations.md#logs-and-reports-under-journald).
 
+With `--pcie-interval` the daemon also writes **passive reports**: what the
+kernel's view of the PCIe links proves without a probe. Such a report has
+`"trigger":"passive"` and `"mode":"passive"`, empty `paths` and `links`, and
+its `causes` are a link that trained below its capability
+(`rnic_pcie_failure`, `gpu_pcie_failure`) or `pcie_link_errors`. Every report
+made while a link has a passive finding, passive or not, lists the findings
+in `pcie_links`: per link its `state` (`suspect`, `sustained`,
+`uncorrectable`), `errors_per_minute` against `budget_per_minute`,
+`over_budget_windows`, `window_seconds`, and per end (`bdf`, `port` for the
+port above the link) the `correctable` and `uncorrectable` rows that moved in
+the last window. The field is absent without a finding. A run started for
+such a link has `"trigger":"pcie_link"` and holds only the paths of the RNICs
+it swept. See
+[Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring).
+
 ## Metrics
 
 Each confirmed report records the report metrics. Each monitor poll records the
@@ -67,8 +82,8 @@ agent from one with nothing to report. See
 | `hostping.path.latency_status_code` | gauge (code) | `rnic`, `endpoint` | The path's advisory small-message latency verdict: 1 `normal`, 2 `unknown`, 3 `abnormal` |
 | `hostping.path.latency_reason_code` | gauge (code) | `rnic`, `endpoint` | What the latency verdict was judged against (1 `user_baseline`, 2 `siblings`; 7 `recheck_cleared` when the paired recheck cleared a sibling verdict, 8 `locality_shift` when the other RNICs on its NUMA node read as high) or why it was not judged (3 `busy`, 4 `few_siblings`, 5 `no_path`, 6 `no_reading`, 9 `cpu_busy`); 0 `none` on a path never classified |
 | `hostping.path.latency_streak` | gauge (runs) | `rnic`, `endpoint` | Consecutive idle runs, this one included, that read the path's latency `abnormal` against its siblings (the report's `latency_streak`). The daemon names a cause from 3, so alert on `>= 3` rather than on `latency_status_code`, which one high run flips. 0 when this run did not read it so, on a verdict against a `LAT` you set (which needs no streak), and in a busy run, which judges no latency; see [Latency streak](operations.md#latency-streak) |
-| `hostping.link.abnormal_count` | gauge | `link` | Algorithm 1 `abnormal_cnt` |
-| `hostping.link.status_code` | gauge (code) | `link` | The link's current Algorithm 1 status: 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
+| `hostping.link.abnormal_count` | gauge | `link` | Algorithm 1 `abnormal_cnt`. A `pcie_link` run writes it only for the links it tested |
+| `hostping.link.status_code` | gauge (code) | `link` | The link's current Algorithm 1 status: 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray`. A `pcie_link` run (`--pcie-probe-interval`) sweeps a few RNICs and writes it only for the links it tested, so the others keep the last run's verdict |
 | `hostping.bus.utilization` | gauge (0–1) | `link` | Intra-host bus utilization of the hop, sampled before the run; no sample when unknown (see [Bus utilization](design.md#bus-utilization)) |
 | `hostping.mutual.rtt` | gauge (µs) | `src`, `dst` | RNIC↔RNIC round trip, p50 of the last run's burst, or over the probe window when `--mutual-interval` is set (the JSON `mutual` entry marks a cross-rail pair with `cross_rail`) |
 | `hostping.mutual.loss_ratio` | gauge | `src`, `dst` | Simulated drop loss; on the live probe, whose losses are timeouts, 0, or 1 on a pair that cannot be reached |
@@ -82,7 +97,7 @@ agent from one with nothing to report. See
 | `hostping.verb.duration` | gauge (µs) | `rnic`, `endpoint`, `endpoint_kind`, `verb` | Execution time of the loopback probe's setup verbs (`gpu_alloc` on GPU endpoints only, `mr_reg`, `qp_setup`; `mem_warmup` on memory endpoints with `--mem-warmup`) in the last run. Not exported with `--metrics-verb-durations=false` |
 | `hostping.endpoint.skipped` | gauge | `kind` | Endpoints (`gpu`/`memory`) whose loopback probes were skipped because registration failed, the GPU's compute mode is not `Default`, or an earlier loopback on the same InfiniBand RNIC failed at the port in that run; 0 when none |
 | `hostping.host.idle` | gauge (0/1) | — | 1 when the last run classified the host as idle |
-| `hostping.engine.run.count` | counter | `trigger`, `mode` | Engine runs whose report was confirmed (held idle-mode runs count once confirmed) |
+| `hostping.engine.run.count` | counter | `trigger`, `mode` | Engine runs whose report was confirmed (held idle-mode runs count once confirmed). A passive report is no run and is not counted |
 | `hostping.engine.last_run_timestamp` | gauge (s) | — | Unix time the last engine run ended, whatever its outcome; absent until the first run |
 | `hostping.engine.last_success_timestamp` | gauge (s) | — | Unix time the last run whose report was confirmed and written ended; absent until then |
 | `hostping.engine.run.failed` | counter | `stage` | Runs that failed: `engine` (the run returned an error) or `report` (a confirmed report could not be written to stdout or `--report-file`). 0 from start-up |
@@ -91,7 +106,7 @@ agent from one with nothing to report. See
 | `hostping.monitor.poll.errors` | counter | — | Monitor polls that returned an error (counters or GPU state unreadable). 0 from start-up |
 | `hostping.monitor.last_poll_timestamp` | gauge (s) | — | Unix time of the last monitor poll that completed without error |
 | `hostping.monitor.host_idle` | gauge (0/1) | — | 1 when the last clean poll found the host idle, 0 when busy or unclassified. Unlike `hostping.host.idle`, follows every poll rather than the last report |
-| `hostping.diagnosis.count` | counter | `code`, `confidence` | Root-cause events |
+| `hostping.diagnosis.count` | counter | `code`, `confidence` | Root-cause events: one per cause of every report, the passive reports of `--pcie-interval` included |
 | `hostping.build.info` | gauge | `version`, `commit`, `zig`, `go` | Always 1; names the running build. Exported from start-up, before any run |
 | `hostping.rnic.info` | gauge | `rnic`, `device`, `pcie_bdf`, `netdev`, `link_layer`, `fabric`, `socket`, `numa` | Always 1, one series per RNIC; maps the `rnic` ID the other series carry to the IB device name (`mlx5_N`), PCI address, netdev, port link layer (`Ethernet`/`InfiniBand`), mutual-probe pairing key (`fabric`, e.g. `v4:10.0.0.0`) and NUMA placement. An identifier discovery could not read is `unknown`. Exported from start-up; RNICs dropped by `--exclude-rnic` have none |
 | `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |

@@ -27,6 +27,10 @@ tests:
       # High but not a hardware-fault code, two runs: ticket.
       - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="acs_enabled",confidence="high"}'
         values: '_x5 1x4 2x30'
+      # Passive AER evidence (always medium), two reports: a ticket, never a
+      # page.
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="pcie_link_errors",confidence="medium"}'
+        values: '_x5 1x4 2x30'
       # Advisory, two runs: info only.
       - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-a:9464",otel_scope_name="github.com/yuuki/hostping",code="path_latency_abnormal",confidence="medium"}'
         values: '_x5 1x4 2x30'
@@ -81,6 +85,16 @@ tests:
               summary: "hostping: acs_enabled (high) on host-a:9464"
               description: "hostping reported acs_enabled at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#acs_enabled"
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-a:9464
+              code: pcie_link_errors
+              confidence: medium
+            exp_annotations:
+              summary: "hostping: pcie_link_errors (medium) on host-a:9464"
+              description: "hostping reported pcie_link_errors at confidence medium in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#pcie_link_errors"
           - exp_labels:
               severity: warning
               job: hostping

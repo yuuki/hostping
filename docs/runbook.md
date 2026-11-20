@@ -20,7 +20,8 @@ text says so.
   [`cpu_root_port_failure`](#cpu_root_port_failure),
   [`memory_channel_failure`](#memory_channel_failure),
   [`memory_channel_flapping`](#memory_channel_flapping),
-  [`upi_failure`](#upi_failure), [`snc_mesh_failure`](#snc_mesh_failure)
+  [`upi_failure`](#upi_failure), [`snc_mesh_failure`](#snc_mesh_failure),
+  [`pcie_link_errors`](#pcie_link_errors)
 - Configuration: [`acs_enabled`](#acs_enabled), [`ats_disabled`](#ats_disabled),
   [`rnic_slow_start`](#rnic_slow_start), [`rnic_tx_window`](#rnic_tx_window)
 - Load: [`overloaded_rnic_pcie`](#overloaded_rnic_pcie),
@@ -58,6 +59,13 @@ journalctl -u hostping --since -1h -o cat \
 # or, with --report-file
 jq -c 'select(.causes | length > 0) | {started, mode, trigger, causes}' /var/log/hostping/reports.jsonl
 ```
+
+With `--pcie-interval`, some of those reports are passive: `trigger` and
+`mode` are `passive`, and `paths` and `links` are empty. No probe is behind
+one. It carries what the kernel's view of the PCIe links proves on its own (a
+link that trained below its capability, or [`pcie_link_errors`](#pcie_link_errors)),
+and `pcie_links` holds the counters. An engine run on the same host names the
+same causes next to its measurements.
 
 Each path in the report also names the baseline it was judged against.
 `baseline_class` is the learned sub-class (for example `cross_root/fast`, see
@@ -174,7 +182,7 @@ code in at least two separate engine runs within 30 minutes
 | Alert | Severity | Codes |
 | --- | --- | --- |
 | `HostpingHardwareFault` | critical (page) | At confidence `high`: `rnic_pcie_failure`, `gpu_pcie_failure`, `memory_channel_failure`, `memory_channel_flapping`, `upi_failure`, `snc_mesh_failure`, `cpu_root_port_failure`, `rnic_connectivity_failure`, `rnic_intermittent_timeout` |
-| `HostpingDiagnosis` | warning (ticket) | Every other code at `high` (`acs_enabled`, `ats_disabled`, `rnic_packet_drops`, `rnic_tx_window`, `overloaded_*`), and every non-advisory code at `medium` (including `tor_switch_anomaly` and `rnic_cross_rail_unreachable`) |
+| `HostpingDiagnosis` | warning (ticket) | Every other code at `high` (`acs_enabled`, `ats_disabled`, `rnic_packet_drops`, `rnic_tx_window`, `overloaded_*`), and every non-advisory code at `medium` (including `tor_switch_anomaly`, `rnic_cross_rail_unreachable` and `pcie_link_errors`) |
 | `HostpingAdvisoryDiagnosis` | info | `path_latency_abnormal`, `gpu_mr_registration_slow`, `rnic_pcie_undersized`, `rnic_lossy_class_discards`, `unknown`, at any confidence |
 | none | | `rnic_cross_rail_unreachable` at `low` |
 
@@ -207,6 +215,15 @@ Why:
   part. `tor_switch_anomaly` and `rnic_cross_rail_unreachable` at `medium`
   point outside the host. Promote any of them if your operations treat them as
   urgent.
+- **Passive evidence tickets; a measured bottleneck pages.**
+  `pcie_link_errors` says the AER counters of a link count errors beyond its
+  budget. That is a marginal link, not a measured loss of bandwidth, and its
+  thresholds have not been validated on hardware, so it is always `medium`
+  and never pages. When the link is also a bottleneck, the probes report it
+  under `rnic_pcie_failure`, `gpu_pcie_failure` or `cpu_root_port_failure`,
+  which do. A passive report increments the diagnosis counter like a run, so
+  "two runs" reads "two reports" for a passive cause: at once and one
+  `--idle-interval` later.
 - **Advisory and topology-expected codes never page.** `path_latency_abnormal`,
   `gpu_mr_registration_slow` and `rnic_pcie_undersized` change no path or link
   status, and `unknown` names no component. `rnic_pcie_undersized` describes
@@ -253,7 +270,10 @@ Use the gauges to find the hop once an alert has fired:
   space shows no down-train. The link is healthy, unread, at its maximum, or
   below line rate with both maxima unread. An RNIC-wide throttle (slow start,
   Tx window, NSDI'23 #9/#10) was not ruled out, and the evidence says so.
-- `medium`, "down-trained": config space alone, no slow path yet.
+- `medium`, "down-trained": config space alone, no slow path yet. With
+  `--pcie-interval` this is also reported between runs, in a passive report,
+  once the link read the same on two samples. The evidence then ends
+  "read without a probe on two consecutive samples (config space only)".
 
 **Check first.**
 
@@ -313,7 +333,8 @@ before replacing hardware.
     abnormal.
 - `medium`, when either holds:
   - The link is narrower than `min(device, upstream port)` maximum width with
-    no slow path yet.
+    no slow path yet. With `--pcie-interval` this is also reported between
+    runs, in a passive report, once the width read the same on two samples.
   - The hop is abnormal while its utilization is at or above `--util-high`
     (summary "GPU PCIe link overloaded").
 
@@ -530,6 +551,95 @@ specific and not verified.
 **False positives.** The paths across the mesh are not affinitive. Busy runs
 measure only its memory paths, and the GPU paths come from the idle full mesh.
 As for [`upi_failure`](#upi_failure), this code mostly comes from idle runs.
+
+### `pcie_link_errors`
+
+**Meaning.** The AER counters at the ends of a PCIe link count link errors
+beyond what the link's bit error ratio allows, or an end reported an
+uncorrectable link error. The link is marginal or failed at the signal level.
+It is read without a probe (`--pcie-interval`) and says nothing about
+bandwidth: the link may still carry everything. Beyond the papers; see
+[Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring).
+
+**Confidence and derivation.**
+
+- `medium`, summary "counts link errors beyond its bit-error budget": an end
+  of the link counted more correctable link errors per minute (`RxErr`,
+  `BadTLP`, `BadDLLP`, `Rollover`, `Timeout`) than `--pcie-ber` gives at the
+  link's negotiated speed and width, in three consecutive one-minute windows.
+- `medium`, summary "reported an uncorrectable link error": an end counted a
+  Data Link Protocol Error (`DLP`) or a Surprise Down (`SDES`) in one of the
+  last three windows. One is enough.
+
+It is never `high`. When the probes of the same run measure a bottleneck at
+the same link, that is another cause in the report
+([`rnic_pcie_failure`](#rnic_pcie_failure),
+[`gpu_pcie_failure`](#gpu_pcie_failure),
+[`cpu_root_port_failure`](#cpu_root_port_failure)) with its own confidence,
+and this one's evidence ends "the same run also names the link (…)".
+
+The cause names the link in `links`: `pcie.<rnic>`, `pcie.<gpu>`, `rp.<bdf>`
+(the link from a root port to the switch below it) or `sw.<bdf>` (the link
+above that switch). The evidence gives the rate of the worse end against the
+budget, the consecutive windows, and what each end counted in the last window:
+
+```
+AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:17:00.0 (port): RxErr=95; 0000:18:00.0: BadTLP=409 Timeout=3; last window 60s; read without a probe (counters only)
+```
+
+`(port)` marks the port above the link; the other address is the device or the
+switch upstream port below it. The report's `pcie_links` has the same numbers.
+
+**Check first.**
+
+- Which end counts, and which rows. Receiver errors and Bad TLPs at one end
+  point at the direction toward it; the fault can still be at either end, the
+  riser, the cable or a retimer between them.
+- The live counters:
+  `cat /sys/bus/pci/devices/<bdf>/aer_dev_correctable` for both addresses in
+  the evidence, twice a minute apart. hostping reports differences; the file
+  holds totals since boot.
+- `dmesg | grep -i -e aer -e <bdf>`. The kernel logs each error report with
+  its layer ("Physical Layer", "Data Link Layer") and rate-limits the
+  correctable ones.
+- The negotiated link against its capability
+  (`lspci -vvv -s <bdf>`, `LnkCap` vs `LnkSta`). A link that errs often
+  retrains lower next, which is [`rnic_pcie_failure`](#rnic_pcie_failure) or
+  [`gpu_pcie_failure`](#gpu_pcie_failure).
+- For a GPU, the vendor's own replay counters (`nvidia-smi -q -d PCIE`).
+- Whether the same slot errs with another card, or the card in another slot.
+
+**Remediation.**
+
+1. Nothing is urgent at `medium` while no path is slow: the errors are being
+   corrected. Plan the work.
+2. Reseat the card, riser or cable at the next drain.
+3. Update the firmware of the device, retimer and system if the vendor lists a
+   link-training or equalization fix.
+4. If the rate persists after a reseat, or the cause is an uncorrectable
+   error, replace the part the swap test points at.
+
+When the same report also names the link under a bandwidth cause, act on
+that cause's section; the counters then say why the link is slow.
+
+**False positives.**
+
+- A platform that counts link errors steadily without harm. Some links log
+  receiver errors around power-state changes. If the finding stands on links
+  you know are fine, raise `--pcie-ber` (see
+  [Passive PCIe link monitoring](operations.md#passive-pcie-link-monitoring)).
+- A device reset, a driver reload or a hot-plug puts a burst into one window.
+  That is a suspect, which is logged and not reported. A Surprise Down that
+  maintenance caused on purpose is reported once and ends after three windows.
+- Two functions of one device share a link, so one erring link is reported
+  under each of them (two RNIC ports of one card, say).
+- The thresholds have not been validated on hardware. Compare the evidence
+  with the sysfs counters before acting on a first report.
+
+**What it cannot tell you.** A quiet counter is not a healthy link. Firmware
+that keeps AER to itself may pass no corrected error on to the kernel, a
+masked error is not counted, and a device without the capability has no
+counter. hostping then reports nothing.
 
 ## Configuration
 

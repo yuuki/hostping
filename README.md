@@ -31,6 +31,12 @@ host DRAM, and from a GPU back to the same GPU over GPUDirect RDMA. The agent
 runs a full mesh of probes when the host is idle and a reduced set when PFC
 pauses or drops rise. It can also run periodically under load.
 
+With `--pcie-interval` the agent also reads what the kernel already knows
+about the PCIe links, without sending a probe: the speed and width each link
+trained to, and the AER counters of link errors at both of its ends. A link
+that trained below its capability, or that errs beyond its bit-error budget,
+is reported when it shows, on a loaded host too.
+
 Paths measured on an idle host are judged against distance-class baselines.
 These come from the paper's Fig. 4 scaled to the hardware, or from a per-host
 calibration. Paths measured under load are compared with their siblings.
@@ -49,7 +55,8 @@ hardware monitor ──► Hostping engine ──► data analyzer ──► OTe
       │                    │
       │              Zig loopback (DRAM → RNIC → DRAM; GPU → RNIC → GPU via GDR)
       │              Zig mutual probe (RNIC ↔ RNIC, same rail or --mutual-scope=host)
-      └── RNIC pause/drops/throughput, GPU util, RNIC/GPU PCIe and memory bus util when readable
+      ├── RNIC pause/drops/throughput, GPU util, RNIC/GPU PCIe and memory bus util when readable
+      └── PCIe link training and AER link errors (--pcie-interval) ──► passive report, no probe
 ```
 
 ## Status
@@ -68,6 +75,9 @@ Known limitations:
   with uncore PMUs, and only when the operator supplies the bus capacity.
 - InfiniBand RNICs take part in the mutual probe only with
   `--mutual-infiniband`.
+- The passive PCIe reading (`--pcie-interval`) and the probe it can start
+  (`--pcie-probe-interval`) have not been exercised on hardware, and are off
+  by default. AMD uncore and IOMMU counters are not read.
 
 [docs/design.md](docs/design.md) describes what each path does on live
 hardware and where it fails closed.
@@ -138,7 +148,7 @@ subcommands.
 
 | Document | Contents |
 | --- | --- |
-| [docs/design.md](docs/design.md) | Measurement, classification, baselines, diagnoses, mutual probe, bus utilization, simulated faults |
+| [docs/design.md](docs/design.md) | Measurement, classification, baselines, diagnoses, passive PCIe link monitoring, mutual probe, bus utilization, simulated faults |
 | [docs/metrics.md](docs/metrics.md) | Exported metrics, report format, metrics endpoint |
 | [docs/operations.md](docs/operations.md) | Install layout, privileges, systemd, unknown data sources, alerting, upgrades, cost to workloads, baseline calibration |
 | [docs/runbook.md](docs/runbook.md) | What each diagnosis code and alert means and what to check first |
