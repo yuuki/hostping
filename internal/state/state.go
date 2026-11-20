@@ -37,8 +37,8 @@ const Version = 1
 // FileName is the state file inside --state-dir.
 const FileName = "state.json"
 
-// fileMode is the state file's permission: it names the host's devices and
-// which of its links look unhealthy.
+// fileMode is the permission of the files in --state-dir: they name the
+// host's devices and which of its links and paths look unhealthy.
 const fileMode = 0o600
 
 // bootIDPath is where Linux exposes the identity of the running boot.
@@ -222,8 +222,17 @@ func (s *Store) Save(f File, now time.Time) error {
 		return err
 	}
 	b = append(b, '\n')
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, "."+FileName+"-*.tmp")
+	return WriteAtomic(s.path, b)
+}
+
+// WriteAtomic replaces the file at path with b, mode 0600: a temporary file
+// in the same directory is written, synced and renamed over it, and the
+// directory is synced. A failure leaves the previous file as it was and no
+// temporary file behind. The drift history (internal/drift) is written
+// through it as well.
+func WriteAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -247,7 +256,7 @@ func (s *Store) Save(f File, now time.Time) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(name, s.path); err != nil {
+	if err := os.Rename(name, path); err != nil {
 		return err
 	}
 	done = true

@@ -209,9 +209,22 @@ type Config struct {
 	ReportFile string
 
 	// StateDir, when set, is where the daemon keeps its flapping streaks and
-	// idle cadence across a restart (internal/state). One-shot runs never
-	// read or write it.
+	// idle cadence across a restart (internal/state), and its drift history
+	// with DriftTracking (internal/drift). One-shot runs never read or write
+	// it.
 	StateDir string
+
+	// DriftTracking makes the daemon keep each path's idle readings over
+	// months in StateDir/drift.json and judge every path against its own
+	// first week (internal/drift). It is opt-in: its thresholds have not
+	// been exercised on RDMA hardware, and it adds series per path. One-shot
+	// runs ignore it.
+	DriftTracking bool
+	// DriftTh is how much worse than its own reference, as a fraction, a
+	// path's bandwidth or latency must read to be reported as drifted. A
+	// path whose daily medians scatter needs more (see internal/drift).
+	// MinDriftTh to MaxDriftTh.
+	DriftTh float64
 }
 
 func Defaults() Config {
@@ -243,6 +256,7 @@ func Defaults() Config {
 		MutualWindow:         20 * time.Second,
 		PrometheusAddr:       ":9464",
 		MetricsVerbDurations: true,
+		DriftTh:              0.05,
 		TopologyName:         "fig2",
 		OTLPEndpoint:         os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		OTLPSet:              os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",
@@ -335,7 +349,9 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.Var((*baselineSpecs)(&c.BaselineSpecs), "baseline", "per-distance idle baseline (repeatable). KEY=BW[,LAT] e.g. local_mem=270Gbps,1400ns. Keys: same_switch, multi_switch, cross_root, cross_socket, local_mem, remote_mem. Units: bps/Gbps, ns/us. Path status is bandwidth-only; a LAT you set judges that distance's advisory idle latency_status (unset: same-distance siblings; the Fig.4 latencies are never used for it); same_switch latency also gates ACS/ATS. Unset distances keep Fig.4×line-rate defaults.")
 	fs.Var(&enumValue[ReportFormat]{p: &c.ReportFormat, allowed: []ReportFormat{ReportFormatJSON, ReportFormatPretty, ReportFormatNone}, what: "report format"}, "report-format", "how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)")
 	fs.StringVar(&c.ReportFile, "report-file", c.ReportFile, "append each report to this file as one JSON line (created 0640; reopened per report, so logrotate needs no signal)")
-	fs.StringVar(&c.StateDir, "state-dir", c.StateDir, "daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)")
+	fs.StringVar(&c.StateDir, "state-dir", c.StateDir, "daemon: keep the flapping streaks (--flap-window) and the idle-run cadence in DIR/state.json across a restart of the same boot and topology, and the drift history of --drift-tracking in DIR/drift.json (created 0700 if missing; empty: kept in memory only; one-shot runs never touch it)")
+	fs.BoolVar(&c.DriftTracking, "drift-tracking", c.DriftTracking, "daemon: keep each path's idle readings over months in DIR/drift.json of --state-dir (required) and report a path whose bandwidth or latency reads worse than its own first week by --drift-th: in the report's drift section, the hostping.path.drift.* series and the log (opt-in; one-shot runs ignore it)")
+	fs.Var(&boundedFloat{p: &c.DriftTh, min: MinDriftTh, max: MaxDriftTh}, "drift-th", fmt.Sprintf("daemon, with --drift-tracking: fraction by which a path's bandwidth or latency must read worse than its own reference to be reported as drifted (%v to %v; a path whose daily medians scatter needs three times their scatter)", MinDriftTh, MaxDriftTh))
 	fs.StringVar(&c.BaselineFile, "baseline-file", c.BaselineFile, "JSON object of idle baselines (same keys as --baseline). Fields: bandwidth_bps or bandwidth (e.g. 270Gbps), latency_ns or latency (e.g. 1400ns). An optional \"tables\" object holds per-Fig.4-table sections (key line_rate=<N>Gbps[,pcie_hop=<N>Gbps]) that replace the top level for RNICs on that table. Unknown fields are rejected. Flags override the file, sections included.")
 }
 
@@ -380,6 +396,23 @@ func (c Config) ValidateMutual() error {
 func (c Config) ValidateIdleGate() error {
 	if c.IdleGateCommand != "" && c.IdleGateTimeout <= 0 {
 		return fmt.Errorf("--idle-gate-timeout must be positive with --idle-gate-command, got %v", c.IdleGateTimeout)
+	}
+	return nil
+}
+
+// ValidateDrift rejects drift tracking that could not keep its history: it
+// compares readings months apart, so without a --state-dir to keep them in
+// there is nothing to track. A one-shot run tracks nothing and is not
+// checked.
+func (c Config) ValidateDrift() error {
+	if !c.DriftTracking || c.Once {
+		return nil
+	}
+	if c.StateDir == "" {
+		return fmt.Errorf("--drift-tracking needs --state-dir: the drift history must outlive the daemon")
+	}
+	if !(c.DriftTh >= MinDriftTh && c.DriftTh <= MaxDriftTh) {
+		return fmt.Errorf("--drift-th %v out of range [%v, %v]", c.DriftTh, MinDriftTh, MaxDriftTh)
 	}
 	return nil
 }
@@ -471,10 +504,18 @@ const MaxLatencyFloor = 10 * time.Microsecond
 // than a 64-byte cache line.
 const MaxUPIBytesPerFlit = 64
 
-// boundedFloat is a float64 flag that rejects values outside [0, max].
+// MinDriftTh and MaxDriftTh bound --drift-th. Below 1% the run-to-run
+// spread of a healthy path decides; a path half as fast as its own
+// reference is far past its distance baseline already.
+const (
+	MinDriftTh = 0.01
+	MaxDriftTh = 0.5
+)
+
+// boundedFloat is a float64 flag that rejects values outside [min, max].
 type boundedFloat struct {
-	p   *float64
-	max float64
+	p        *float64
+	min, max float64
 }
 
 func (v *boundedFloat) String() string {
@@ -489,8 +530,8 @@ func (v *boundedFloat) Set(s string) error {
 	if err != nil {
 		return err
 	}
-	if !(f >= 0 && f <= v.max) {
-		return fmt.Errorf("%v out of range [0, %v]", f, v.max)
+	if !(f >= v.min && f <= v.max) {
+		return fmt.Errorf("%v out of range [%v, %v]", f, v.min, v.max)
 	}
 	*v.p = f
 	return nil

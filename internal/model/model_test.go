@@ -132,6 +132,30 @@ func TestLatencyReason(t *testing.T) {
 		func(v int) ([]byte, error) { return model.LatencyReason(v).MarshalJSON() })
 }
 
+func TestDriftStatus(t *testing.T) {
+	// DriftUnknown's own String() is "unknown", so the sentinel is "invalid".
+	checkEnum(t, "DriftStatus", []enumCase{
+		{"DriftUnknown", int(model.DriftUnknown), "unknown"},
+		{"DriftStable", int(model.DriftStable), "stable"},
+		{"DriftDrifted", int(model.DriftDrifted), "drifted"},
+	}, "invalid",
+		func(v int) string { return model.DriftStatus(v).String() },
+		func(v int) ([]byte, error) { return model.DriftStatus(v).MarshalJSON() })
+}
+
+func TestDriftReason(t *testing.T) {
+	checkEnum(t, "DriftReason", []enumCase{
+		{"DriftReasonNone", int(model.DriftReasonNone), "none"},
+		{"DriftCollectingReference", int(model.DriftCollectingReference), "collecting_reference"},
+		{"DriftFewRecentDays", int(model.DriftFewRecentDays), "few_recent_days"},
+		{"DriftClockBehind", int(model.DriftClockBehind), "clock_behind"},
+		{"DriftNotTracked", int(model.DriftNotTracked), "not_tracked"},
+		{"DriftHistoryBlocked", int(model.DriftHistoryBlocked), "history_blocked"},
+	}, "unknown",
+		func(v int) string { return model.DriftReason(v).String() },
+		func(v int) ([]byte, error) { return model.DriftReason(v).MarshalJSON() })
+}
+
 // TestEnumJSONViaEncoder pins that encoding/json picks the value-receiver
 // MarshalJSON up, both for a bare value and inside a struct.
 func TestEnumJSONViaEncoder(t *testing.T) {
@@ -144,6 +168,9 @@ func TestEnumJSONViaEncoder(t *testing.T) {
 		{model.UncertainHostShift, `"host_shift"`},
 		{model.LatencyStatus(7), `"invalid"`},
 		{model.LatencyLocalityShift, `"locality_shift"`},
+		{model.DriftDrifted, `"drifted"`},
+		{model.DriftFewRecentDays, `"few_recent_days"`},
+		{model.DriftStatus(9), `"invalid"`},
 		{struct {
 			S model.LinkStatus `json:"s"`
 		}{model.LinkNormal}, `{"s":"normal"}`},
@@ -570,6 +597,20 @@ func TestStringConstants(t *testing.T) {
 
 		{"BaselineSourceDefault", model.BaselineSourceDefault, "default"},
 		{"BaselineSourceUser", model.BaselineSourceUser, "user"},
+
+		{"DriftBandwidth", string(model.DriftBandwidth), "bandwidth"},
+		{"DriftLatencyP50", string(model.DriftLatencyP50), "latency_p50"},
+		{"DriftLatencyP99", string(model.DriftLatencyP99), "latency_p99"},
+		{"DriftShapeGradual", string(model.DriftShapeGradual), "gradual"},
+		{"DriftShapeStep", string(model.DriftShapeStep), "step"},
+		{"DriftShapeSustained", string(model.DriftShapeSustained), "sustained"},
+		{"DriftShapeUnknown", string(model.DriftShapeUnknown), "unknown"},
+		{"DriftTempRose", string(model.DriftTempRose), "rose"},
+		{"DriftTempSteady", string(model.DriftTempSteady), "steady"},
+		{"DriftTempUnknown", string(model.DriftTempUnknown), "unknown"},
+		{"DriftTempNoSensor", model.DriftTempNoSensor, "no_sensor"},
+		{"DriftTempNoReference", model.DriftTempNoReference, "no_reference_reading"},
+		{"DriftTempNoRecent", model.DriftTempNoRecent, "no_recent_reading"},
 	}
 	seen := map[string]bool{}
 	for _, c := range cases {
@@ -714,6 +755,35 @@ func fullReport() model.Report {
 			}},
 		}},
 		CPULoad: []model.CPULoad{{NUMA: 1, Socket: 1, Busy: 0.93, High: true}},
+		Drift: &model.DriftSummary{
+			Stable:         38,
+			Drifted:        1,
+			Unknown:        1,
+			UnknownReasons: []model.DriftUnknownCount{{Reason: model.DriftFewRecentDays, Paths: 1}},
+			Findings: []model.DriftFinding{{
+				RNIC:          "rnic0",
+				Endpoint:      "gpu0",
+				Signal:        model.DriftBandwidth,
+				Shape:         model.DriftShapeStep,
+				Change:        0.08,
+				Reference:     200000000000,
+				Recent:        184000000000,
+				ReferenceFrom: "2025-11-01",
+				ReferenceTo:   "2025-11-07",
+				RecentFrom:    "2025-12-26",
+				RecentTo:      "2026-01-01",
+				Since:         "2025-12-20",
+				StepOn:        "2025-12-17",
+				Temperature: model.DriftTemperature{
+					Status:  model.DriftTempUnknown,
+					Reason:  "gpu0: " + model.DriftTempNoRecent,
+					Devices: []model.DriftDeviceTemp{{Device: "rnic0", ReferenceC: 55, RecentC: 57.5}},
+				},
+				SoftwareChanges: []model.DriftSoftwareChange{{
+					On: "2025-12-17", Component: "kernel", From: "6.8.0-45-generic", To: "6.8.0-48-generic",
+				}},
+			}},
+		},
 	}
 }
 
@@ -730,6 +800,13 @@ func zeroReport() model.Report {
 			Entries: []model.BaselineEntry{{SubClasses: []model.BaselineSubClass{{}}}},
 		}},
 		CPULoad: []model.CPULoad{{}},
+		Drift: &model.DriftSummary{
+			UnknownReasons: []model.DriftUnknownCount{{}},
+			Findings: []model.DriftFinding{{
+				Temperature:     model.DriftTemperature{Devices: []model.DriftDeviceTemp{{}}},
+				SoftwareChanges: []model.DriftSoftwareChange{{}},
+			}},
+		},
 	}
 }
 

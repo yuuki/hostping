@@ -158,5 +158,52 @@
       "busy": 0.93,
       "high": true
     }
-  ]
+  ],
+  "drift": {
+    "stable": 38,
+    "drifted": 1,
+    "unknown": 1,
+    "unknown_reasons": [
+      {
+        "reason": "few_recent_days",
+        "paths": 1
+      }
+    ],
+    "findings": [
+      {
+        "rnic": "rnic0",
+        "endpoint": "gpu0",
+        "signal": "bandwidth",
+        "shape": "step",
+        "change": 0.08,
+        "reference": 200000000000,
+        "recent": 184000000000,
+        "reference_from": "2025-11-01",
+        "reference_to": "2025-11-07",
+        "recent_from": "2025-12-26",
+        "recent_to": "2026-01-01",
+        "since": "2025-12-20",
+        "step_on": "2025-12-17",
+        "temperature": {
+          "status": "unknown",
+          "reason": "gpu0: no_recent_reading",
+          "devices": [
+            {
+              "device": "rnic0",
+              "reference_c": 55,
+              "recent_c": 57.5
+            }
+          ]
+        },
+        "software_changes": [
+          {
+            "on": "2025-12-17",
+            "component": "kernel",
+            "from": "6.8.0-45-generic",
+            "to": "6.8.0-48-generic"
+          }
+        ]
+      }
+    ]
+  }
 }

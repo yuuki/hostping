@@ -22,6 +22,9 @@ hostping.mutual.loss_ratio |  | Mutual probe RNIC-to-RNIC loss ratio (same-rail 
 hostping.mutual.rtt | us | Mutual probe RNIC-to-RNIC RTT p50 (same-rail pairs, or every pair with --mutual-scope=host) | Gauge | float64
 hostping.mutual.timeout_ratio |  | Mutual probe RNIC-to-RNIC timeout ratio, 1 - recv/sent (same-rail pairs, or every pair with --mutual-scope=host) | Gauge | float64
 hostping.path.abnormal |  | 1 if RNIC→endpoint path is abnormal | Gauge | int64
+hostping.path.drift.change_ratio |  | How far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per signal (bandwidth, latency_p50, latency_p99); negative when better; with --drift-tracking | Gauge | float64
+hostping.path.drift.reason_code |  | Code of why the path's drift state is unknown, 0 (none) when it is not; hostping.status_code.info names every code; with --drift-tracking | Gauge | int64
+hostping.path.drift.status_code |  | Code of the path's state against its own idle history (1 stable, 2 unknown, 3 drifted); hostping.status_code.info names every code; with --drift-tracking | Gauge | int64
 hostping.path.latency_reason_code |  | Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code | Gauge | int64
 hostping.path.latency_status_code |  | Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code | Gauge | int64
 hostping.path.latency_streak |  | Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not | Gauge | int64

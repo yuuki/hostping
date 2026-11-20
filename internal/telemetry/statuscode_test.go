@@ -26,7 +26,30 @@ var wantStatusCodes = map[string]map[int64]string{
 		0: "none", 1: "user_baseline", 2: "siblings", 3: "busy", 4: "few_siblings",
 		5: "no_path", 6: "no_reading", 7: "recheck_cleared", 8: "locality_shift", 9: "cpu_busy",
 	},
-	"hostping.link.status_code": {1: "normal", 2: "uncertain", 3: "abnormal", 4: "gray"},
+	"hostping.link.status_code":       {1: "normal", 2: "uncertain", 3: "abnormal", 4: "gray"},
+	"hostping.path.drift.status_code": {1: "stable", 2: "unknown", 3: "drifted"},
+	"hostping.path.drift.reason_code": {
+		0: "none", 1: "collecting_reference", 2: "few_recent_days", 3: "clock_behind",
+		4: "not_tracked", 5: "history_blocked",
+	},
+}
+
+// reasonGauges are the code gauges whose hostping.status_code.info rows
+// carry a reason instead of a status.
+var reasonGauges = map[string]bool{
+	"hostping.path.uncertain_reason_code": true,
+	"hostping.path.latency_reason_code":   true,
+	"hostping.path.drift.reason_code":     true,
+}
+
+// wantStatusCodeCount is how many hostping.status_code.info series the
+// tables above make.
+func wantStatusCodeCount() int {
+	n := 0
+	for _, codes := range wantStatusCodes {
+		n += len(codes)
+	}
+	return n
 }
 
 func TestStatusCodesArePinned(t *testing.T) {
@@ -113,6 +136,25 @@ func TestStatusCodesCoverEnums(t *testing.T) {
 	}
 	check("LinkStatus", len(lk), miss)
 
+	// DriftUnknown's String() is "unknown"; the enum's default is "invalid".
+	miss = nil
+	ds := enumValues[model.DriftStatus]("invalid", model.DriftStatus.String)
+	for _, v := range ds {
+		if driftStatusCode(v) == codeUnmapped {
+			miss = append(miss, v.String())
+		}
+	}
+	check("DriftStatus", len(ds), miss)
+
+	miss = nil
+	dr := enumValues[model.DriftReason]("unknown", model.DriftReason.String)
+	for _, v := range dr {
+		if driftReasonCode(v) == codeUnmapped {
+			miss = append(miss, v.String())
+		}
+	}
+	check("DriftReason", len(dr), miss)
+
 	if got := pathStatusCode(model.PathStatus(99)); got != codeUnmapped {
 		t.Errorf("unmapped PathStatus = %d, want %d", got, codeUnmapped)
 	}
@@ -126,7 +168,7 @@ func TestStatusCodeInfo(t *testing.T) {
 	want := map[string]int64{}
 	for metric, codes := range wantStatusCodes {
 		label := "status"
-		if metric == "hostping.path.uncertain_reason_code" || metric == "hostping.path.latency_reason_code" {
+		if reasonGauges[metric] {
 			label = "reason"
 		}
 		for code, name := range codes {
@@ -247,8 +289,9 @@ func TestStatusCodePrometheusNames(t *testing.T) {
 		}
 	}
 	info := values["hostping_status_code_info"]
-	if len(info) != 28 {
-		t.Errorf("hostping_status_code_info has %d series, want 28: %v", len(info), info)
+	// 37: docs/metrics.md and docs/operations.md state the number.
+	if want := wantStatusCodeCount(); len(info) != want || want != 37 {
+		t.Errorf("hostping_status_code_info has %d series, want %d (37): %v", len(info), want, info)
 	}
 	if v, ok := info["code=7,metric=hostping.path.uncertain_reason_code,reason=cpu_busy,"]; !ok || v != 1 {
 		t.Errorf("hostping_status_code_info has no cpu_busy reason row at 1: %v", info)

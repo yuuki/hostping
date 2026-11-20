@@ -126,6 +126,9 @@ func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	if err := cfg.ValidateIdleGate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidateDrift(); err != nil {
+		return nil, err
+	}
 	// A baseline file or flag that does not parse would otherwise fail every
 	// engine run, which the daemon only logs: fail at start-up instead, and
 	// say which distances the operator's values replace.
@@ -191,6 +194,14 @@ func Run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	dt, err := newDriftTracker(cfg, g, time.Now, logging.Infof)
+	if err != nil {
+		return err
+	}
+	if rt.world == nil {
+		// The simulated host has no sensors and no software to change.
+		dt.live(g)
+	}
 	// The daemon's poll loop reports its liveness on /healthz; a one-shot run
 	// has no loop, and its /healthz (when --metrics is given) stays 200.
 	var live *telemetry.Liveness
@@ -221,8 +232,9 @@ func Run(cfg config.Config) error {
 		rt.mon.MutualAlarm = loop.Alarm
 	}
 	ps.restore(rt.eng, rt.mon)
-	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof)}
+	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, drift: dt, gate: newSchedGate(cfg, logging.Infof)}
 	defer ps.shutdown(rt.eng, &d.pending)
+	defer dt.shutdown()
 	t := time.NewTicker(cfg.MetricInterval)
 	defer t.Stop()
 	for {
@@ -240,11 +252,13 @@ func Run(cfg config.Config) error {
 // daemon is the state of the daemon's poll loop over the rig it runs on.
 type daemon struct {
 	*rig
-	loop    *mutual.Loop
-	tel     *telemetry.Telemetry
-	live    *telemetry.Liveness
-	rp      *reporter
-	ps      *persister
+	loop *mutual.Loop
+	tel  *telemetry.Telemetry
+	live *telemetry.Liveness
+	rp   *reporter
+	ps   *persister
+	// drift is --drift-tracking; nil tracks nothing.
+	drift   *driftTracker
 	pending idleHold
 	// gate is --idle-gate-command; nil allows every idle run.
 	gate *schedGate
@@ -281,8 +295,14 @@ func (d *daemon) tick(ctx context.Context) bool {
 	switch rep, out, why := d.pending.resolve(d.eng, dec); out {
 	case holdConfirmed:
 		d.ps.idleResolved(d.eng, rep, true)
+		// Only now is the run known to have been idle throughout: its
+		// readings enter the drift history, and the report says what the
+		// history makes of them.
+		drifts := d.drift.observe(&rep)
 		d.report(ctx, rep)
+		d.tel.RecordDrift(ctx, drifts)
 	case holdDiscarded:
+		d.drift.discarded()
 		d.ps.idleResolved(d.eng, rep, false)
 		d.tel.RecordDiscarded(ctx, discardReason(dec))
 		d.logf("hostping: discarded idle-mode run (trigger=%s paths=%d): the host became busy during it, so its idle verdicts are unreliable: %s", rep.Trigger, len(rep.Paths), why)
@@ -339,6 +359,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 		// Judged against idle baselines on the strength of the poll before
 		// the run: held until a clean poll after it confirms the host is
 		// still idle.
+		d.drift.runEnded(ctx, rep)
 		d.pending.hold(rep, before)
 		return true
 	}

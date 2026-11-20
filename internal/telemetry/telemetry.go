@@ -44,6 +44,9 @@ type Telemetry struct {
 	pathLat  metric.Int64Gauge
 	latWhy   metric.Int64Gauge
 	latRuns  metric.Int64Gauge
+	driftSt  metric.Int64Gauge
+	driftWhy metric.Int64Gauge
+	driftChg metric.Float64Gauge
 	linkAbn  metric.Int64Gauge
 	linkStat metric.Int64Gauge
 	pause    metric.Float64Gauge
@@ -375,6 +378,9 @@ func (t *Telemetry) initInstruments() error {
 		// each setup verb once, so a histogram would bucket runs rather than
 		// calls.
 		{&t.verbDur, "hostping.verb.duration", "us", "Execution time of a loopback probe's setup verbs (ToN'24 §VI-C)"},
+		// Positive is worse for every signal, so one threshold and one
+		// colour scale serve bandwidth and latency alike.
+		{&t.driftChg, "hostping.path.drift.change_ratio", "", "How far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per signal (bandwidth, latency_p50, latency_p99); negative when better; with --drift-tracking"},
 	}
 	intGauges := []instrument[metric.Int64Gauge]{
 		{&t.pathAbn, "hostping.path.abnormal", "", "1 if RNIC→endpoint path is abnormal"},
@@ -396,6 +402,10 @@ func (t *Telemetry) initInstruments() error {
 		// the persistence the analyzer itself requires before it names a
 		// cause.
 		{&t.latRuns, "hostping.path.latency_streak", "", "Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not"},
+		// The drift verdict is a state over weeks, not a per-run finding, so
+		// it is a gauge per path and not a hostping.diagnosis.count code.
+		{&t.driftSt, "hostping.path.drift.status_code", "", "Code of the path's state against its own idle history (1 stable, 2 unknown, 3 drifted); hostping.status_code.info names every code; with --drift-tracking"},
+		{&t.driftWhy, "hostping.path.drift.reason_code", "", "Code of why the path's drift state is unknown, 0 (none) when it is not; hostping.status_code.info names every code; with --drift-tracking"},
 		{&t.linkAbn, "hostping.link.abnormal_count", "", "Algorithm 1 abnormal_cnt per hop"},
 		{&t.linkStat, "hostping.link.status_code", "", "Code of the link's current Algorithm 1 status (1 normal, 2 uncertain, 3 abnormal, 4 gray); hostping.status_code.info names every code"},
 		{&t.drops, "hostping.rnic.drop.delta", "", "Packet drop counter delta"},
@@ -766,6 +776,35 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 	t.recordMutual(ctx, rep.Mutual)
 	for _, c := range rep.Causes {
 		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", string(c.Confidence))))
+	}
+}
+
+// RecordDrift writes every tracked path's state against its own idle history
+// (--drift-tracking) after a confirmed idle run. The change of a path whose
+// state is unknown is not written: there is none, and a 0 would read as a
+// path that has not moved.
+func (t *Telemetry) RecordDrift(ctx context.Context, paths []model.PathDrift) {
+	if t == nil {
+		return
+	}
+	for _, p := range paths {
+		attrs := metric.WithAttributes(attribute.String("rnic", p.RNIC), attribute.String("endpoint", p.Endpoint))
+		reason := p.Reason
+		if p.Status != model.DriftUnknown {
+			reason = model.DriftReasonNone
+		}
+		t.driftSt.Record(ctx, driftStatusCode(p.Status), attrs)
+		t.driftWhy.Record(ctx, driftReasonCode(reason), attrs)
+		if p.Status == model.DriftUnknown {
+			continue
+		}
+		for _, c := range p.Changes {
+			t.driftChg.Record(ctx, c.Change, metric.WithAttributes(
+				attribute.String("rnic", p.RNIC),
+				attribute.String("endpoint", p.Endpoint),
+				attribute.String("signal", string(c.Signal)),
+			))
+		}
 	}
 }
 

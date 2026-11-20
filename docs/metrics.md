@@ -20,6 +20,9 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
 
 # Daemon: keep flapping streaks and the idle cadence across a restart (Linux)
 ./bin/hostping --sim --state-dir /var/lib/hostping
+
+# Daemon: also track each path against its own idle history (opt-in)
+./bin/hostping --state-dir /var/lib/hostping --drift-tracking
 ```
 
 ## Reports
@@ -45,6 +48,50 @@ Every report carries `reported_at` (UTC), `version` and `commit` next to its
 own fields. A discarded idle-mode run reaches neither output. See
 [Logs and reports under journald](operations.md#logs-and-reports-under-journald).
 
+### Drift section
+
+With `--drift-tracking`, the report of every confirmed idle-trigger run of
+the daemon carries a `drift` object. Reports of other runs, and every report
+without the flag, have none. It is advisory: `paths`, `links` and `causes`
+are what they would be without it. See
+[Drift against the host's own history](design.md#drift-against-the-hosts-own-history).
+
+```json
+"drift": {
+  "stable": 38, "drifted": 1, "unknown": 1,
+  "unknown_reasons": [{"reason": "few_recent_days", "paths": 1}],
+  "findings": [{
+    "rnic": "rnic1", "endpoint": "gpu3", "signal": "bandwidth",
+    "shape": "gradual", "change": 0.071,
+    "reference": 197000000000, "recent": 183000000000,
+    "reference_from": "2026-08-01", "reference_to": "2026-08-07",
+    "recent_from": "2026-10-22", "recent_to": "2026-10-28",
+    "since": "2026-10-19",
+    "temperature": {"status": "rose", "devices": [
+      {"device": "rnic1", "reference_c": 55, "recent_c": 56},
+      {"device": "gpu3", "reference_c": 61, "recent_c": 70}]}
+  }]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `stable`, `drifted`, `unknown` | Tracked paths per drift status. A path is `drifted` when any of its signals is. |
+| `unknown_reasons` | The unknown paths per reason: `collecting_reference`, `few_recent_days`, `clock_behind`, `not_tracked`, `history_blocked`. Absent when no path is unknown. |
+| `findings` | One entry per drifted signal, the largest `change` first, at most 32. Absent when none. |
+| `findings_omitted` | How many more findings there are than the report carries. Absent when 0. |
+| `signal` | `bandwidth`, `latency_p50` or `latency_p99` (the small-message latency). |
+| `change` | How far `recent` lies on the worse side of `reference`, as a fraction of `reference`: 0.07 is a bandwidth 7% lower or a latency 7% higher. |
+| `reference`, `recent` | The path's reference level and the median of its recent days, in bit/s for `bandwidth` and ns for the latencies. |
+| `reference_from`, `reference_to`, `recent_from`, `recent_to` | First and last UTC day (`YYYY-MM-DD`) of the daily values behind each side. |
+| `since` | UTC day the signal was first judged drifted. |
+| `shape` | `gradual`, `step`, `sustained` or `unknown`; see [Shape](design.md#shape). |
+| `step_on` | First UTC day at the new level. Only with `shape` `step`. |
+| `temperature.status` | `rose`, `steady` or `unknown`; see [Temperature](design.md#temperature). |
+| `temperature.reason` | Why the status is `unknown`: `<device>: no_sensor`, `no_reference_reading` or `no_recent_reading`. |
+| `temperature.devices` | The devices of the path read on both sides, with `reference_c` and `recent_c` in °C. |
+| `software_changes` | Kernel and RNIC firmware changes recorded since the reference began: `on` (UTC day), `component` (`kernel`, or `firmware <RNIC PCI address>`), `from`, `to`. Absent when none. |
+
 ## Metrics
 
 Each confirmed report records the report metrics. Each monitor poll records the
@@ -66,6 +113,9 @@ agent from one with nothing to report. See
 | `hostping.path.latency_status_code` | gauge (code) | `rnic`, `endpoint` | The path's advisory small-message latency verdict: 1 `normal`, 2 `unknown`, 3 `abnormal` |
 | `hostping.path.latency_reason_code` | gauge (code) | `rnic`, `endpoint` | What the latency verdict was judged against (1 `user_baseline`, 2 `siblings`; 7 `recheck_cleared` when the paired recheck cleared a sibling verdict, 8 `locality_shift` when the other RNICs on its NUMA node read as high) or why it was not judged (3 `busy`, 4 `few_siblings`, 5 `no_path`, 6 `no_reading`, 9 `cpu_busy`); 0 `none` on a path never classified |
 | `hostping.path.latency_streak` | gauge (runs) | `rnic`, `endpoint` | Consecutive idle runs, this one included, that read the path's latency `abnormal` against its siblings (the report's `latency_streak`). The daemon names a cause from 3, so alert on `>= 3` rather than on `latency_status_code`, which one high run flips. 0 when this run did not read it so, on a verdict against a `LAT` you set (which needs no streak), and in a busy run, which judges no latency; see [Latency streak](operations.md#latency-streak) |
+| `hostping.path.drift.status_code` | gauge (code) | `rnic`, `endpoint` | With `--drift-tracking`: the path's state against its own idle history: 1 `stable`, 2 `unknown`, 3 `drifted`. Written after every confirmed idle-trigger run; no series without the flag |
+| `hostping.path.drift.reason_code` | gauge (code) | `rnic`, `endpoint` | With `--drift-tracking`: why the drift state is unknown: 1 `collecting_reference`, 2 `few_recent_days`, 3 `clock_behind`, 4 `not_tracked`, 5 `history_blocked`; 0 `none` on a stable or drifted path |
+| `hostping.path.drift.change_ratio` | gauge (ratio) | `rnic`, `endpoint`, `signal` | With `--drift-tracking`: how far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per `signal` (`bandwidth`, `latency_p50`, `latency_p99`). Positive is worse for every signal; negative is better. Not written while the state is unknown, so read it together with the status code: the exporter keeps the last value |
 | `hostping.link.abnormal_count` | gauge | `link` | Algorithm 1 `abnormal_cnt` |
 | `hostping.link.status_code` | gauge (code) | `link` | The link's current Algorithm 1 status: 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
 | `hostping.bus.utilization` | gauge (0–1) | `link` | Intra-host bus utilization of the hop, sampled before the run; no sample when unknown (see [Bus utilization](design.md#bus-utilization)) |
@@ -94,7 +144,7 @@ agent from one with nothing to report. See
 | `hostping.endpoint.info` | gauge | `endpoint`, `kind`, `index`, `socket`, `numa`, `pcie_bdf` (GPU only), `root_port` (GPU only) | Always 1, one series per loopback endpoint; maps `gpuN`/`memN` to the GPU's PCI address and CPU root port, or to the memory node. Exported from start-up |
 | `hostping.topology.node.info` | gauge | `node`, `kind`, `title`, `socket`, `numa` (where single), `pcie_bdf` (PCI nodes) | Always 1, one series per node of the host topology graph: `socket`, `numa` (sub-NUMA clustering only), `memory`, `root_port`, `switch`, `rnic`, `gpu`. `node` is the ID the edges name. Exported from start-up (see [Topology graph](operations.md#topology-graph)) |
 | `hostping.topology.edge.info` | gauge | `edge`, `link`, `source`, `target`, `kind`, `capacity_bps`, `negotiated_bps`, `capacity_assumed` | Always 1, one series per edge, `source` upstream (CPU side) of `target`. `link` is the `link` of `hostping.link.status_code` and `hostping.bus.utilization`, or `none` on a structural package→NUMA edge. Exported from start-up |
-| `hostping.status_code.info` | gauge | `metric`, `code`, `status` or `reason` | Always 1, one series per code of the `*_code` gauges above (28 in all); names what `code` means on the gauge `metric` (the OpenTelemetry name, e.g. `hostping.path.status_code`). Status gauges' rows carry `status`, reason gauges' rows `reason`. Exported from start-up |
+| `hostping.status_code.info` | gauge | `metric`, `code`, `status` or `reason` | Always 1, one series per code of the `*_code` gauges above (37 in all); names what `code` means on the gauge `metric` (the OpenTelemetry name, e.g. `hostping.path.status_code`). Status gauges' rows carry `status`, reason gauges' rows `reason`. Exported from start-up |
 
 Loopback latency, mutual RTT and verb durations are gauges. The probe produces
 one p50 per path (or RNIC pair) per run and calls each setup verb once. A
@@ -124,7 +174,8 @@ The `hostping.mutual.*` gauges are absent altogether on a host where no RNIC
 pair qualifies for the mutual probe. See [Diagnoses](design.md#diagnoses).
 
 Per host the series count is roughly 10 per RNIC→endpoint path plus 3 per
-link. See [Series cardinality](operations.md#series-cardinality). For what
+link, and 5 more per path with `--drift-tracking`. See
+[Series cardinality](operations.md#series-cardinality). For what
 each `hostping.diagnosis.count` code means and which ones to page on, see the
 [runbook](runbook.md).
 

@@ -444,6 +444,39 @@ func fullReport() model.Report {
 			}},
 		}},
 		CPULoad: []model.CPULoad{{NUMA: 1, Socket: 1, Busy: 0.97, High: true}},
+		// The analyzer never fills this: the daemon adds it to a confirmed
+		// idle-trigger run with --drift-tracking. It is here because the
+		// schema is the whole report.
+		Drift: &model.DriftSummary{
+			Stable:          37,
+			Drifted:         2,
+			Unknown:         1,
+			UnknownReasons:  []model.DriftUnknownCount{{Reason: model.DriftFewRecentDays, Paths: 1}},
+			FindingsOmitted: 1,
+			Findings: []model.DriftFinding{{
+				RNIC:          "rnic0",
+				Endpoint:      "gpu0",
+				Signal:        model.DriftBandwidth,
+				Shape:         model.DriftShapeStep,
+				Change:        0.08,
+				Reference:     197_000_000_000,
+				Recent:        181_240_000_000,
+				ReferenceFrom: "2026-08-01",
+				ReferenceTo:   "2026-08-07",
+				RecentFrom:    "2026-10-22",
+				RecentTo:      "2026-10-28",
+				Since:         "2026-10-19",
+				StepOn:        "2026-10-16",
+				Temperature: model.DriftTemperature{
+					Status:  model.DriftTempUnknown,
+					Reason:  "gpu0: " + model.DriftTempNoRecent,
+					Devices: []model.DriftDeviceTemp{{Device: "rnic0", ReferenceC: 55, RecentC: 57.5}},
+				},
+				SoftwareChanges: []model.DriftSoftwareChange{{
+					On: "2026-10-16", Component: "kernel", From: "6.8.0-45-generic", To: "6.8.0-48-generic",
+				}},
+			}},
+		},
 	}
 }
 

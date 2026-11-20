@@ -41,6 +41,11 @@ In the mutual probe, RNIC pairs on the same rail exchange probes, or every
 pair does with `--mutual-scope=host`. Timeouts identify unreachable or
 flapping RNICs and ToR switch anomalies (ToN'24).
 
+With `--drift-tracking` the daemon also keeps each path's idle readings over
+months and reports a path that reads a few percent worse than its own first
+week, long before it falls below a baseline: hardware that ages or runs
+hotter, or a regression after an update.
+
 The agent and analyzer are written in Go. The probes and sysfs counters are
 written in Zig and called through a C ABI.
 
@@ -68,6 +73,9 @@ Known limitations:
   with uncore PMUs, and only when the operator supplies the bus capacity.
 - InfiniBand RNICs take part in the mutual probe only with
   `--mutual-infiniband`.
+- Drift tracking (`--drift-tracking`) is opt-in. Its thresholds and its
+  temperature readings have been exercised on the simulator and on synthetic
+  series only, not on RDMA hardware.
 
 [docs/design.md](docs/design.md) describes what each path does on live
 hardware and where it fails closed.
@@ -131,6 +139,13 @@ hostpingctl calibrate --out baselines.json
 hostping --baseline-file baselines.json
 ```
 
+To also track each path against its own history over months (opt-in, see
+[Tracking slow drift](docs/operations.md#tracking-slow-drift)):
+
+```bash
+hostping --state-dir /var/lib/hostping --drift-tracking
+```
+
 `hostping -h` lists every flag. `hostpingctl` with no arguments lists its
 subcommands.
 
@@ -138,9 +153,9 @@ subcommands.
 
 | Document | Contents |
 | --- | --- |
-| [docs/design.md](docs/design.md) | Measurement, classification, baselines, diagnoses, mutual probe, bus utilization, simulated faults |
+| [docs/design.md](docs/design.md) | Measurement, classification, baselines, diagnoses, drift tracking, mutual probe, bus utilization, simulated faults |
 | [docs/metrics.md](docs/metrics.md) | Exported metrics, report format, metrics endpoint |
-| [docs/operations.md](docs/operations.md) | Install layout, privileges, systemd, unknown data sources, alerting, upgrades, cost to workloads, baseline calibration |
+| [docs/operations.md](docs/operations.md) | Install layout, privileges, systemd, unknown data sources, alerting, upgrades, cost to workloads, baseline calibration, drift tracking |
 | [docs/runbook.md](docs/runbook.md) | What each diagnosis code and alert means and what to check first |
 | [docs/building.md](docs/building.md) | Toolchain, build targets and code complexity tracking |
 | [docs/releasing.md](docs/releasing.md) | Release artifacts and how to cut a release |

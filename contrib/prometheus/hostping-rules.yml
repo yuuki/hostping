@@ -24,6 +24,9 @@
 #     link status, with the same persistence.
 #   - no alert: `rnic_cross_rail_unreachable` at "low", which is what isolated
 #     rails look like by design under --mutual-scope=host.
+#   - info, apart from the diagnoses: HostpingPathDrift, a path that reads
+#     worse than the host's own idle history (--drift-tracking). It is built
+#     on the drift gauges, not on a diagnosis code.
 groups:
   - name: hostping-diagnosis
     rules:
@@ -189,6 +192,29 @@ groups:
           description: "Loopback probes to {{ $value }} {{ $labels.kind }} endpoint(s) have been skipped for an hour, so paths to them are not diagnosed. The journal and the report's skipped_endpoints give the reason."
           runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingendpointsskipped"
 
+  # Paths that read worse than the host's own idle history. Only a daemon
+  # with --drift-tracking exports the series, so the group is inert elsewhere.
+  - name: hostping-drift
+    rules:
+      # hostping_path_drift_status_code is 3 while a path is drifted: the
+      # median of its recent idle days is --drift-th worse than its own first
+      # week on bandwidth or latency. Unlike the status gauges of a run, this
+      # one is safe to alert on: it is formed from daily medians of confirmed
+      # idle runs, so a single run cannot set it and it moves once a day at
+      # most. A path whose drift state is unknown (code 2) is not counted. The
+      # hour keeps a restart, after which the series is absent until the next
+      # idle run, from resolving and re-firing the alert in quick succession.
+      - alert: HostpingPathDrift
+        expr: |
+          count by (job, instance) (hostping_path_drift_status_code == 3)
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "hostping: {{ $value }} path(s) on {{ $labels.instance }} read worse than their own history"
+          description: "{{ $value }} path(s) have read worse than the host's own first week of idle readings for an hour (bandwidth lower, or latency higher, by --drift-th). They are still within their baselines, and no diagnosis names them. The drift section of the report (journal or --report-file) names the paths, the signal, the shape of the change and the device temperatures."
+          runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingpathdrift"
+
   # Path and link states by name, for dashboards. The status gauges hold one
   # code per path or link (hostping_path_status_code and friends);
   # hostping_status_code_info names every code. count_values turns the code
@@ -211,6 +237,14 @@ groups:
           count_values by (job, instance) ("code", hostping_path_uncertain_reason_code != 0)
             * on (job, instance, code) group_left (reason)
               hostping_status_code_info{metric="hostping.path.uncertain_reason_code"}
+
+      # Tracked paths per drift state (stable, unknown, drifted) on each host
+      # with --drift-tracking.
+      - record: hostping:path_drift_status:count
+        expr: |
+          count_values by (job, instance) ("code", hostping_path_drift_status_code)
+            * on (job, instance, code) group_left (status)
+              hostping_status_code_info{metric="hostping.path.drift.status_code"}
 
       # Links per Algorithm 1 status (normal, uncertain, abnormal, gray).
       - record: hostping:link_status:count

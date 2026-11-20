@@ -8,6 +8,48 @@ becomes the notes of its GitHub Release (see
 
 ## [Unreleased]
 
+### Added
+
+- `--drift-tracking` (daemon, opt-in, needs `--state-dir`): the daemon keeps
+  each path's idle bandwidth and small-message latency (p50, p99) over months
+  in `DIR/drift.json` and reports a path that reads worse than its own first
+  week, while it is still within its baseline: hardware that ages or runs
+  hotter, or a regression after an update. A path is `drifted` when
+  the median of its last 7 idle days is `--drift-th` (new flag, default 0.05)
+  worse than its reference, or three times the scatter of its reference week
+  if that is more, and `stable` again below half of that. Until it has been
+  read on 7 idle days and 3 more it is `unknown`, with the reason. A finding
+  says whether the change is a `step` (with its date), `gradual` or
+  `sustained`, what the temperature of the path's RNIC and GPU did between
+  the two periods (`rose`, `steady`, or `unknown` with the reason), and which
+  kernel and RNIC firmware changes were seen since the reference. Only
+  confirmed idle-trigger runs feed the history, and only paths the run judged
+  clean. See
+  [Drift against the host's own history](docs/design.md#drift-against-the-hosts-own-history)
+  and [Tracking slow drift](docs/operations.md#tracking-slow-drift). The
+  thresholds and the temperature readings have not been exercised on RDMA
+  hardware.
+- With `--drift-tracking`, the report of each confirmed idle-trigger run
+  carries a `drift` section, and three series are exported:
+  `hostping.path.drift.status_code`, `hostping.path.drift.reason_code` and
+  `hostping.path.drift.change_ratio` (5 series per path). A drift finding is
+  not a cause: `causes`, path and link statuses, exit codes and the existing
+  alerts are unchanged.
+- `HostpingPathDrift` alert (severity `info`) and the
+  `hostping:path_drift_status:count` recording rule in
+  `contrib/prometheus/hostping-rules.yml`, with a runbook section.
+- Device temperatures for the drift findings are read from the hwmon sensors
+  under each RNIC's and GPU's PCI function and, for a GPU without one, from
+  `nvidia-smi` (one more bounded run per idle run, only with
+  `--drift-tracking`).
+
+### Changed
+
+- `hostping.status_code.info` has 37 series instead of 28 on every host: the
+  codes of the two new drift gauges are named there with and without
+  `--drift-tracking`. The Fig.2 `--sim` host scrapes 620 `hostping_*` series
+  instead of 611.
+
 ## [0.2.5] - 2026-11-11
 
 ### Changed

@@ -598,6 +598,53 @@ func TestLatencyFloorFlag(t *testing.T) {
 	}
 }
 
+// Drift tracking is off by default and needs a state directory to keep its
+// history in.
+func TestDriftFlags(t *testing.T) {
+	parse := func(args ...string) (Config, error) {
+		cfg := Defaults()
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(&strings.Builder{})
+		cfg.RegisterFlags(fs)
+		return cfg, fs.Parse(args)
+	}
+	d := Defaults()
+	if d.DriftTracking || d.DriftTh != 0.05 {
+		t.Fatalf("defaults: tracking=%v th=%v, want off and 0.05", d.DriftTracking, d.DriftTh)
+	}
+	if err := d.ValidateDrift(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parse("--drift-tracking", "--drift-th", "0.1", "--state-dir", "/var/lib/hostping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DriftTracking || cfg.DriftTh != 0.1 {
+		t.Fatalf("flags: tracking=%v th=%v", cfg.DriftTracking, cfg.DriftTh)
+	}
+	if err := cfg.ValidateDrift(); err != nil {
+		t.Fatal(err)
+	}
+	// Without a state directory the history would die with the daemon.
+	cfg, err = parse("--drift-tracking")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateDrift(); err == nil {
+		t.Error("--drift-tracking without --state-dir accepted")
+	}
+	// A one-shot run tracks nothing and is not held to it.
+	cfg.Once = true
+	if err := cfg.ValidateDrift(); err != nil {
+		t.Errorf("one-shot run with --drift-tracking: %v", err)
+	}
+	for _, v := range []string{"0", "0.6", "-1", "lots"} {
+		if _, err := parse("--drift-th", v); err == nil {
+			t.Errorf("--drift-th %s accepted", v)
+		}
+	}
+}
+
 func TestIdleGateFlags(t *testing.T) {
 	parse := func(args ...string) (Config, error) {
 		cfg := Defaults()

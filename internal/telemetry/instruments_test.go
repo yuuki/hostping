@@ -136,6 +136,10 @@ func recordEverything(tel *Telemetry) {
 	ctx := context.Background()
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	tel.RecordReport(ctx, fullReport())
+	tel.RecordDrift(ctx, []model.PathDrift{{
+		RNIC: "rnic0", Endpoint: "gpu0", Status: model.DriftDrifted,
+		Changes: []model.DriftChange{{Signal: model.DriftBandwidth, Change: 0.07}},
+	}})
 	tel.RecordMutual(ctx, fullReport().Mutual)
 	tel.RecordRates(ctx, []model.RNICRates{{
 		Device: "rnic0", ThroughputBPS: 100e9, PauseDurationRatio: 0.01, DropDelta: 2, PauseKnown: true, DropKnown: true,

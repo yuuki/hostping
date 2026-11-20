@@ -46,6 +46,12 @@
 # TYPE hostping_mutual_timeout_ratio gauge
 # HELP hostping_path_abnormal 1 if RNIC→endpoint path is abnormal
 # TYPE hostping_path_abnormal gauge
+# HELP hostping_path_drift_change_ratio How far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per signal (bandwidth, latency_p50, latency_p99); negative when better; with --drift-tracking
+# TYPE hostping_path_drift_change_ratio gauge
+# HELP hostping_path_drift_reason_code Code of why the path's drift state is unknown, 0 (none) when it is not; hostping.status_code.info names every code; with --drift-tracking
+# TYPE hostping_path_drift_reason_code gauge
+# HELP hostping_path_drift_status_code Code of the path's state against its own idle history (1 stable, 2 unknown, 3 drifted); hostping.status_code.info names every code; with --drift-tracking
+# TYPE hostping_path_drift_status_code gauge
 # HELP hostping_path_latency_reason_code Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code
 # TYPE hostping_path_latency_reason_code gauge
 # HELP hostping_path_latency_status_code Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code

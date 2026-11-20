@@ -8,8 +8,8 @@ import (
 	"github.com/yuuki/hostping/internal/model"
 )
 
-// Status and reason codes of the hostping.path.*_code and
-// hostping.link.status_code gauges.
+// Status and reason codes of the hostping.path.*_code,
+// hostping.path.drift.*_code and hostping.link.status_code gauges.
 //
 // Each gauge holds one series per path or link whose value is the code of its
 // current state. Every report rewrites the value, so a state change replaces
@@ -69,6 +69,23 @@ var latencyReasonCodes = map[model.LatencyReason]int64{
 	model.LatencyCPUBusy:        9,
 }
 
+// The drift codes follow the other status gauges: 1 is healthy, 2 undecided
+// and 3 the finding.
+var driftStatusCodes = map[model.DriftStatus]int64{
+	model.DriftStable:  1,
+	model.DriftUnknown: 2,
+	model.DriftDrifted: 3,
+}
+
+var driftReasonCodes = map[model.DriftReason]int64{
+	model.DriftReasonNone:          0,
+	model.DriftCollectingReference: 1,
+	model.DriftFewRecentDays:       2,
+	model.DriftClockBehind:         3,
+	model.DriftNotTracked:          4,
+	model.DriftHistoryBlocked:      5,
+}
+
 var linkStatusCodes = map[model.LinkStatus]int64{
 	model.LinkNormal:    1,
 	model.LinkUncertain: 2,
@@ -94,6 +111,10 @@ func latencyStatusCode(s model.LatencyStatus) int64 { return lookupCode(latencyS
 func latencyReasonCode(r model.LatencyReason) int64 { return lookupCode(latencyReasonCodes, r) }
 
 func linkStatusCode(s model.LinkStatus) int64 { return lookupCode(linkStatusCodes, s) }
+
+func driftStatusCode(s model.DriftStatus) int64 { return lookupCode(driftStatusCodes, s) }
+
+func driftReasonCode(r model.DriftReason) int64 { return lookupCode(driftReasonCodes, r) }
 
 // statusCodeRow is one hostping.status_code.info series: code of metric means
 // status (on a status gauge) or reason (on a reason gauge).
@@ -151,6 +172,8 @@ func statusCodeRows() []statusCodeRow {
 	rows = append(rows, statusRows("hostping.path.latency_status_code", latencyStatusCodes)...)
 	rows = append(rows, reasonRows("hostping.path.latency_reason_code", latencyReasonCodes)...)
 	rows = append(rows, statusRows("hostping.link.status_code", linkStatusCodes)...)
+	rows = append(rows, statusRows("hostping.path.drift.status_code", driftStatusCodes)...)
+	rows = append(rows, reasonRows("hostping.path.drift.reason_code", driftReasonCodes)...)
 	return rows
 }
 

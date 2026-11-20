@@ -456,3 +456,107 @@ tests:
             value: 1
           - labels: 'hostping:link_status:count{job="hostping",instance="host-d:9464",code="4",status="gray"}'
             value: 1
+
+  # Drift against the host's own history (--drift-tracking). On host-e one
+  # path is drifted from 30m on and a second from 60m; a third stays unknown
+  # (collecting its reference) and never counts. host-f tracks and has no
+  # drift; host-g does not track at all.
+  - interval: 1m
+    input_series:
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu3"}'
+        values: '1x29 3x200'
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu2"}'
+        values: '1x59 3x170'
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="mem0"}'
+        values: '2x230'
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-f:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu0"}'
+        values: '1x230'
+      - series: 'hostping_path_status_code{job="hostping",instance="host-g:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic0",endpoint="gpu0"}'
+        values: '1x230'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.drift.status_code",code="1",status="stable"}'
+        values: '1x230'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.drift.status_code",code="2",status="unknown"}'
+        values: '1x230'
+      - series: 'hostping_status_code_info{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",metric="hostping.path.drift.status_code",code="3",status="drifted"}'
+        values: '1x230'
+    alert_rule_test:
+      # Nothing while every judged path is stable.
+      - eval_time: 20m
+        alertname: HostpingPathDrift
+        exp_alerts: []
+      # Drifted for less than an hour: pending, not firing.
+      - eval_time: 80m
+        alertname: HostpingPathDrift
+        exp_alerts: []
+      # One path for an hour. The second has drifted too, and is counted from
+      # the moment it does: the alert is per host, not per path.
+      - eval_time: 100m
+        alertname: HostpingPathDrift
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-e:9464
+            exp_annotations:
+              summary: "hostping: 2 path(s) on host-e:9464 read worse than their own history"
+              description: "2 path(s) have read worse than the host's own first week of idle readings for an hour (bandwidth lower, or latency higher, by --drift-th). They are still within their baselines, and no diagnosis names them. The drift section of the report (journal or --report-file) names the paths, the signal, the shape of the change and the device temperatures."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingpathdrift"
+      # A drift finding is no diagnosis: none of the diagnosis alerts fires.
+      - eval_time: 100m
+        alertname: HostpingAdvisoryDiagnosis
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: HostpingDiagnosis
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: HostpingHardwareFault
+        exp_alerts: []
+    promql_expr_test:
+      - expr: hostping:path_drift_status:count
+        eval_time: 20m
+        exp_samples:
+          - labels: 'hostping:path_drift_status:count{job="hostping",instance="host-e:9464",code="1",status="stable"}'
+            value: 2
+          - labels: 'hostping:path_drift_status:count{job="hostping",instance="host-e:9464",code="2",status="unknown"}'
+            value: 1
+      - expr: hostping:path_drift_status:count
+        eval_time: 100m
+        exp_samples:
+          - labels: 'hostping:path_drift_status:count{job="hostping",instance="host-e:9464",code="2",status="unknown"}'
+            value: 1
+          - labels: 'hostping:path_drift_status:count{job="hostping",instance="host-e:9464",code="3",status="drifted"}'
+            value: 2
+
+  # A drifted path that recovers resolves the alert, and a daemon restart
+  # (the series absent until the next idle run) does not leave it firing.
+  - interval: 1m
+    input_series:
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-h:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu3"}'
+        values: '3x90 1x30'
+      - series: 'hostping_path_drift_status_code{job="hostping",instance="host-i:9464",otel_scope_name="github.com/yuuki/hostping",rnic="rnic1",endpoint="gpu3"}'
+        values: '3x90 _x10 3x20'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: HostpingPathDrift
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-h:9464
+            exp_annotations:
+              summary: "hostping: 1 path(s) on host-h:9464 read worse than their own history"
+              description: "1 path(s) have read worse than the host's own first week of idle readings for an hour (bandwidth lower, or latency higher, by --drift-th). They are still within their baselines, and no diagnosis names them. The drift section of the report (journal or --report-file) names the paths, the signal, the shape of the change and the device temperatures."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingpathdrift"
+          - exp_labels:
+              severity: info
+              job: hostping
+              instance: host-i:9464
+            exp_annotations:
+              summary: "hostping: 1 path(s) on host-i:9464 read worse than their own history"
+              description: "1 path(s) have read worse than the host's own first week of idle readings for an hour (bandwidth lower, or latency higher, by --drift-th). They are still within their baselines, and no diagnosis names them. The drift section of the report (journal or --report-file) names the paths, the signal, the shape of the change and the device temperatures."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#hostpingpathdrift"
+      # host-h recovered at 91m; host-i restarted then and has not been
+      # drifted for an hour again.
+      - eval_time: 115m
+        alertname: HostpingPathDrift
+        exp_alerts: []

@@ -21,6 +21,7 @@ paths and links, and which diagnoses it reports. For running the daemon see
 - [Link localization](#link-localization)
 - [Discovery](#discovery)
 - [Diagnoses](#diagnoses)
+- [Drift against the host's own history](#drift-against-the-hosts-own-history)
 - [Mutual probe](#mutual-probe)
 - [Bus utilization](#bus-utilization)
 - [Simulation](#simulation)
@@ -89,6 +90,7 @@ Each is a flag on both binaries, alongside the other tuning flags. Fractions are
 | `--mutual-timeout` | 500ms | How long one mutual probe waits for its reply (ToN'24 §IV-A-2). |
 | `--mutual-interval` | off | Opt-in mutual probe schedule. Needs `ud`. ToN'24 uses 100ms. See [Mutual probe transports and schedule](#mutual-probe-transports-and-schedule). |
 | `--mutual-window` | 20s | Window of the `--mutual-interval` schedule; see [Mutual probe transports and schedule](#mutual-probe-transports-and-schedule). |
+| `--drift-th` | 0.05 | With `--drift-tracking`: how much worse than its own reference a path's bandwidth or latency must read to be `drifted`; see [Drift verdict](#drift-verdict). Between 0.01 and 0.5. |
 
 ## Triggers
 
@@ -717,6 +719,359 @@ They are reported as `rnic_cross_rail_unreachable`:
 | Some cross-rail pairs answer, and a group of RNICs reaches no RNIC outside it | medium | The group is cut off from the rest of the host, for example RNICs cabled to the wrong switch ports and left on an isolated subnet (ToN #14). Every group but the largest is named. When the largest is tied, every group is. A dead RNIC without a same-rail pair looks the same. |
 | One cross-rail pair times out while both RNICs reach others | medium | The route between those two subnets. |
 | No cross-rail pair answers at all | low | The rails do not reach each other, uniformly. Isolated rails look like this by design, and so does a ToR or fabric routing fault, so it is one note naming every RNIC involved. |
+
+## Drift against the host's own history
+
+Every verdict above compares one run with a threshold that is 20% wide
+(`--abnormal-th`) and was measured once: a Fig.4 default, or a calibrated
+floor shared by a hardware class. Hardware also degrades below that
+threshold. A GPU or RNIC that runs hotter than it used to throttles earlier,
+a link's signal margin decays into retries, and a firmware, driver or kernel
+update costs a few percent. A path that has lost 8% reads `normal` on every
+run.
+
+`--drift-tracking` (daemon only, opt-in, needs `--state-dir`) keeps each
+path's idle readings over months and compares the path with itself. It
+changes no path status, link status or cause. The daemon reports what it
+finds in a section of its own, described under
+[How drift is reported](#how-drift-is-reported).
+
+It is opt-in for two reasons. Its thresholds have been exercised on the
+simulator and on synthetic series only, not on RDMA hardware. It also adds
+five series per path.
+
+### What enters the history
+
+Only a confirmed idle-trigger run of the daemon feeds the history. These do
+not:
+
+- a run the idle hold discarded ([Triggers](#triggers)), whose readings were
+  taken on a host that turned busy;
+- a busy-mode run, which has no idle readings;
+- an idle-mode run that a mutual-probe alarm started. `--idle-gate-command`
+  does not gate it, so it can land in a pause of a scheduler job, which is
+  the case the gate exists for;
+- a one-shot run (`hostpingctl diagnose`, `hostping --once`,
+  `hostpingctl calibrate`);
+- a run during which a CPU package was loaded
+  ([CPU load](#cpu-load-on-an-idle-host)). Load on a package slows the paths
+  through it without making them `abnormal`.
+
+Within a run, a path contributes a reading only when the run judged it
+clean. Left out are:
+
+- a path that is `abnormal` on bandwidth, or whose `latency_status` is
+  `abnormal`. A fault must not become the reference, and the existing
+  diagnoses already report it;
+- a path that carries `bw_recheck`. The reading the history would store is
+  the sweep's, which its own paired re-read either overruled or confirmed as
+  a fault;
+- a path whose latency the recheck or the locality check cleared
+  (`recheck_cleared`, `locality_shift`), or that is `cpu_busy`. The sweep
+  reading was high for the time or the NUMA node it was taken in;
+- a path that is `uncertain` with `host_shift`, `cpu_busy`, `rnic_busy` or
+  `no_path`. The steady states of a healthy idle host (`non_affinitive`,
+  `below_ceiling`, `no_ceiling`) are kept;
+- a path with no bandwidth, p50 or p99 reading.
+
+A reading is three signals taken by one probe: the bandwidth, and the
+small-message latency p50 and p99. A path that stops giving clean readings
+keeps its reference and becomes unknown.
+
+### Daily values
+
+The history does not keep runs. It keeps one value per signal per UTC day:
+the median of that day's readings.
+
+A day is the unit because the number of runs says nothing about elapsed
+time. An idle host adds 288 runs a day at the default `--idle-interval`, and
+a host that is idle for an hour a week adds a dozen. Consecutive runs are
+also not independent: a memory subsystem that sits in a slower state stays
+there for minutes ([Bandwidth recheck](#bandwidth-recheck)). A daily median
+gives every day one vote and removes the time of day.
+
+A day keeps at most 16 readings. When it holds 16, every other one is
+dropped and from then on every second reading is kept, then every fourth,
+and so on. The kept readings stay evenly spread over the day, and their
+median is an order statistic of real readings. A streaming estimate would
+need tuning and is not exact for a day with five runs.
+
+A path keeps the daily values of the last 30 calendar days. A day counts
+once it is over, so the verdict of a path changes at most once a day.
+
+### Reference
+
+A path's reference is the median of its first 7 daily values, and their
+scatter, per signal. It is formed once and then kept.
+
+- It is the path's own level, not a baseline. A baseline is one value per
+  distance class, and a calibrated one is a floor for a hardware class
+  ([Calibration](#calibration)). Healthy paths of one class differ by several
+  percent, so no class value can show that one path lost 5%.
+- It does not move. A reference that followed the recent weeks would follow
+  a slow drift and never see it. Against a fixed one, a decay of 5% over six
+  months is reported when it has added up to 5%.
+- It needs 7 days with a clean reading inside 30 calendar days. A host that
+  is idle on fewer days than that never forms one, and its paths stay
+  unknown.
+- A changed `--baseline-file` does not reset it. A fleet file is edited for
+  reasons that have nothing to do with a host, such as a section for another
+  hardware class, and a reset costs at least ten days in which nothing can be
+  judged.
+- A kernel or firmware update does not reset it. A regression after an
+  update is one of the things tracking is there to show. The update is
+  recorded instead ([Software changes](#software-changes)).
+- A path that reads better than its reference is `stable`, with a negative
+  change. The reference is not raised. A rule that raised it would turn one
+  unusually good week into a drift finding for the weeks after it.
+
+A path is identified by what it physically is: the PCI address of its RNIC,
+the PCI address of its GPU or the ID of its memory node together with the
+number of memory nodes, and its distance. RNIC and endpoint IDs are positions
+in the sorted device lists, so excluding or adding one device renumbers the
+others, and a history keyed by ID would continue under another path. A device
+at another PCI address, a path whose distance changed, and every memory path
+after sub-NUMA clustering is turned on or off start a new history. GPU paths
+keep theirs across such a change, because they are the same hardware.
+
+What tracking cannot see:
+
+- A host that was already degraded when tracking began. Its reference is the
+  degraded level. The distance baselines are the only check on it.
+- A device replaced by the same model at the same PCI address. Its paths
+  continue the old history, and a replacement that reads lower is reported
+  as a step on the day of the replacement. Reset the history after such a
+  replacement ([operations](operations.md#tracking-slow-drift)).
+
+The history of a path the topology no longer has is kept for 90 days, in
+case the device comes back (a GPU that fell off the bus, an RNIC excluded
+for a while), and then dropped.
+
+### Drift verdict
+
+Each path has a `drift` status after every tracked run:
+
+- `unknown`, with one of these reasons:
+  - `collecting_reference`: fewer than 7 daily values so far.
+  - `few_recent_days`: fewer than 3 daily values after the reference within
+    the last 14 calendar days. The tracking is young, the host was off or
+    busy, or the path keeps being left out.
+  - `clock_behind`: see [Clock](#clock).
+  - `not_tracked`: the history holds 2048 paths and all of them are in the
+    topology.
+  - `history_blocked`: see [History file](#history-file).
+- `stable`: every signal reads within the threshold of its reference.
+- `drifted`: at least one signal does not.
+
+Unknown is never "no drift". The earliest verdict comes with the run of the
+11th day: 7 days of reference, 3 recent days, and the day they are judged
+on.
+
+The recent level of a signal is the median of the last 7 daily values that
+lie after the reference and within the last 14 calendar days. Its change is
+how far it lies on the worse side of the reference, as a fraction of the
+reference: lower for bandwidth, higher for the latencies. A signal becomes
+drifted when its change reaches the larger of:
+
+- `--drift-th` (default 0.05, between 0.01 and 0.5), and
+- three times the scatter of the reference days, as a fraction of the
+  reference.
+
+It stops being drifted when its change falls below half of that. In between,
+it keeps the verdict it had. Without that band a path sitting at the
+threshold would change its verdict with every day's noise. The verdict
+before a gap is remembered through the gap for the same reason, but a path
+without 3 recent days is `unknown`, not what it was.
+
+Medians do the outlier handling. One bad run does not move its day, and
+three bad days in seven do not move the recent level or the reference.
+
+The scatter is the interquartile range of the 7 reference values divided by
+1.349, the factor that makes it the standard deviation of a normal
+distribution. It is a guard for platforms whose paths do not read at one
+level. On a host whose memory paths read at two levels from day to day
+([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)),
+a week dominated by the lower level is not a drift. The median absolute
+deviation was rejected for this. It ignores any minority of the values, so
+four days at one level and three at another count as no scatter at all.
+
+### Shape
+
+A drifted signal carries the shape of its change inside the 30-day window.
+The shape separates the causes the operator looks for:
+
+- `step`: the best single step through the window accounts for at least two
+  thirds of the change. The step is the split of the window, with at least 3
+  days on each side, that leaves the least total absolute deviation from the
+  medians of its two sides. `step_on` is the first day at the new level. A
+  steady decline over the whole window gives its best step half of the
+  decline at most, so it is not a step. A step points at one event: an
+  update, a replaced or reseated part.
+- `gradual`: not a step, and the Mann–Kendall trend test over the daily
+  values rejects "no trend" at the one-sided 1% level. This is aging or a
+  slow thermal rise.
+- `sustained`: neither. The signal reads worse than its reference throughout
+  the window. The change is older than the window, or too slow to resolve in
+  30 days.
+- `unknown`: the window holds fewer than 8 daily values.
+
+The step is fitted over whole sides and not over a few days around the
+split. With a few days, day-to-day scatter of the size the noise guard
+admits would produce a step of that size somewhere in the window.
+
+### Temperature
+
+A finding says what the temperature of the path's devices did between the
+reference days and the recent days. A path that slowed while a device on it
+runs hotter is consistent with thermal throttling, which reverses when the
+temperature does. One that slowed at a steady temperature is not explained
+that way.
+
+The monitor read no temperature before this. The tracker reads only sensors
+that belong to a device on the path, found by the device's own PCI address:
+
+- the hwmon devices registered under the PCI function
+  (`/sys/bus/pci/devices/<BDF>/hwmon/hwmon*/temp*_input`). An RNIC driver
+  that exposes its sensors puts them there, and so does the DRM driver of an
+  AMD GPU. Reading them needs no privilege.
+- `nvidia-smi --query-gpu=pci.bus_id,temperature.gpu`, for a GPU without a
+  hwmon device. The NVIDIA driver registers none. This is one more bounded
+  `nvidia-smi` run per idle run, keyed by PCI address like the utilization
+  query.
+
+A device with several sensors (an RNIC's ASIC and its plugged modules) is
+represented by the hottest. A reading outside −50 to 200 °C is a missing or
+faulted sensor and is dropped. Board, CPU and DIMM sensors are not read,
+because nothing in sysfs says which path's hop they sit on. A memory
+endpoint therefore has no temperature, and for a memory path only the RNIC
+is compared.
+
+The temperatures are read once, when an idle-trigger run ends, while the
+devices are as warm as the probes left them. They go through the same daily
+medians as the readings. A finding's `temperature.status` is:
+
+- `rose`: a device reads at least 5 °C hotter in the recent days than in the
+  reference days.
+- `steady`: every device of the path that can have a sensor (the RNIC, and a
+  GPU endpoint) was read on both sides, and none rose.
+- `unknown`, with `<device>: no_sensor`, `no_reference_reading` or
+  `no_recent_reading`: a device was not read on one side. A device that was
+  not read is never taken as steady.
+
+`devices` lists the two temperatures of every device that was compared.
+
+This is a correlation and is reported as one. hostping does not conclude
+"thermal throttling" from it. The 5 °C step is a fixed constant, far above
+the 1 °C resolution of the sensors, and has not been validated on hardware.
+Under `--sim` there is no sensor and the status is always `unknown`.
+
+### Software changes
+
+With each tracked run the daemon reads the kernel release
+(`/proc/sys/kernel/osrelease`) and each RNIC's firmware version
+(`fw_ver` of its verbs device). A value that differs from the stored one is
+recorded with the day it was first seen, and the last 16 changes are kept. A
+value that cannot be read is not a change.
+
+A finding lists the changes recorded since its reference began, so a `step`
+can be matched against the update that came with it. GPU driver versions and
+RNIC driver versions are not read.
+
+### Clock
+
+Days are counted by the wall clock, which can be wrong.
+
+- A clock that reads earlier than the newest day of the history (a host
+  that booted with a reset RTC, before time synchronization) records nothing.
+  Every path is `unknown` with `clock_behind` until the clock is past the
+  history again. Recording under it would put today's readings before days
+  that already exist.
+- A clock that stays behind for 2 days is taken to be right, and the history
+  ahead of it to have been recorded under a wrong clock. The daily values
+  dated after it are dropped, and a path whose reference reaches past it
+  starts over. One log line says how much went.
+- A clock that jumps ahead is a gap. The daily values leave the 30-day
+  window, the paths are `unknown` with `few_recent_days` until 3 new days
+  exist, and the reference is kept.
+- A clock that steps back onto a day that is already closed adds nothing to
+  that day.
+
+A host that is powered off for weeks is the same gap. Its paths are judged
+again, against the reference from before, once 3 days have been read.
+
+### History file
+
+The history is `DIR/drift.json`, next to the daemon's `DIR/state.json` and
+separate from it. The state file holds a few runs of evidence about one boot
+and one topology, and the daemon discards it whole after a reboot, a topology
+change or `--flap-window` × `--idle-interval` without a run. A history of
+months must survive all three. A build without drift tracking also rewrites
+the state file without fields it does not know, so a rollback would erase a
+history kept inside it. Such a build never touches `drift.json`.
+
+The file has its own schema version, 1. Any change to it, an added field
+included, takes a new version. At start the daemon reads it as follows:
+
+- No file: a new history starts.
+- A newer version than the build knows: the file is left exactly as it is,
+  and every path reports `history_blocked` until the build is upgraded or
+  the file is removed. Rewriting it would lose what the newer build kept, on
+  a downgrade that may be rolled forward again. A file that cannot be read
+  is treated the same way.
+- Anything else the build cannot use (truncated, corrupt, written by
+  something else, a value outside what the tracker writes): the file is
+  renamed to `drift.json.rejected`, replacing an earlier one, one log line
+  says why, and a new history starts. A damaged file never heals, so leaving
+  tracking off would need an operator on every such host. Keeping one
+  set-aside file means repeated damage cannot fill the directory.
+
+The parser rejects unknown fields and checks every bound the tracker relies
+on, and a fuzz target holds it to that. A file larger than 32 MiB is not
+read.
+
+The history is bounded:
+
+- per path, the reference, at most 30 daily values, at most 16 readings of
+  the current day and the verdict memory: about 3.5 kB;
+- at most 2048 paths. When the history is full, the stale path seen longest
+  ago makes room. A path of the topology is never dropped for one. A
+  topology with more paths than that leaves the rest `not_tracked`.
+
+The file is replaced atomically, as the state file is. Within a day it is
+written at most every 30 minutes, since only the readings of the current day
+change. It is written at once when a day rolls over, a verdict changes or a
+software change is seen, and on shutdown. A daemon that is killed loses at
+most 30 minutes of the current day's readings.
+
+### How drift is reported
+
+A drift finding is not a cause, and `causes` never names one.
+
+- `causes` explains the abnormal paths of one run. A drifted path is within
+  its baseline in that run.
+- `hostping.diagnosis.count` counts causes per run, and the bundled alerts
+  count runs within 30 minutes. A drift verdict is a state that lasts weeks.
+  As a cause it would be counted 288 times a day on an idle host, and never
+  reach two runs in 30 minutes on a host that is idle once a day.
+- A report with no cause still means no intra-host bottleneck was found.
+
+It is reported through:
+
+- the report's `drift` section, on every tracked run: the number of paths
+  that are `stable`, `drifted` and `unknown`, the unknown paths per reason,
+  and one finding per drifted signal with its change, both levels, their
+  dates, the shape, the temperature evidence and the software changes
+  ([metrics.md](metrics.md#drift-section)). A report carries the 32 largest
+  findings and counts the rest in `findings_omitted`, so an update that
+  moves every path does not add a finding per path to every report;
+- `hostping.path.drift.status_code`, `hostping.path.drift.reason_code` and
+  `hostping.path.drift.change_ratio`, which exist only with
+  `--drift-tracking`;
+- one log line when a signal drifts and one when it recovers;
+- the `HostpingPathDrift` alert, at severity `info`.
+
+Reports of other runs carry no `drift` section. Exit codes, existing causes
+and existing alerts are the same with and without the flag.
 
 ## Mutual probe
 

@@ -1,6 +1,6 @@
 # hostping runbook
 
-One section per diagnosis code, plus one per agent-health alert in
+One section per diagnosis code, plus one per agent-health and drift alert in
 [`contrib/prometheus/hostping-rules.yml`](../contrib/prometheus/hostping-rules.yml).
 Each alert's `runbook_url` points at the section of the same name.
 
@@ -37,6 +37,7 @@ text says so.
   [`rnic_pcie_undersized`](#rnic_pcie_undersized),
   [`rnic_lossy_class_discards`](#rnic_lossy_class_discards),
   [`unknown`](#unknown)
+- Drift (`--drift-tracking`): [HostpingPathDrift](#hostpingpathdrift)
 - Agent health: [HostpingTargetDown](#hostpingtargetdown),
   [HostpingNoSuccessfulRun](#hostpingnosuccessfulrun),
   [HostpingIdleGateFailing](#hostpingidlegatefailing),
@@ -177,6 +178,10 @@ code in at least two separate engine runs within 30 minutes
 | `HostpingDiagnosis` | warning (ticket) | Every other code at `high` (`acs_enabled`, `ats_disabled`, `rnic_packet_drops`, `rnic_tx_window`, `overloaded_*`), and every non-advisory code at `medium` (including `tor_switch_anomaly` and `rnic_cross_rail_unreachable`) |
 | `HostpingAdvisoryDiagnosis` | info | `path_latency_abnormal`, `gpu_mr_registration_slow`, `rnic_pcie_undersized`, `rnic_lossy_class_discards`, `unknown`, at any confidence |
 | none | | `rnic_cross_rail_unreachable` at `low` |
+
+`HostpingPathDrift` (info) is not a diagnosis alert. It is built on the
+drift gauges of `--drift-tracking`, not on a code, and is described under
+[Drift](#drift).
 
 Why:
 
@@ -1043,6 +1048,103 @@ loopback bandwidth pattern.
   hardware class, check the abnormal paths' `baseline_class`, and consider
   calibrating baselines
   ([Calibrating baselines](operations.md#calibrating-baselines)).
+
+## Drift
+
+With `--drift-tracking` the daemon compares each path with its own idle
+history ([Tracking slow drift](operations.md#tracking-slow-drift)). A drift
+finding is not a diagnosis: the path is still within its baseline, no cause
+names it, and `hostping_diagnosis_count_total` does not count it.
+
+### HostpingPathDrift
+
+**Meaning.** For an hour, at least one path has read worse than the host's
+own first week of idle readings: the median of its last 7 idle days is at
+least `--drift-th` (default 5%) below its reference on bandwidth, or above
+it on small-message latency p50 or p99. The alert's value is the number of
+such paths. Severity `info`: nothing is broken by the standards of the
+baselines, and the verdict takes days to form and to clear.
+
+**Derivation.** `hostping_path_drift_status_code == 3`. A status gauge is
+the right signal here, unlike for the diagnoses
+([Paging policy](#paging-policy)): the drift state is formed from daily
+medians of confirmed idle runs, one run cannot set it, and it changes at
+most once a day.
+
+**Find the path.** The report of the last idle run has a `findings` entry
+per drifted signal, and the journal has one line from the day it drifted:
+
+```bash
+journalctl -u hostping -o cat | grep 'hostping: drift:'
+jq -c 'select(.drift.findings) | .drift.findings[]' /var/log/hostping/reports.jsonl | tail
+```
+
+```promql
+hostping_path_drift_status_code == 3
+hostping_path_drift_change_ratio > 0.05
+```
+
+**Check first**, by the finding's `shape`:
+
+- `step`, with a `step_on` date. Something changed on that day.
+  - `software_changes` lists the kernel and RNIC firmware changes hostping
+    saw since the reference. A change dated `step_on` is the first suspect.
+    GPU and RNIC driver versions are not recorded: check the package history
+    for that day.
+  - Was a device replaced or reseated on that day? A device swapped for the
+    same model in the same slot continues the old history. If the new level
+    is the device's normal one, start over
+    ([Starting over](operations.md#starting-over)).
+  - Do other paths of the same RNIC, the same GPU or the whole host step on
+    the same day? A step on every path points at software or at the host. A
+    step on the paths of one device points at that device.
+- `gradual`. The level has been falling over the last 30 days.
+  - `temperature.status` `rose`: a device on the path reads at least 5 °C
+    hotter than in the reference week (`temperature.devices` has both
+    values). That is consistent with thermal throttling. Check the airflow,
+    fans, filters, the inlet temperature and neighbouring devices. If the
+    temperature comes down, the reading should follow and the finding clears
+    on its own. hostping does not prove the link between the two.
+  - `temperature.status` `steady`: every sensor of the path was read and
+    none rose. Look at the link instead: correctable PCIe errors (AER
+    counters under the device in sysfs), the RNIC's link-integrity counters
+    (`symbol_error`, `port_rcv_errors`), cable or module diagnostics. This is
+    a first look; hostping reads none of them.
+  - `temperature.status` `unknown`: `temperature.reason` names the device
+    that has no reading. A memory endpoint has no sensor, and under `--sim`
+    nothing has.
+- `sustained`. The path has read lower throughout the last 30 days, and the
+  change is older than that or was too slow to resolve. `since` says when
+  the verdict began.
+
+Then, for every shape:
+
+- Which signal? `bandwidth` alone on a memory path points at the memory side
+  or the RNIC. `latency_p99` alone is a growing tail: retries or
+  interference, not a slower path.
+- How far? `hostping_path_drift_change_ratio` over the last months shows
+  whether it is still moving. A path that keeps falling ends up `abnormal`
+  against its baseline, and the diagnoses above take over.
+- Is the reference sound? A reference week that was unusually good (a host
+  that was freshly rebooted and cold, say) makes every later week read as a
+  drift. `reference_from` and `reference_to` say when it was taken.
+
+**Remediation.** None from hostping. A finding is a lead for hardware
+maintenance (cooling, reseating, a vendor case) or for reverting an update.
+If you accept the new level, start the path over.
+
+**When the alert does not fire although you expect it.** A path that is
+`unknown` is not counted as stable or as drifted.
+`hostping_path_drift_reason_code` says why
+([Tracking slow drift](operations.md#tracking-slow-drift)):
+
+- `collecting_reference`, `few_recent_days`: too little history. A path
+  that turned `abnormal` stops entering the history and ends up here; the
+  diagnoses report it instead.
+- `clock_behind`: the host's clock reads earlier than its history.
+- `history_blocked`: `drift.json` was written by a newer build or cannot be
+  read. Nothing is tracked until that is fixed.
+- `not_tracked`: more than 2048 paths.
 
 ## Agent health
 

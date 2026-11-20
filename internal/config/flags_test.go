@@ -103,8 +103,8 @@ func TestFlagsGoldenCount(t *testing.T) {
 	_, fs := newFlagSet(t)
 	n := 0
 	fs.VisitAll(func(*flag.Flag) { n++ })
-	if n != 51 {
-		t.Fatalf("RegisterFlags registers %d flags, want 51 (update this test and the goldens together with an intended change)", n)
+	if n != 53 {
+		t.Fatalf("RegisterFlags registers %d flags, want 53 (update this test and the goldens together with an intended change)", n)
 	}
 }
 
@@ -213,6 +213,13 @@ func TestFlagValueSetErrors(t *testing.T) {
 		{"upi-bytes-per-flit", "64.0001", `64.0001 out of range [0, 64]`},
 		{"upi-bytes-per-flit", "NaN", `NaN out of range [0, 64]`},
 		{"upi-bytes-per-flit", "many", `strconv.ParseFloat: parsing "many": invalid syntax`},
+		// The one bounded float with a lower bound above 0.
+		{"drift-th", "0", `0 out of range [0.01, 0.5]`},
+		{"drift-th", "0.009", `0.009 out of range [0.01, 0.5]`},
+		{"drift-th", "0.51", `0.51 out of range [0.01, 0.5]`},
+		{"drift-th", "-0.05", `-0.05 out of range [0.01, 0.5]`},
+		{"drift-th", "NaN", `NaN out of range [0.01, 0.5]`},
+		{"drift-th", "5%", `strconv.ParseFloat: parsing "5%": invalid syntax`},
 
 		// Bounded duration: [0s, max]; the duration is printed as
 		// time.Duration formats it, so 1m reads 1m0s and 10001ns 10.001µs.
@@ -582,6 +589,40 @@ func TestValidateIdleGateMessages(t *testing.T) {
 		{IdleGateCommand: "/bin/true", IdleGateTimeout: time.Nanosecond},
 	} {
 		if err := ok.ValidateIdleGate(); err != nil {
+			t.Errorf("%+v: %v", ok, err)
+		}
+	}
+}
+
+// TestValidateDriftMessages pins the ValidateDrift rejection text and that
+// only a daemon with --drift-tracking is checked.
+func TestValidateDriftMessages(t *testing.T) {
+	for _, tc := range []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{DriftTracking: true, DriftTh: 0.05}, "--drift-tracking needs --state-dir: the drift history must outlive the daemon"},
+		{Config{DriftTracking: true, StateDir: "/var/lib/hostping"}, "--drift-th 0 out of range [0.01, 0.5]"},
+		{Config{DriftTracking: true, StateDir: "/var/lib/hostping", DriftTh: 0.6}, "--drift-th 0.6 out of range [0.01, 0.5]"},
+	} {
+		err := tc.cfg.ValidateDrift()
+		if err == nil {
+			t.Errorf("%+v: accepted, want %q", tc.cfg, tc.want)
+			continue
+		}
+		if got := err.Error(); got != tc.want {
+			t.Errorf("%+v:\n got %q\nwant %q", tc.cfg, got, tc.want)
+		}
+	}
+	for _, ok := range []Config{
+		{},
+		{DriftTh: 7},                    // unused without --drift-tracking
+		{StateDir: "/var/lib/hostping"}, // a state directory alone tracks nothing
+		{DriftTracking: true, Once: true},
+		{DriftTracking: true, StateDir: "/var/lib/hostping", DriftTh: MinDriftTh},
+		{DriftTracking: true, StateDir: "/var/lib/hostping", DriftTh: MaxDriftTh},
+	} {
+		if err := ok.ValidateDrift(); err != nil {
 			t.Errorf("%+v: %v", ok, err)
 		}
 	}

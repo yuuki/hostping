@@ -121,9 +121,9 @@ The unit runs `hostping` as root. What it uses, and why:
 | `/dev/infiniband/uverbs*` | Every loopback and mutual probe (`ibv_open_device`, QPs, MRs) | Often mode 0666 already; check with `ls -l`. |
 | `RLIMIT_MEMLOCK` | Host-memory MRs (`ibv_reg_mr`) | See below. |
 | `/dev/nvidia*`, `libcuda.so.1` (or `libcudart.so.*`), and `nvidia-peermem` or dma-buf support | GPU loopback (GPUDirect RDMA) | AMD: `libamdhip64.so`. Missing pieces skip the GPU endpoints with a reason; they never stop the daemon. |
-| sysfs: `/sys/class/infiniband`, `/sys/class/net`, `/sys/bus/pci/devices`, `/sys/class/drm`; `/proc/stat` | Discovery, line rate, counters, PCIe link speed and width, AMD GPU busy; CPU load per NUMA node | Read only. |
+| sysfs: `/sys/class/infiniband`, `/sys/class/net`, `/sys/bus/pci/devices`, `/sys/class/drm`; `/proc/stat` | Discovery, line rate, counters, PCIe link speed and width, AMD GPU busy; CPU load per NUMA node. With `--drift-tracking` also the hwmon temperature sensors under each RNIC's and GPU's PCI function, each RNIC's `fw_ver`, and `/proc/sys/kernel/osrelease` | Read only. |
 | PCI config space (`/sys/bus/pci/devices/*/config`) beyond the first 64 bytes | ACS / ATS | Root only; see below. |
-| `nvidia-smi` on `PATH` | GPU utilization, compute mode, GPU PCIe throughput | Each call bounded (2 s; 5 s for `nvidia-smi dmon`). |
+| `nvidia-smi` on `PATH` | GPU utilization, compute mode, GPU PCIe throughput; with `--drift-tracking`, the GPU temperature, once per idle run | Each call bounded (2 s; 5 s for `nvidia-smi dmon`). |
 | `ethtool` on `PATH` | PFC pause duration and drops not exposed in sysfs (RoCE only) | Each call bounded to 2 s, backed off per netdev when it answers nothing. Without it a RoCE RNIC with no sysfs pause counter has no PFC trigger; the start-up log says so. Unprivileged `ethtool -S` is not verified. |
 | `perf_event_open` on the uncore IMC and UPI PMUs | `--uncore-util` only | `CAP_PERFMON` (or `CAP_SYS_ADMIN`) or `kernel.perf_event_paranoid <= 0`. |
 | A TCP port | `--metrics` (default `:9464`) | See [Metrics endpoint](#metrics-endpoint). |
@@ -182,7 +182,8 @@ Enabled: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
 `ProtectControlGroups`, `RestrictRealtime`, `RestrictSUIDSGID`,
 `RestrictNamespaces`, `LockPersonality`. None of them touches `/dev`, `/sys`,
 `/proc` or the network, and hostping itself writes no files other than the
-opt-in `--report-file` and `--state-dir` ones, for which the unit's
+opt-in `--report-file` and `--state-dir` ones (`state.json`, and `drift.json`
+with `--drift-tracking`), for which the unit's
 `LogsDirectory=` and `StateDirectory=` provide directories under `/var`.
 
 Left out, with the reason next to each in the unit: `PrivateDevices` and
@@ -239,6 +240,9 @@ or idle. Where a source has no unknown state, the table says so.
 | GPU utilization | No `nvidia-smi` on `PATH` and no DRM `gpu_busy_percent` | The GPU is unknown, so the host is never idle and no idle runs happen. PFC/drop busy runs still happen. A live `hostpingctl diagnose` refuses to run. |
 | CPU load of a NUMA node | `/proc/stat` unreadable | The host is never idle while it is unread. No idle runs happen, a held idle-mode run is discarded (`idle_unknown`), and a live `hostpingctl diagnose` refuses to run. Logged once when it fails and once when it reads again; that first read only re-baselines. No `hostping.cpu.busy` sample is written, never a 0. The exporter keeps its last measured value. |
 | GPU compute mode | No `nvidia-smi`, AMD GPU, `[N/A]` | The GPU is probed as if `Default`. |
+| Device temperature (`--drift-tracking`) | The RNIC or GPU has no hwmon sensor under its PCI function and, for a GPU, `nvidia-smi` gives none; a reading outside −50 to 200 °C; always for a memory endpoint and under `--sim` | The device has no temperature for that run. A drift finding whose device was not read in the reference days or in the recent days has `temperature.status` `unknown` with the device and the reason, never `steady`. No path or drift verdict depends on it. |
+| Drift state of a path (`--drift-tracking`) | Too little history (`collecting_reference`, `few_recent_days`), the clock behind the history (`clock_behind`), a full history (`not_tracked`), a history file that can be neither used nor replaced (`history_blocked`) | The path is `unknown` with that reason in the report's `drift.unknown_reasons` and in `hostping.path.drift.reason_code`. It is never counted as stable, and `hostping.path.drift.change_ratio` is not written for it. See [Tracking slow drift](#tracking-slow-drift). |
+| Kernel release, RNIC firmware version (`--drift-tracking`) | `/proc/sys/kernel/osrelease` or the verbs device's `fw_ver` unreadable; always under `--sim` | No software change is recorded for it. An unread value is not a change. |
 | GPU loopback (GDR) | No GPU device nodes, CUDA/HIP library, or `nvidia-peermem`/dma-buf | GPU endpoints are skipped with the probe's reason, reported through one log line per change, `skipped_endpoints` and `hostping.endpoint.skipped`. Memory paths still diagnose. |
 | Memory loopback | Device node, MR registration (memlock) or NUMA binding fails | Same skip channels, kind `memory`. |
 | Loopback port address | RoCE: no active-port RoCEv2 GID. InfiniBand (`ports/N/link_layer`): no ACTIVE port, or an ACTIVE port with LID 0 (no subnet manager) | Every endpoint of that RNIC is skipped through the same channels, with reason `no active rocev2 gid`, `infiniband port not active` or `infiniband port has no lid`. The RNIC's fabric is `unknown`. The addressing a probe did use is logged once per RNIC and on change: `hostping: loopback addressing rnic=rnic0 device=… link_layer=InfiniBand mode=ib_lid port=1 lid=…`. The log shows `mode=ib_lid_grh` when the LID-only connect was refused or its WRITEs completed with a remote error, and `mode=rocev2_gid` on RoCE. The mode that worked is remembered per device and port. A WRITE that fails in every mode is skipped as `probe failed: Wc: <ibv_wc_status_str> (<status>)`, e.g. `transport retry counter exceeded (12)`. The same text names RoCE completion errors. Port-level failures on InfiniBand are described after the table. |
@@ -464,6 +468,8 @@ leaves no series of the old state behind.
 | `hostping_path_latency_status_code` | `rnic`, `endpoint` | 1 `normal`, 2 `unknown`, 3 `abnormal` |
 | `hostping_path_latency_reason_code` | `rnic`, `endpoint` | 0 `none` (never classified), 1 `user_baseline`, 2 `siblings`, 3 `busy`, 4 `few_siblings`, 5 `no_path`, 6 `no_reading`, 7 `recheck_cleared`, 8 `locality_shift`, 9 `cpu_busy` |
 | `hostping_link_status_code` | `link` | 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
+| `hostping_path_drift_status_code` (`--drift-tracking`) | `rnic`, `endpoint` | 1 `stable`, 2 `unknown`, 3 `drifted` |
+| `hostping_path_drift_reason_code` (`--drift-tracking`) | `rnic`, `endpoint` | 0 `none` (the path is stable or drifted), 1 `collecting_reference`, 2 `few_recent_days`, 3 `clock_behind`, 4 `not_tracked`, 5 `history_blocked` |
 
 The names are those of the report JSON (`status`, `uncertain_reason`,
 `latency_status`, `latency_reason` of a path; `status` of a link), whose
@@ -475,8 +481,9 @@ format does not change. The reasons are documented with the classification in
 enum, and a test pins them. A state added later gets the next unused code of
 its gauge. An existing code is never renumbered, and the code of a removed
 state is not reused. Codes are names and do not form a scale. Compare them with
-`==`, never with `<` or `>`, even though the three status gauges happen to
-share 1 for healthy and 3 for abnormal.
+`==`, never with `<` or `>`, even though the status gauges happen to share 1
+for healthy and 3 for the finding (`abnormal`, or `drifted` for the drift
+state).
 
 **Zero.** A status always has a value, so status codes start at 1 and 0 is not
 a status. A query that fills a missing series with 0 (`or vector(0)`, a
@@ -487,7 +494,9 @@ hostping wrote a state its table has no code for. The tests rule that out, so
 it is a bug to report.
 
 `hostping_status_code_info` names every code. It has one series per
-`(metric, code)` (28 in all), always 1 and exported from the first scrape.
+`(metric, code)` (37 in all), always 1 and exported from the first scrape.
+The rows of the two drift gauges are there with and without
+`--drift-tracking`: the table names the codes of the build, not of the host.
 `metric` is the OpenTelemetry instrument name with dots
 (`hostping.path.status_code`), the same on every backend. Rows of a status
 gauge carry a `status` label, and rows of a reason gauge carry `reason`:
@@ -737,7 +746,10 @@ promtool test rules contrib/prometheus/hostping-rules.test.yml
 The rules assume the scrape job is named `hostping`. A diagnosis alerts only
 after it appears in two engine runs within 30 minutes. High-confidence
 hardware faults page, other findings open a ticket, and advisory codes are
-`info`. `rnic_cross_rail_unreachable` at `low` does not alert. The
+`info`. `rnic_cross_rail_unreachable` at `low` does not alert.
+`HostpingPathDrift` (`info`) fires on a host with `--drift-tracking` while a
+path reads worse than its own history; it is built on the drift gauges, not
+on a diagnosis code. The
 [runbook](runbook.md) explains the policy
 ([Paging policy](runbook.md#paging-policy)) and has one section per code and
 alert.
@@ -763,6 +775,8 @@ host. Notation:
 | `hostping_loopback_latency_microseconds`, `hostping_loopback_bandwidth_bit_per_second`, `hostping_path_abnormal` | 3 P | `rnic` × `endpoint` |
 | `hostping_path_status_code`, `hostping_path_uncertain_reason_code`, `hostping_path_latency_status_code`, `hostping_path_latency_reason_code` | 4 P | `rnic` × `endpoint`; the state is the value, not a label |
 | `hostping_path_latency_streak` | P | `rnic` × `endpoint` |
+| `hostping_path_drift_status_code`, `hostping_path_drift_reason_code` | 2 P with `--drift-tracking`, else 0 | `rnic` × `endpoint`; the state is the value |
+| `hostping_path_drift_change_ratio` | ≤ 3 P with `--drift-tracking`, else 0 | `rnic` × `endpoint` × `signal` (`bandwidth`, `latency_p50`, `latency_p99`); only once the path has been judged |
 | `hostping_verb_duration_microseconds` | 3 P_gpu + 2 P_mem | `verb`: `gpu_alloc` on GPU paths only, `mr_reg`, `qp_setup`; `mem_warmup` on memory paths with `--mem-warmup`; none with `--metrics-verb-durations=false` |
 | `hostping_link_abnormal_count` | L | `link` |
 | `hostping_link_status_code` | L | `link`; the state is the value |
@@ -777,26 +791,30 @@ host. Notation:
 | `hostping_endpoint_info` | E | `endpoint` (the other labels are fixed per endpoint) |
 | `hostping_topology_node_info` | R + E + K | `node` (the other labels are fixed per node) |
 | `hostping_topology_edge_info` | L + S | `edge` (the other labels are fixed per edge) |
-| `hostping_status_code_info` | 28 | `metric` × `code`: fixed by the code tables, whatever the host |
+| `hostping_status_code_info` | 37 | `metric` × `code`: fixed by the code tables, whatever the host |
 | `hostping_engine_idle_gate_skipped_total` | G | `reason`: 3 with `--idle-gate-command`, else 0 |
 | Liveness: `hostping_host_idle`, `hostping_monitor_host_idle`, three `*_timestamp_seconds`, `hostping_engine_run_failed_total` (2 `stage`), `hostping_engine_run_discarded_total` (2 `reason`), `hostping_monitor_poll_errors_total`, `hostping_build_info` | 11 | |
 
 Per host:
 
 ```
-series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 41 + D + T + G
+series ≈ 11 P_gpu + 10 P_mem + 3 L + U + 3 M + 5 R + 2 E + K + S + N + 50 + D + T + G
 ```
 
 U ≤ L is the number of links with a utilization source. The Prometheus client
 adds about 50 Go runtime, process and `target_info` series on top. The
-constant 41 is the 11 liveness series, the 2 `hostping_endpoint_skipped`
-series and the 28 `hostping_status_code_info` series.
+constant 50 is the 11 liveness series, the 2 `hostping_endpoint_skipped`
+series and the 37 `hostping_status_code_info` series.
+
+`--drift-tracking` adds 2 P from the first idle run and 3 P more once the
+paths have been judged, 5 series per path in all (see
+[Tracking slow drift](#tracking-slow-drift)).
 
 The path terms dominate. Each RNIC→endpoint pair costs about 11 series, so a
 host grows with R × E. `--metrics-verb-durations=false` drops
 `hostping_verb_duration_microseconds`, the 3 P_gpu + 2 P_mem of those terms,
-leaving 8 series per path (the Fig.2 sim host below scrapes 499 instead of
-611). The probes still time the verbs, and the report's `verb_ns` and the
+leaving 8 series per path (the Fig.2 sim host below scrapes 508 instead of
+620). The probes still time the verbs, and the report's `verb_ns` and the
 `gpu_slow_mr_reg` diagnosis keep using them. Prometheus adds its own `job` and `instance` labels, and
 the exporter adds the constant `otel_scope_*` labels. None of those multiply.
 The endpoint skip reason (free-form probe text), a path's baseline sub-class
@@ -816,16 +834,19 @@ Worked example: the Fig.2 host of `--sim`.
 - G = 0, because no `--idle-gate-command` is set.
 
 ```
-11 × 32 + 10 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 41 + D + T
-= 352 + 80 + 69 + 18 + 20 + 20 + 10 + 41 + D + T = 610 + D + T
+11 × 32 + 10 × 8 + 3 × 23 + 0 + 3 × 6 + 5 × 4 + 2 × 10 + 10 + 0 + 0 + 50 + D + T
+= 352 + 80 + 69 + 18 + 20 + 20 + 10 + 50 + D + T = 619 + D + T
 ```
 
-A healthy idle sim run scrapes 611 `hostping_*` series (D = 0, T = 1), 47 of
-them the topology graph (24 nodes, 23 edges) and 40 the latency streaks; 0.1.4
-scraped 571 and 0.1.3 524.
+A healthy idle sim run scrapes 620 `hostping_*` series (D = 0, T = 1), 47 of
+them the topology graph (24 nodes, 23 edges) and 40 the latency streaks;
+0.2.5 scraped 611 (9 fewer `hostping_status_code_info` rows), 0.1.4 571 and
+0.1.3 524.
 0.1.1, with one-hot status gauges at 22 series per path and 4 per link,
 scraped 1285. The rail-optimized `--topology fig2-rails` host has M = 0 and
-scrapes 593. `--topology fig2-snc` (K = 14 with 4 NUMA nodes, S = 4, L = 27)
+scrapes 602. With `--drift-tracking` the Fig.2 host scrapes 700 on its first
+day (2 × 40 more), and has 820 once every path is judged (3 × 40 more; not
+scraped, since that takes 11 days). `--topology fig2-snc` (K = 14 with 4 NUMA nodes, S = 4, L = 27)
 has 30 nodes and 31 edges.
 
 Each further diagnosis code and confidence, and each further trigger/mode
@@ -842,6 +863,8 @@ When series appear and disappear:
   the liveness counters (written as 0).
 - **Absent until first written:**
   - path, link and verb series, until the first run reports them;
+  - the `hostping_path_drift_*` series, until the first confirmed
+    idle-trigger run of a daemon with `--drift-tracking`;
   - `hostping_diagnosis_count_total` per `(code, confidence)`, until the first
     run that emits it;
   - `hostping_engine_run_count_total` per `(trigger, mode)`, until the first
@@ -855,6 +878,8 @@ When series appear and disappear:
   - `hostping_rnic_pause_duration_ratio` and `hostping_rnic_drop_delta` for an
     RNIC with no source (InfiniBand, or no counter found);
   - `hostping_cpu_busy` for a NUMA node whose CPU load was not read;
+  - `hostping_path_drift_change_ratio` for a path whose drift state is
+    unknown and has never been judged;
   - `hostping_mutual_timeout_ratio` for a pair that reported no probe count;
   - every `hostping_mutual_*` series on a host with no qualifying pair;
   - path and verb series for a skipped endpoint (it is counted in
@@ -941,7 +966,11 @@ series are absent until their first event after the restart. `rate()` handles
 the counter reset.
 
 `--state-dir DIR` is opt-in. The unit's `StateDirectory=hostping` provides
-`/var/lib/hostping` with mode 0700. With it, the daemon keeps four things across
+`/var/lib/hostping` with mode 0700. With `--drift-tracking`, the directory
+also holds the drift history, `DIR/drift.json`, which has its own rules
+([Tracking slow drift](#tracking-slow-drift)): it survives reboots, topology
+changes and downgrades, which the state file below does not. With
+`--state-dir`, the daemon keeps four things across
 a restart in `DIR/state.json` (mode 0600, replaced atomically):
 
 - the per-link consecutive-gray counters behind flapping, with the end of the
@@ -980,7 +1009,8 @@ cannot be read runs without persistence and says so once. One-shot runs
 (`hostpingctl diagnose`, `hostping --once`, `hostpingctl calibrate`) never read
 or write the file.
 
-Nothing survives a reboot. The boot ID changes, and links retrain on boot, so
+Nothing in `state.json` survives a reboot. The boot ID changes, and links
+retrain on boot, so
 streaks from before the reboot say nothing about the links now. A changed
 topology (an RNIC or GPU added, removed or renamed) also starts from zero. The
 held idle-mode report and the mutual probe window are never persisted.
@@ -1006,7 +1036,10 @@ name the build that is now running.
 To roll back, point `current` at the previous directory and restart. Keep the
 previous release directory until the new one has run through at least one idle
 run. The environment file is shared between releases. A rollback past a release
-that added a flag you now use fails at start until you remove the flag.
+that added a flag you now use fails at start until you remove the flag. A
+release without `--drift-tracking` never reads or writes `drift.json`, so the
+history is still there when you roll forward again. The days in between are a
+gap in it.
 
 ## Cost to running workloads
 
@@ -1355,6 +1388,10 @@ bandwidth rechecks, which change only verdicts calibration does not read. A
 latency it writes is drawn from those first readings, slow time windows
 included. A verdict against it, like any `LAT` you set, is not rechecked.
 
+Calibrating again does not reset the drift history of `--drift-tracking`:
+the reference of a path is its own first week, not a baseline. See
+[Starting over](#starting-over).
+
 ### Two levels in one distance
 
 On some platforms the P2P route between certain pairs of root ports costs
@@ -1450,3 +1487,144 @@ Each run's `hostping baseline` line for a table that uses a section says so.
 with the same quartile and sub-class rules as the top level. It warns about a
 section only some files have, since hosts of one hardware class should derive
 the same tables.
+
+## Tracking slow drift
+
+Baselines catch a path that reads 20% low (`--abnormal-th`). They do not
+catch a path that has lost 8% over a quarter because a GPU runs hotter, a
+link retries more or an update cost a few percent. `--drift-tracking` makes
+the daemon compare each path with its own history instead. It is opt-in, and
+its thresholds have not been exercised on RDMA hardware. The design is in
+[Drift against the host's own history](design.md#drift-against-the-hosts-own-history).
+
+```bash
+# /etc/default/hostping
+HOSTPING_OPTS="... --state-dir /var/lib/hostping --drift-tracking"
+```
+
+`--state-dir` is required, and the daemon refuses to start without it: the
+history has to outlive the daemon. One-shot runs ignore the flag.
+
+What to expect:
+
+- **Nothing for the first ten days.** A path is `unknown` with
+  `collecting_reference` until it has been read on 7 idle days, and with
+  `few_recent_days` until 3 more. The first verdict comes with the 11th day.
+  A host that is idle on fewer than 7 days in any 30 never gets one.
+- **The reference is the host's own first week.** Enable tracking on a host
+  you believe healthy, as you would calibrate one. A host that is already
+  degraded then is not found by tracking.
+- **A verdict moves once a day at most.** It is formed from daily medians.
+  A path is `drifted` when the median of its last 7 idle days reads
+  `--drift-th` (default 5%) worse than its reference on bandwidth, latency
+  p50 or latency p99, and `stable` again below half of that. A path whose
+  days scatter needs more: three times the scatter of its reference week.
+- **Existing verdicts do not change.** A drifted path is still `normal` or
+  `uncertain`, `causes` does not name it, and no existing alert fires for it.
+
+Where it shows:
+
+- The `drift` object of each idle run's report
+  ([metrics.md](metrics.md#drift-section)): counts per state, the unknown
+  paths per reason, and a finding per drifted signal.
+- `hostping_path_drift_status_code`, `hostping_path_drift_reason_code` and
+  `hostping_path_drift_change_ratio{signal}`. The change is exported for
+  every judged path, drifted or not, so a dashboard can show a path creeping
+  towards the threshold:
+
+  ```promql
+  # Paths reading worse than their own history, by signal.
+  hostping_path_drift_change_ratio > 0.03
+
+  # Paths whose drift state is not known, by reason.
+  count_values by (instance) ("code", hostping_path_drift_reason_code != 0)
+    * on (instance, code) group_left (reason)
+      hostping_status_code_info{metric="hostping.path.drift.reason_code"}
+  ```
+
+- The journal, once when a signal drifts and once when it recovers:
+
+  ```
+  hostping: drift: drifted: rnic1->gpu3 bandwidth 183.00 Gb/s against its reference 197.00 Gb/s (-7.1%; reference 2026-08-01..2026-08-07, recent 2026-10-22..2026-10-28), shape gradual, temperature rose rnic1 55->56 C gpu3 61->70 C
+  hostping: drift: rnic1->gpu3 bandwidth recovered: 196.20 Gb/s against its reference 197.00 Gb/s (-0.4%), drifted since 2026-10-19
+  ```
+
+- The `HostpingPathDrift` alert ([runbook](runbook.md#hostpingpathdrift)).
+
+### The history file
+
+The history is `drift.json` in `--state-dir`, mode 0600, one JSON line. It
+holds about 3.5 kB per path (140 kB on a host with 40 paths): the reference,
+one median per day for the last 30 days, at most 16 readings of the current
+day, and the software versions last seen. It does not grow beyond that. The
+history of a path the topology no longer has is dropped after 90 days.
+
+It is written atomically, at most every 30 minutes while only the current
+day's readings change, at once when a day ends or a verdict changes, and on
+shutdown.
+
+Unlike `state.json`, it is kept across reboots, topology changes and
+downgrades:
+
+| At start | What the daemon does |
+| --- | --- |
+| No file | Starts a new history and says so. |
+| A file from a build with a newer history format | Leaves it untouched and tracks nothing: every path reports `history_blocked`. Upgrade the build, or remove the file to start over. |
+| A file that cannot be read | The same. Fix its permissions. |
+| A damaged or foreign file | Renames it to `drift.json.rejected` (replacing an earlier one), logs why, and starts a new history. |
+
+A path is identified by PCI addresses, not by `rnicN`/`gpuN`, so excluding
+or adding a device keeps the other paths' histories. A device moved to
+another slot starts over. Turning sub-NUMA clustering on or off starts the
+memory paths over and keeps the GPU paths.
+
+### Starting over
+
+The reference is never moved on its own, and a changed `--baseline-file`
+does not move it either. Start over when the old reference no longer
+describes the hardware you want to compare with:
+
+- after replacing a device with the same model in the same slot. Tracking
+  cannot tell the new device from the old one, and reports a `step` on the
+  day of the replacement if the new one reads lower;
+- after a repair that made a path faster than its reference;
+- when you accept a new level, for example after an update that costs a few
+  percent on every host.
+
+Stop the daemon first. It reads the file only at start and writes it from
+memory, so a file changed under a running daemon is overwritten.
+
+```bash
+systemctl stop hostping
+rm /var/lib/hostping/drift.json                     # every path
+# or one path: delete its entry from "paths"
+jq -c 'del(.paths["0000:37:00.0->0000:39:00.0/same_switch"])' \
+    /var/lib/hostping/drift.json > /var/lib/hostping/drift.json.new &&
+    install -m 0600 /var/lib/hostping/drift.json.new /var/lib/hostping/drift.json &&
+    rm /var/lib/hostping/drift.json.new
+systemctl start hostping
+```
+
+The path keys are in the file: `jq -r '.paths | keys[]' drift.json`. A path
+that starts over is `unknown` for ten days.
+
+### Clock and gaps
+
+Days are UTC days of the wall clock. A host that is off or busy for weeks
+has no recent days when it returns. Its paths are `unknown` with
+`few_recent_days` until 3 idle days have been read, and are then judged
+against the reference from before.
+
+A host that boots with a clock in the past records nothing until the clock
+is corrected (`clock_behind`). If the clock stays behind the newest day of
+the history for 2 days, the daemon takes the clock to be right, drops the
+days dated after it and logs how many. A clock that ran ahead for a while
+therefore costs the daily values recorded since then, and a reference
+formed under it starts over.
+
+### Cost
+
+- 5 more series per path ([Series cardinality](#series-cardinality)).
+- One read of a few sysfs files per RNIC and GPU, and one more bounded
+  `nvidia-smi` run when a GPU has no hwmon sensor, per idle run. No probe is
+  added: tracking reads the runs the daemon makes anyway.

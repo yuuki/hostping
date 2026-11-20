@@ -153,3 +153,43 @@ func FuzzEncodeEvent(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseNvidiaTemps: whatever nvidia-smi prints, a temperature is keyed
+// by a sysfs BDF and is a plausible one, never NaN, infinite or a sensor's
+// fault value.
+func FuzzParseNvidiaTemps(f *testing.F) {
+	f.Add("00000000:3C:00.0, 45\n00000001:3C:00.0, 72\n")
+	f.Add("00000000:17:00.0, [N/A]\n00000000:65:00.0, [Not Supported]\n")
+	f.Add("00000000:17:00.0, NaN\n00000000:18:00.0, +Inf\n00000000:19:00.0, 1e308\n00000000:1a:00.0, -0\n")
+	f.Add("garbage\n,\n00000000:17:00.0\n0000:17:00.0,,45\n")
+	f.Fuzz(func(t *testing.T, out string) {
+		for bdf, c := range parseNvidiaTemps(out) {
+			if pci.CanonicalBDF(bdf) != bdf {
+				t.Fatalf("temperature keyed by %q, not a canonical BDF", bdf)
+			}
+			if math.IsNaN(c) || c < minDeviceTempC || c > maxDeviceTempC {
+				t.Fatalf("temperature %v of %s is not a plausible one", c, bdf)
+			}
+		}
+	})
+}
+
+// FuzzParseMilliCelsius: a hwmon reading is a plausible temperature in
+// degrees or nothing.
+func FuzzParseMilliCelsius(f *testing.F) {
+	for _, s := range []string{"58000\n", "-5000", "65535000", "", "0", "9223372036854775807", "-9223372036854775808", "58.5", " 1 "} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		c, ok := parseMilliCelsius(s)
+		if !ok {
+			if c != 0 {
+				t.Fatalf("parseMilliCelsius(%q) = %v without ok", s, c)
+			}
+			return
+		}
+		if math.IsNaN(c) || c < minDeviceTempC || c > maxDeviceTempC {
+			t.Fatalf("parseMilliCelsius(%q) = %v, not a plausible temperature", s, c)
+		}
+	})
+}

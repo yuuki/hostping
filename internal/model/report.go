@@ -45,6 +45,11 @@ type Report struct {
 	// CPULoad is each NUMA node's CPU busy fraction on the monitor poll that
 	// started the run, in NUMA order; empty when the run had no CPU reading.
 	CPULoad []CPULoad `json:"cpu_load,omitempty"`
+	// Drift is the state of the paths against their own idle history after
+	// this run; nil unless the run is a confirmed idle-trigger run of a
+	// daemon with --drift-tracking. It is advisory: no path status, link
+	// status or cause reads it.
+	Drift *DriftSummary `json:"drift,omitempty"`
 }
 
 // SkippedEndpointCount counts the distinct endpoints this run skipped. An

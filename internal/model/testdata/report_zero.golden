@@ -81,5 +81,50 @@
       "socket": 0,
       "busy": 0
     }
-  ]
+  ],
+  "drift": {
+    "stable": 0,
+    "drifted": 0,
+    "unknown": 0,
+    "unknown_reasons": [
+      {
+        "reason": "none",
+        "paths": 0
+      }
+    ],
+    "findings": [
+      {
+        "rnic": "",
+        "endpoint": "",
+        "signal": "",
+        "shape": "",
+        "change": 0,
+        "reference": 0,
+        "recent": 0,
+        "reference_from": "",
+        "reference_to": "",
+        "recent_from": "",
+        "recent_to": "",
+        "since": "",
+        "temperature": {
+          "status": "",
+          "devices": [
+            {
+              "device": "",
+              "reference_c": 0,
+              "recent_c": 0
+            }
+          ]
+        },
+        "software_changes": [
+          {
+            "on": "",
+            "component": "",
+            "from": "",
+            "to": ""
+          }
+        ]
+      }
+    ]
+  }
 }
