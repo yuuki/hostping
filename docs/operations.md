@@ -218,7 +218,8 @@ set -a; . /etc/default/hostping; set +a
 
 This parses every flag and runs discovery, including `--mem-channel-capacity`
 link IDs and `--drop-ignore-rnic` names, without probing. It does not read `--baseline-file` or check the
-`--mutual-interval` / `--mutual-transport` combination.
+`--mutual-interval` / `--mutual-transport` combination, or that
+`--drift-tracking` comes with a `--state-dir`, which only the daemon needs.
 
 `hostpingctl diagnose` and the daemon do not coordinate. Running a live
 `diagnose` while the daemon is up puts both runs' probe traffic on the same
