@@ -589,6 +589,11 @@ AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive wi
 
 `(port)` marks the port above the link; the other address is the device or the
 switch upstream port below it. The report's `pcie_links` has the same numbers.
+The numbers are those of the last window. A finding stands until three
+windows in a row are within the budget, and in those windows the evidence
+reads `within it in the last window (the finding ends after 3 such windows in
+a row)`, or `an uncorrectable link error was counted within the last 3
+windows`.
 
 **Check first.**
 

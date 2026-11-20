@@ -152,7 +152,7 @@ type Config struct {
 
 	// PCIeInterval is how often the daemon's hardware monitor reads, without
 	// sending a probe, the negotiated link and the AER link-error counters
-	// of the PCIe links its probes cross (monitor.PCIeWatch). Zero, the
+	// of the PCIe links its probes cross (internal/monitor/pcie.go). Zero, the
 	// default, leaves the passive reading off; at most MaxPCIeInterval. It
 	// is opt-in because its error-rate verdict has not been exercised on
 	// hardware: a platform that counts link errors at a steady low rate, or

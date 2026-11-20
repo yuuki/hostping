@@ -941,6 +941,23 @@ func TestPCIeLinkFindingEvidence(t *testing.T) {
 		}, "9 link errors/min with no budget to judge them against; 0000:39:00.0: BadTLP=90 uncorrectable DLP=1; last window 600s"},
 		{"a whole budget is not rounded up", model.PCIeLinkFinding{ErrorsPerMinute: 17, BudgetPerMinute: 16, OverBudgetWindows: 1, WindowSeconds: 60},
 			"17 link errors/min against a budget of 16/min, over it in 1 consecutive windows; last window 60s"},
+		// A finding outlives the window that made it: the evidence of a
+		// later window says what the finding still stands on.
+		{"sustained, the last window within the budget", model.PCIeLinkFinding{
+			State: model.PCIeLinkSustained, ErrorsPerMinute: 3, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 3}}},
+		}, "3 link errors/min against a budget of 16/min, within it in the last window (the finding ends after 3 such windows in a row); 0000:39:00.0: BadTLP=3; last window 60s"},
+		{"suspect, the last window within the budget", model.PCIeLinkFinding{
+			State: model.PCIeLinkSuspect, BudgetPerMinute: 15.36, WindowSeconds: 60, Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0"}},
+		}, "0 link errors/min against a budget of 16/min, within it in the last window (the finding ends after 3 such windows in a row); last window 60s"},
+		{"uncorrectable, counted in an earlier window", model.PCIeLinkFinding{
+			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			Ends: []model.PCIeLinkEnd{{BDF: "0000:38:00.0", Port: true}, {BDF: "0000:39:00.0"}},
+		}, "0 link errors/min against a budget of 16/min; an uncorrectable link error was counted within the last 3 windows; last window 60s"},
+		{"uncorrectable, counted in the last window", model.PCIeLinkFinding{
+			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			Ends: []model.PCIeLinkEnd{{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}}},
+		}, "0 link errors/min against a budget of 16/min; 0000:38:00.0 (port): uncorrectable SDES=1; last window 60s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.f.Evidence(); got != tc.want {

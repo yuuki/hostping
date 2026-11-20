@@ -8,7 +8,8 @@ import (
 )
 
 // PCIeLinkState is what the passive AER counters of a PCIe link amount to
-// (monitor.PCIeWatch). The zero value is no finding.
+// (the hardware monitor's passive reading, internal/monitor/pcie.go). The
+// zero value is no finding.
 type PCIeLinkState string
 
 const (
@@ -67,7 +68,9 @@ type PCIeLinkFinding struct {
 
 // Evidence renders the finding's numbers for a cause or a log line: the rate
 // against the budget, how long it has been over it, and what each end
-// counted in the last window.
+// counted in the last window. A finding outlives the window that made it, so
+// when the last window shows nothing of it, the evidence says what it still
+// stands on.
 func (f PCIeLinkFinding) Evidence() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%.0f link errors/min", f.ErrorsPerMinute)
@@ -76,8 +79,14 @@ func (f PCIeLinkFinding) Evidence() string {
 	} else {
 		b.WriteString(" with no budget to judge them against")
 	}
-	if f.OverBudgetWindows > 0 {
+	switch {
+	case f.OverBudgetWindows > 0:
 		fmt.Fprintf(&b, ", over it in %d consecutive windows", f.OverBudgetWindows)
+	case f.State == PCIeLinkSuspect || f.State == PCIeLinkSustained:
+		fmt.Fprintf(&b, ", within it in the last window (the finding ends after %d such windows in a row)", PCIeSustainWindows)
+	}
+	if f.State == PCIeLinkUncorrectable && !f.countedUncorrectable() {
+		fmt.Fprintf(&b, "; an uncorrectable link error was counted within the last %d windows", PCIeSustainWindows)
 	}
 	for _, e := range f.Ends {
 		rows := formatRows(e.Correctable)
@@ -95,6 +104,17 @@ func (f PCIeLinkFinding) Evidence() string {
 	}
 	fmt.Fprintf(&b, "; last window %.0fs", f.WindowSeconds)
 	return b.String()
+}
+
+// countedUncorrectable reports whether an end counted an uncorrectable link
+// error in the last window.
+func (f PCIeLinkFinding) countedUncorrectable() bool {
+	for _, e := range f.Ends {
+		if len(e.Uncorrectable) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // formatRows lists the rows of m as name=count, by name.

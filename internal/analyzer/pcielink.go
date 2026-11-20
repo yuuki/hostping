@@ -9,7 +9,7 @@ import (
 )
 
 // Passive evidence against a PCIe link: what the hardware monitor read
-// without sending a probe (--pcie-interval, monitor.PCIeWatch).
+// without sending a probe (--pcie-interval, internal/monitor/pcie.go).
 //
 // It comes in two kinds, and each stays what it is. A link that trained
 // below what both of its ends can do is judged by the down-train rules of

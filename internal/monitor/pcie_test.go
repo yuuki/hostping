@@ -1148,7 +1148,8 @@ func TestSysfsSamplerPCIeLinks(t *testing.T) {
 }
 
 // End to end over sysfs: a link that starts counting Bad TLPs over its budget
-// becomes a suspect after a minute and a verdict after three, through Poll.
+// becomes a suspect after a minute and a verdict after three, read by the
+// live sampler from the files as they change.
 func TestMonitorPCIeFromSysfs(t *testing.T) {
 	root := pcieTree(t)
 	g := pcieTreeGraph()
