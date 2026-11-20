@@ -2,7 +2,9 @@ package sim
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yuuki/hostping/internal/baseline"
 	"github.com/yuuki/hostping/internal/model"
@@ -44,6 +46,11 @@ type World struct {
 	// healthy hardware, not a fault, but lets --sim reproduce a distance
 	// that reads at two levels for hostpingctl calibrate to learn.
 	FastPairs map[model.RootPortPair]bool
+	// AERPerMinute is the correctable link errors per minute the AER
+	// counters of a device link (pcie.<rnic>, pcie.<gpu>) count, as the
+	// passive monitor would read them from sysfs. It changes no bandwidth:
+	// a link that errs is not thereby a bottleneck.
+	AERPerMinute map[string]float64
 }
 
 // Simulated setup verb times. Eq.1 says nothing about them, so these are
@@ -63,24 +70,25 @@ const (
 
 func New(g topology.Graph) *World {
 	w := &World{
-		Graph:       g,
-		Bases:       baseline.Defaults(0),
-		LinkBW:      map[string]uint64{},
-		LinkLatNs:   map[string]uint64{},
-		LinkUtil:    map[string]float64{},
-		ATSOff:      map[string]bool{},
-		SlowStart:   map[string]bool{},
-		TxWindow:    map[string]bool{},
-		RNICCap:     map[string]uint64{},
-		ConnectFail: map[string]bool{},
-		Isolated:    map[string]bool{},
-		DropPPM:     map[string]uint32{},
-		PCIe:        map[string]model.PCIeConfig{},
-		Busy:        map[string]bool{},
-		ServiceLoad: 0.35,
-		SlowMR:      map[string]uint64{},
-		ComputeMode: map[string]string{},
-		FastPairs:   map[model.RootPortPair]bool{},
+		Graph:        g,
+		Bases:        baseline.Defaults(0),
+		LinkBW:       map[string]uint64{},
+		LinkLatNs:    map[string]uint64{},
+		LinkUtil:     map[string]float64{},
+		ATSOff:       map[string]bool{},
+		SlowStart:    map[string]bool{},
+		TxWindow:     map[string]bool{},
+		RNICCap:      map[string]uint64{},
+		ConnectFail:  map[string]bool{},
+		Isolated:     map[string]bool{},
+		DropPPM:      map[string]uint32{},
+		PCIe:         map[string]model.PCIeConfig{},
+		Busy:         map[string]bool{},
+		ServiceLoad:  0.35,
+		SlowMR:       map[string]uint64{},
+		ComputeMode:  map[string]string{},
+		FastPairs:    map[model.RootPortPair]bool{},
+		AERPerMinute: map[string]float64{},
 	}
 	for _, l := range g.Links {
 		w.LinkBW[l.ID] = l.CapacityBPS
@@ -122,6 +130,7 @@ func New(g topology.Graph) *World {
 //	isolate:rnic3 (or isolate:rnic2,rnic3)
 //	compute_mode:gpu0 (Exclusive_Process; or compute_mode:gpu0=Prohibited)
 //	fast_rp:rp.0,rp.1 (paths across this root-port pair read at the same_switch level)
+//	aer:pcie.gpu3 (its AER counters count 1000 link errors a minute; or aer:pcie.gpu3=5)
 func (w *World) ApplyFault(spec string) error {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -150,6 +159,7 @@ func (w *World) ApplyFault(spec string) error {
 var faults = map[string]func(w *World, arg string) error{
 	"rnic_pcie": downtrain,
 	"gpu_pcie":  downtrain,
+	"aer":       aerFault,
 	"mem":       memSlow,
 	"mem_flap":  memSlow,
 	"upi": func(w *World, _ string) error {
@@ -261,6 +271,40 @@ var faults = map[string]func(w *World, arg string) error{
 		w.FastPairs[model.NewRootPortPair(a, b)] = true
 		return nil
 	},
+}
+
+// simAERPerMinute is what the aer fault counts per minute without a rate of
+// its own: far over the 16 a minute a Gen4 x16 link is allowed at 10^-12.
+const simAERPerMinute = 1000
+
+// aerFault is the aer fault: the AER counters of a device link count link
+// errors at a steady rate. The link keeps its bandwidth.
+func aerFault(w *World, arg string) error {
+	link, rate, hasRate := strings.Cut(arg, "=")
+	l, ok := w.Graph.Link(link)
+	if !ok || (l.Kind != model.LinkKindPCIeRNIC && l.Kind != model.LinkKindPCIeGPU) {
+		return fmt.Errorf("aer: %q is not an RNIC or GPU PCIe link (pcie.rnic0, pcie.gpu3)", link)
+	}
+	perMinute := float64(simAERPerMinute)
+	if hasRate {
+		v, err := strconv.ParseFloat(rate, 64)
+		if err != nil || !(v >= 0) || v > 1e9 {
+			return fmt.Errorf("aer: %q is not a link-error rate per minute", rate)
+		}
+		perMinute = v
+	}
+	w.AERPerMinute[link] = perMinute
+	return nil
+}
+
+// AERErrors is the cumulative correctable link errors the simulated AER
+// counters of link read once elapsed has passed since the world started: 0
+// without the aer fault.
+func (w *World) AERErrors(link string, elapsed time.Duration) uint64 {
+	if elapsed <= 0 {
+		return 0
+	}
+	return uint64(w.AERPerMinute[link] * elapsed.Minutes())
 }
 
 // downtrain is the rnic_pcie / gpu_pcie fault: full Gen4 speed, down-trained

@@ -27,6 +27,8 @@ hostping.path.latency_status_code |  | Code of the path's current small-message 
 hostping.path.latency_streak |  | Consecutive idle runs, this one included, that read the path's latency abnormal against its siblings, 0 when this run did not | Gauge | int64
 hostping.path.status_code |  | Code of the path's current status (1 normal, 2 uncertain, 3 abnormal); hostping.status_code.info names every code | Gauge | int64
 hostping.path.uncertain_reason_code |  | Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code | Gauge | int64
+hostping.pcie.link.error_budget |  | Correctable link errors per minute one end of a PCIe link may count at --pcie-ber, for the speed and width the link trained to | Gauge | float64
+hostping.pcie.link.errors |  | AER link errors the functions at the two ends of a PCIe link counted since the daemon started, read without a probe (--pcie-interval) | Sum(monotonic=true, CumulativeTemporality) | int64
 hostping.rnic.drop.delta |  | Packet drop counter delta | Gauge | int64
 hostping.rnic.info |  | Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement) | Gauge | int64
 hostping.rnic.pause_duration_ratio |  | Tx pause duration ratio (seconds paused per second) | Gauge | float64

@@ -149,6 +149,9 @@ func recordEverything(tel *Telemetry) {
 	tel.RecordSuccess(ctx, at)
 	tel.RecordDiscarded(ctx, DiscardHostBusy)
 	tel.RecordIdleGateSkipped(ctx, GateDenied)
+	tel.RecordPCIe(ctx, &model.PCIePassive{Sampled: true, Errors: []model.PCIeLinkErrors{
+		{Link: "pcie.gpu0", Correctable: 17, Uncorrectable: 1, BudgetPerMinute: 15.36},
+	}})
 }
 
 // instrumentLine renders one collected instrument as a golden line:

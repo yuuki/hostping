@@ -45,6 +45,21 @@ func CanonicalBDF(s string) string {
 // "unknown" value (empty MaxSpeed/PortMaxSpeed, zero MaxWidth/PortMaxWidth,
 // NUMA -1, ACSKnown/ATSKnown false) when the file is missing.
 func ReadLink(sysroot, bdf string) (model.PCIeConfig, error) {
+	cfg, err := ReadTraining(sysroot, bdf)
+	if err != nil {
+		return model.PCIeConfig{}, err
+	}
+	if caps, err := ReadConfig(sysroot, cfg.BDF); err == nil {
+		cfg.ACSKnown, cfg.ACSEnabled = caps.ACSPresent, caps.ACS
+		cfg.ATSKnown, cfg.ATSEnabled = caps.ATSPresent, caps.ATS
+	}
+	return cfg, nil
+}
+
+// ReadTraining is ReadLink without the ACS/ATS state: the link attributes
+// only, so it does not read the device's config space file. The passive link
+// monitor reads every link with it on every sample.
+func ReadTraining(sysroot, bdf string) (model.PCIeConfig, error) {
 	canon := CanonicalBDF(bdf)
 	if canon == "" {
 		return model.PCIeConfig{}, fmt.Errorf("pci %q: not a BDF", bdf)
@@ -63,10 +78,6 @@ func ReadLink(sysroot, bdf string) (model.PCIeConfig, error) {
 	if up := upstreamPort(sysroot, canon); up != "" {
 		cfg.PortMaxSpeed = strings.TrimSpace(sysfs.ReadString(filepath.Join(up, "max_link_speed")))
 		cfg.PortMaxWidth = sysfs.ReadInt(filepath.Join(up, "max_link_width"), 0)
-	}
-	if caps, err := ReadConfig(sysroot, canon); err == nil {
-		cfg.ACSKnown, cfg.ACSEnabled = caps.ACSPresent, caps.ACS
-		cfg.ATSKnown, cfg.ATSEnabled = caps.ATSPresent, caps.ATS
 	}
 	return cfg, nil
 }

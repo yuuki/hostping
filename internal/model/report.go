@@ -14,6 +14,14 @@ const (
 	// TriggerMutualTimeout is the scheduled mutual probe's window showing a
 	// pair above Timeout_th (ToN'24 §IV-A-2).
 	TriggerMutualTimeout Trigger = "mutual_timeout"
+	// TriggerPCIeLink is a passive finding on a PCIe link of a host that is
+	// not idle (--pcie-probe-interval): a busy-mode run of only the RNICs
+	// whose probes cross that link.
+	TriggerPCIeLink Trigger = "pcie_link"
+	// TriggerPassive marks a report no engine run is behind: the hardware
+	// monitor's passive findings (--pcie-interval), reported without sending
+	// a probe. Its Mode is ModePassive.
+	TriggerPassive Trigger = "passive"
 )
 
 // RunMode selects full-mesh (idle) vs affinitive-only (busy) probing.
@@ -22,6 +30,9 @@ type RunMode string
 const (
 	ModeIdle RunMode = "idle"
 	ModeBusy RunMode = "busy"
+	// ModePassive is the mode of a report that probed nothing
+	// (TriggerPassive): it has no paths and no link states, only causes.
+	ModePassive RunMode = "passive"
 )
 
 // Report is one Hostping engine+analyzer pass, uploaded as OTel attributes and JSON.
@@ -45,6 +56,10 @@ type Report struct {
 	// CPULoad is each NUMA node's CPU busy fraction on the monitor poll that
 	// started the run, in NUMA order; empty when the run had no CPU reading.
 	CPULoad []CPULoad `json:"cpu_load,omitempty"`
+	// PCIeLinks is the passive findings on PCIe links that stood when the
+	// report was made (--pcie-interval), suspects included; empty without
+	// one.
+	PCIeLinks []PCIeLinkFinding `json:"pcie_links,omitempty"`
 }
 
 // SkippedEndpointCount counts the distinct endpoints this run skipped. An

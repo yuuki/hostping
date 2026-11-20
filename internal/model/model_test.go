@@ -513,9 +513,16 @@ func TestStringConstants(t *testing.T) {
 		{"TriggerManual", string(model.TriggerManual), "manual"},
 		{"TriggerPeriodic", string(model.TriggerPeriodic), "periodic"},
 		{"TriggerMutualTimeout", string(model.TriggerMutualTimeout), "mutual_timeout"},
+		{"TriggerPCIeLink", string(model.TriggerPCIeLink), "pcie_link"},
+		{"TriggerPassive", string(model.TriggerPassive), "passive"},
 
 		{"ModeIdle", string(model.ModeIdle), "idle"},
 		{"ModeBusy", string(model.ModeBusy), "busy"},
+		{"ModePassive", string(model.ModePassive), "passive"},
+
+		{"PCIeLinkSuspect", string(model.PCIeLinkSuspect), "suspect"},
+		{"PCIeLinkSustained", string(model.PCIeLinkSustained), "sustained"},
+		{"PCIeLinkUncorrectable", string(model.PCIeLinkUncorrectable), "uncorrectable"},
 
 		{"TopoNodeSocket", model.TopoNodeSocket, "socket"},
 		{"TopoNodeNUMA", model.TopoNodeNUMA, "numa"},
@@ -562,6 +569,7 @@ func TestStringConstants(t *testing.T) {
 		{"CauseUnknown", model.CauseUnknown, "unknown"},
 		{"CauseRNICCrossRailUnreachable", model.CauseRNICCrossRailUnreachable, "rnic_cross_rail_unreachable"},
 		{"CauseSNCMeshFailure", model.CauseSNCMeshFailure, "snc_mesh_failure"},
+		{"CausePCIeLinkErrors", model.CausePCIeLinkErrors, "pcie_link_errors"},
 
 		{"MutualScopeRail", string(model.MutualScopeRail), "rail"},
 		{"MutualScopeHost", string(model.MutualScopeHost), "host"},
@@ -714,6 +722,18 @@ func fullReport() model.Report {
 			}},
 		}},
 		CPULoad: []model.CPULoad{{NUMA: 1, Socket: 1, Busy: 0.93, High: true}},
+		PCIeLinks: []model.PCIeLinkFinding{{
+			Link:              "pcie.gpu3",
+			State:             model.PCIeLinkSustained,
+			ErrorsPerMinute:   412.5,
+			BudgetPerMinute:   15.36,
+			OverBudgetWindows: 3,
+			WindowSeconds:     60,
+			Ends: []model.PCIeLinkEnd{
+				{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}},
+				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 410, "Timeout": 3}},
+			},
+		}},
 	}
 }
 
@@ -729,7 +749,8 @@ func zeroReport() model.Report {
 		Baselines: []model.BaselineTable{{
 			Entries: []model.BaselineEntry{{SubClasses: []model.BaselineSubClass{{}}}},
 		}},
-		CPULoad: []model.CPULoad{{}},
+		CPULoad:   []model.CPULoad{{}},
+		PCIeLinks: []model.PCIeLinkFinding{{Ends: []model.PCIeLinkEnd{{}}}},
 	}
 }
 
@@ -873,5 +894,58 @@ func TestReportJSONHiddenFields(t *testing.T) {
 	}
 	if m["elapsed_ns"] != float64(1500000000) {
 		t.Errorf("elapsed_ns = %v", m["elapsed_ns"])
+	}
+}
+
+// Only a sustained rate and an uncorrectable error are verdicts; a suspect
+// and no finding are not.
+func TestPCIeLinkStateProven(t *testing.T) {
+	for state, want := range map[model.PCIeLinkState]bool{
+		"": false, model.PCIeLinkSuspect: false, model.PCIeLinkSustained: true, model.PCIeLinkUncorrectable: true, "other": false,
+	} {
+		if got := state.Proven(); got != want {
+			t.Errorf("%q.Proven() = %v, want %v", state, got, want)
+		}
+	}
+	if model.PCIeSustainWindows != 3 {
+		t.Errorf("PCIeSustainWindows = %d; the docs and the --pcie-ber help say three", model.PCIeSustainWindows)
+	}
+}
+
+// The evidence of a finding is part of the report contract: the rate against
+// the budget rounded up, the streak, each end's rows by name with the port
+// marked, and the window.
+func TestPCIeLinkFindingEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    model.PCIeLinkFinding
+		want string
+	}{
+		{"sustained", model.PCIeLinkFinding{
+			ErrorsPerMinute: 412.4, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
+			Ends: []model.PCIeLinkEnd{
+				{BDF: "0000:38:00.0", Port: true, Correctable: map[string]uint64{"RxErr": 95}},
+				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"Timeout": 3, "BadTLP": 412, "BadDLLP": 7}},
+			},
+		}, "412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:38:00.0 (port): RxErr=95; 0000:39:00.0: BadDLLP=7 BadTLP=412 Timeout=3; last window 60s"},
+		{"uncorrectable only", model.PCIeLinkFinding{
+			BudgetPerMinute: 30.72, WindowSeconds: 61.4,
+			Ends: []model.PCIeLinkEnd{
+				{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1, "DLP": 2}},
+				{BDF: "0000:39:00.0"},
+			},
+		}, "0 link errors/min against a budget of 31/min; 0000:38:00.0 (port): uncorrectable DLP=2 SDES=1; last window 61s"},
+		{"both kinds at one end, no budget", model.PCIeLinkFinding{
+			ErrorsPerMinute: 9, WindowSeconds: 600,
+			Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 90}, Uncorrectable: map[string]uint64{"DLP": 1}}},
+		}, "9 link errors/min with no budget to judge them against; 0000:39:00.0: BadTLP=90 uncorrectable DLP=1; last window 600s"},
+		{"a whole budget is not rounded up", model.PCIeLinkFinding{ErrorsPerMinute: 17, BudgetPerMinute: 16, OverBudgetWindows: 1, WindowSeconds: 60},
+			"17 link errors/min against a budget of 16/min, over it in 1 consecutive windows; last window 60s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.f.Evidence(); got != tc.want {
+				t.Errorf("evidence\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
 	}
 }

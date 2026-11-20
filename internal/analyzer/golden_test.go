@@ -444,6 +444,20 @@ func fullReport() model.Report {
 			}},
 		}},
 		CPULoad: []model.CPULoad{{NUMA: 1, Socket: 1, Busy: 0.97, High: true}},
+		PCIeLinks: []model.PCIeLinkFinding{{
+			Link:              "pcie.gpu0",
+			State:             model.PCIeLinkSustained,
+			ErrorsPerMinute:   412,
+			BudgetPerMinute:   15.36,
+			OverBudgetWindows: 3,
+			WindowSeconds:     60,
+			Ends: []model.PCIeLinkEnd{{
+				BDF:           "0000:17:00.0",
+				Port:          true,
+				Correctable:   map[string]uint64{"BadTLP": 412},
+				Uncorrectable: map[string]uint64{"SDES": 1},
+			}},
+		}},
 	}
 }
 

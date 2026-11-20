@@ -3,6 +3,7 @@ package pci
 import (
 	"encoding/binary"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -106,4 +107,78 @@ func FuzzCanonicalBDF(f *testing.F) {
 			t.Fatalf("CanonicalBDF(%q) = %q, but CanonicalBDF(%q) = %q", s, out, out, again)
 		}
 	})
+}
+
+// FuzzParseAERStats: an aer_dev_* file is whatever the kernel, or a device
+// behind it, wrote. Whatever it holds, the parser never panics, never returns
+// rows next to an error, and every row it returns is a line of the input: a
+// name that is not blank, then the count it reports. The link rows taken from
+// it are the wanted ones, each once, or an error.
+func FuzzParseAERStats(f *testing.F) {
+	f.Add("RxErr 0\nBadTLP 412\nBadDLLP 0\nRollover 0\nTimeout 3\nNonFatalErr 0\nCorrIntErr 0\nHeaderOF 0\nTOTAL_ERR_COR 415\n")
+	f.Add("Receiver Error 2\nBad TLP 0\nBad DLLP 0\nRELAY_NUM Rollover 0\nReplay Timer Timeout 0\nAdvisory Non-Fatal 0\nTOTAL_ERR_COR 2\n")
+	f.Add("Undefined 0\nDLP 1\nSDES 2\nTLP 0\nFCP 0\nCmpltTO 0\nTOTAL_ERR_FATAL 3\n")
+	f.Add("RxErr 1\ndev_cor_errs_bit[3] 7\nTOTAL_ERR_COR 8\n")
+	f.Add("RxErr 18446744073709551616\n")
+	f.Add("RxErr 1\nReceiver Error 1\nBadTLP 0\nBadDLLP 0\nRollover 0\nTimeout 0\n")
+	f.Add("RxErr\n")
+	f.Add(" 5\n")
+	f.Add("\x00\xff 1\n\n\r\n")
+	f.Add("")
+	f.Fuzz(func(t *testing.T, s string) {
+		rows, err := ParseAERStats(s)
+		if err != nil {
+			if rows != nil {
+				t.Fatalf("rows %v returned with error %v", rows, err)
+			}
+			return
+		}
+		if len(rows) > aerMaxRows {
+			t.Fatalf("%d rows, more than the limit %d", len(rows), aerMaxRows)
+		}
+		for name, v := range rows {
+			if name == "" || name != strings.TrimSpace(name) {
+				t.Fatalf("row name %q is blank or untrimmed", name)
+			}
+			if !aerLineOf(s, name, v) {
+				t.Fatalf("row %q=%d is not a line of %q", name, v, s)
+			}
+		}
+		for _, want := range [][]string{AERCorrectableLinkRows, AERUncorrectableLinkRows} {
+			link, err := aerLinkRows(rows, want)
+			if err != nil {
+				if link != nil {
+					t.Fatalf("link rows %v returned with error %v", link, err)
+				}
+				continue
+			}
+			if len(link) != len(want) {
+				t.Fatalf("link rows %v, want exactly %v", link, want)
+			}
+			for _, row := range want {
+				if _, ok := link[row]; !ok {
+					t.Fatalf("link rows %v lack %s", link, row)
+				}
+			}
+		}
+		again, err := ParseAERStats(s)
+		if err != nil || len(again) != len(rows) {
+			t.Fatalf("ParseAERStats is not deterministic: %v then %v (%v)", rows, again, err)
+		}
+	})
+}
+
+// aerLineOf reports whether s holds a line that is name, white space, and a
+// decimal spelling of v, with any white space around them.
+func aerLineOf(s, name string, v uint64) bool {
+	for _, l := range strings.Split(s, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(l), name)
+		if !ok || rest == strings.TrimSpace(rest) {
+			continue
+		}
+		if n, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 64); err == nil && n == v {
+			return true
+		}
+	}
+	return false
 }

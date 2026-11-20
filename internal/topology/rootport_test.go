@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/yuuki/hostping/internal/model"
@@ -32,5 +33,32 @@ func TestRootPortPair(t *testing.T) {
 	pairs := g.RootPortPairs()
 	if len(pairs) != 6 || !pairs[model.NewRootPortPair("rp.3", "rp.2")] {
 		t.Errorf("pairs = %v, want the 6 pairs of 4 root ports", pairs)
+	}
+}
+
+// RNICsProbing names the RNICs a run has to sweep to put a loopback through a
+// link: in an idle run every RNIC reaches every GPU, in a busy run only the
+// affinitive one does, and a memory path stays under its own root port.
+func TestRNICsProbing(t *testing.T) {
+	g := Fig2()
+	for _, tc := range []struct {
+		link string
+		mode model.RunMode
+		want []string
+	}{
+		{"pcie.rnic2", model.ModeBusy, []string{"rnic2"}},
+		{"pcie.rnic2", model.ModeIdle, []string{"rnic2"}},
+		{"pcie.gpu5", model.ModeBusy, []string{"rnic2"}},
+		{"pcie.gpu5", model.ModeIdle, []string{"rnic0", "rnic1", "rnic2", "rnic3"}},
+		{"rp.3", model.ModeBusy, []string{"rnic3"}},
+		{"sw.0", model.ModeBusy, []string{"rnic0"}},
+		{"mem.1", model.ModeBusy, []string{"rnic0", "rnic1", "rnic2", "rnic3"}},
+		{"upi.0", model.ModeBusy, []string{"rnic0", "rnic1", "rnic2", "rnic3"}},
+		{"pcie.gpu9", model.ModeIdle, nil},
+		{"", model.ModeBusy, nil},
+	} {
+		if got := g.RNICsProbing(tc.link, tc.mode); !slices.Equal(got, tc.want) {
+			t.Errorf("RNICsProbing(%q, %s) = %v, want %v", tc.link, tc.mode, got, tc.want)
+		}
 	}
 }

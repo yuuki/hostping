@@ -81,5 +81,20 @@
       "socket": 0,
       "busy": 0
     }
+  ],
+  "pcie_links": [
+    {
+      "link": "",
+      "state": "",
+      "errors_per_minute": 0,
+      "budget_per_minute": 0,
+      "over_budget_windows": 0,
+      "window_seconds": 0,
+      "ends": [
+        {
+          "bdf": ""
+        }
+      ]
+    }
   ]
 }

@@ -309,6 +309,8 @@ func TestNilTelemetryRecordsNothing(t *testing.T) {
 	var tel *Telemetry
 	tel.RecordReport(context.Background(), sampleReport())
 	tel.RecordRates(context.Background(), []model.RNICRates{{Device: "rnic0"}})
+	tel.RecordPCIe(context.Background(), &model.PCIePassive{Sampled: true, Errors: []model.PCIeLinkErrors{{Link: "pcie.gpu0"}}})
+	tel.RecordPassive(context.Background(), sampleReport())
 	if err := tel.Shutdown(context.Background()); err != nil {
 		t.Errorf("Shutdown: %v", err)
 	}

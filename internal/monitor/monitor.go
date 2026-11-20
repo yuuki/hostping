@@ -81,6 +81,17 @@ type Decision struct {
 	// CPUUnknown is set when the sampler has a CPU signal that could not be
 	// read on this poll. It clears HostIdle and IdleKnown.
 	CPUUnknown bool
+	// PCIe is the passive reading of the host's PCIe links (--pcie-interval);
+	// nil when it is off or the sampler has none. It does not depend on
+	// Ready: no RNIC counter is behind it.
+	PCIe *model.PCIePassive
+	// ProbeLinks, on a pcie_link run, is the PCIe links with a passive
+	// finding the run answers, and ProbeRNICs the RNICs it sweeps: those
+	// whose busy-mode probes cross one of the links, and the references the
+	// bandwidth recheck needs (pcieProbePlan.sweep). Both are nil on every
+	// other run, which sweeps every RNIC.
+	ProbeLinks []string
+	ProbeRNICs map[string]bool
 }
 
 type Monitor struct {
@@ -114,12 +125,30 @@ type Monitor struct {
 	// the CPU signal cannot be read, so the failure is logged once.
 	cpuPrev   map[int]CPUTicks
 	cpuFailed bool
+	// PCIeNeed, when set, names the PCIe links whose passive finding asks
+	// for a probe: the daemon's standing passive causes and suspects. With
+	// --pcie-probe-interval a link it names starts a pcie_link run on a host
+	// that is not idle.
+	PCIeNeed func() []string
+	// pcie is the passive PCIe state across samples (pollPCIe), nil until
+	// the first one. pcieLast is when the last sample was taken, pcieState
+	// what stood after it, and pciePending and pcieSampled what the samples
+	// since the last poll that returned a Decision added.
+	pcie        *pcieWatch
+	pcieLast    time.Time
+	pcieState   model.PCIePassive
+	pciePending []model.PCIeLinkErrors
+	pcieSampled bool
 }
 
 func New(cfg config.Config, g topology.Graph, s Sampler) *Monitor {
 	return &Monitor{Cfg: cfg, Graph: g, Sampler: s, prev: map[string]model.RNICCounters{}, now: time.Now,
 		pauseSrc: map[string]*sourceTrack{}, dropSrc: map[string]*sourceTrack{}, dropResidual: map[string]map[string]int64{}}
 }
+
+// SetClock replaces the poll clock, which is time.Now. Tests step through
+// intervals with it, in this package and in the daemon's.
+func (m *Monitor) SetClock(now func() time.Time) { m.now = now }
 
 func (m *Monitor) logf(format string, args ...any) {
 	if m.Logf != nil {
@@ -213,7 +242,8 @@ func (m *Monitor) MarkRun(t time.Time) {
 
 // SkipRun records that the run the last Poll started did not happen (the
 // daemon's --idle-gate-command denied it). Nothing measured the host, so the
-// --busy-interval keeps counting from the run before. The attempt itself
+// --busy-interval and the --pcie-probe-interval keep counting from the run
+// before. The attempt itself
 // still counts: the idle cadence, like the busy cooldown, is not rewound.
 func (m *Monitor) SkipRun() { m.cad.skipRun() }
 
@@ -242,6 +272,10 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		bp.PollBus(ctx, reset)
 	}
 	now := m.now()
+	// Before the RNIC counters, so a poll that fails on them still advances
+	// the passive state; what it added is handed on by the next poll that
+	// returns a Decision.
+	passive := m.pollPCIe(ctx, now)
 	rn, err := m.pollRNICs(ctx, now)
 	if err != nil {
 		return Decision{}, err
@@ -267,7 +301,8 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	cpuUnknown := rn.ready && !cpuKnown
 	hostIdle := rn.ready && rn.host.idle() && gpuIdle && !gpuUnknown && !cpuUnknown
 	idleKnown := rn.ready && !gpuUnknown && classified && len(rn.unread) == 0 && !cpuUnknown
-	d := Decision{BusyRNICs: rn.busy, Rates: rn.rates, HostIdle: hostIdle, DropDelta: rn.drops, Ready: rn.ready, IdleKnown: idleKnown, UnreadCounters: rn.unread, BytesReset: rn.bytesReset, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown}
+	d := Decision{BusyRNICs: rn.busy, Rates: rn.rates, HostIdle: hostIdle, DropDelta: rn.drops, Ready: rn.ready, IdleKnown: idleKnown, UnreadCounters: rn.unread, BytesReset: rn.bytesReset, BusyGPUs: busyGPUs, GPUComputeMode: modes, CPUUnknown: cpuUnknown, PCIe: passive}
+	m.deliveredPCIe()
 	if !rn.ready {
 		return d, nil
 	}
@@ -275,9 +310,14 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if len(rn.util) > 0 {
 		d.Util = rn.util
 	}
+	plan := m.planPCIeProbe()
 	d.Run, d.Trigger, d.Mode = m.cad.decide(now, &m.Cfg, triggerInputs{
-		pfc: rn.host.pfc, drop: rn.host.drop, hostIdle: hostIdle, classified: classified, alarm: m.MutualAlarm,
+		pfc: rn.host.pfc, drop: rn.host.drop, hostIdle: hostIdle, classified: classified, alarm: m.MutualAlarm, pcieLinks: plan.links,
 	})
+	if d.Trigger == model.TriggerPCIeLink {
+		d.ProbeLinks = m.cad.pcieFired
+		d.ProbeRNICs = plan.sweep(m.Graph, d.ProbeLinks, rn.busy)
+	}
 	return d, nil
 }
 
@@ -538,6 +578,17 @@ type cadence struct {
 	// run, for SkipRun.
 	periodicBefore time.Time
 	lastAlarm      time.Time
+	// lastPCIe is when each PCIe link was last answered by a pcie_link run,
+	// and lastFull the last run of any other trigger: such a run sweeps
+	// every RNIC, so it counts as a probe of every link.
+	lastPCIe map[string]time.Time
+	lastFull time.Time
+	// fullBefore is lastFull before the last poll that started a run, for
+	// SkipRun.
+	fullBefore time.Time
+	// pcieFired is the links the last decide started a pcie_link run for,
+	// nil when it started none.
+	pcieFired []string
 }
 
 // triggerInputs is what a ready poll measured, as the triggers see it.
@@ -551,17 +602,30 @@ type triggerInputs struct {
 	classified bool
 	// alarm is Monitor.MutualAlarm, nil without a mutual probe.
 	alarm func() bool
+	// pcieLinks is the PCIe links whose passive finding asks for a probe
+	// and that a busy run can answer (planPCIeProbe).
+	pcieLinks []string
 }
 
 // markRun is MarkRun: the busy cooldown and the --busy-interval are measured
 // from the end of the run.
 func (c *cadence) markRun(t time.Time) {
 	c.lastBusy = t
+	if len(c.pcieFired) > 0 {
+		// A pcie_link run swept a few RNICs only: it answers its own links
+		// and leaves the --busy-interval, which is about the whole host,
+		// counting.
+		for _, link := range c.pcieFired {
+			c.lastPCIe[link] = t
+		}
+		return
+	}
 	c.lastPeriodic = t
+	c.lastFull = t
 }
 
 // skipRun is SkipRun: the --busy-interval keeps counting from the run before.
-func (c *cadence) skipRun() { c.lastPeriodic = c.periodicBefore }
+func (c *cadence) skipRun() { c.lastPeriodic, c.lastFull = c.periodicBefore, c.fullBefore }
 
 // decide picks the trigger a ready poll at now starts, if any, and records it.
 // The triggers are tried in priority order: PFC/drops, mutual alarm, idle,
@@ -574,6 +638,8 @@ func (c *cadence) decide(now time.Time, cfg *config.Config, in triggerInputs) (r
 		c.lastPeriodic = now
 	}
 	busyCooled := c.lastBusy.IsZero() || now.Sub(c.lastBusy) >= cfg.BusyCooldown
+	c.pcieFired = nil
+	var pcie []string
 	switch {
 	case in.pfc || in.drop:
 		// Rate-limit: the previous run's probe traffic can keep PFC/drop
@@ -607,14 +673,53 @@ func (c *cadence) decide(now time.Time, cfg *config.Config, in triggerInputs) (r
 		// above (ThroughputBPS ≥ Thp_low), the same set a manual diagnose uses.
 		run, trig, mode = true, model.TriggerPeriodic, model.ModeBusy
 		c.lastBusy = now
+	case busyCooled && c.pcieDue(now, cfg, in, &pcie):
+		// Extension beyond the papers: a PCIe link with a passive finding
+		// on a loaded host is probed now, by the RNICs whose probes cross
+		// it and no others, instead of waiting for the host to go idle. It
+		// comes last: any other run sweeps those RNICs too.
+		run, trig, mode = true, model.TriggerPCIeLink, model.ModeBusy
+		c.lastBusy = now
+		c.pcieFired = pcie
+		if c.lastPCIe == nil {
+			c.lastPCIe = map[string]time.Time{}
+		}
+		for _, link := range pcie {
+			c.lastPCIe[link] = now
+		}
 	}
-	if run {
-		// Any run just measured the host, so the periodic interval restarts:
-		// --busy-interval only fills the gaps the other triggers leave.
-		c.periodicBefore = c.lastPeriodic
+	if run && trig != model.TriggerPCIeLink {
+		// Any run that swept the host just measured it, so the periodic
+		// interval restarts: --busy-interval only fills the gaps the other
+		// triggers leave. It also probed every PCIe link a run can reach.
+		c.periodicBefore, c.fullBefore = c.lastPeriodic, c.lastFull
 		c.lastPeriodic = now
+		c.lastFull = now
 	}
 	return run, trig, mode
+}
+
+// pcieDue collects into due the links of in.pcieLinks that
+// --pcie-probe-interval lets a pcie_link run answer now, and reports whether
+// there is one. It is off by default and never fires on an idle host, where
+// the idle run sweeps everything and a busy run would judge nothing; like
+// periodicDue it needs every RNIC classified. A link is due when neither a
+// pcie_link run for it nor a run of any other trigger happened within the
+// interval.
+func (c *cadence) pcieDue(now time.Time, cfg *config.Config, in triggerInputs, due *[]string) bool {
+	if cfg.PCIeProbeInterval <= 0 || in.hostIdle || !in.classified {
+		return false
+	}
+	for _, link := range in.pcieLinks {
+		last := c.lastPCIe[link]
+		if c.lastFull.After(last) {
+			last = c.lastFull
+		}
+		if last.IsZero() || now.Sub(last) >= cfg.PCIeProbeInterval {
+			*due = append(*due, link)
+		}
+	}
+	return len(*due) > 0
 }
 
 // alarmDue reports whether the mutual probe asks for a run now. Each alarm run
@@ -673,6 +778,16 @@ type StaticSampler struct {
 	Counters map[string]model.RNICCounters
 	GPU      []model.GPUStatus
 	Util     map[string]float64
+	// PCIe, when set, is the passive PCIe reading (PCIeSampler).
+	PCIe func(ctx context.Context) []PCIeLinkSample
+}
+
+// PCIeLinks returns the configured passive reading, nil without one.
+func (s StaticSampler) PCIeLinks(ctx context.Context) []PCIeLinkSample {
+	if s.PCIe == nil {
+		return nil
+	}
+	return s.PCIe(ctx)
 }
 
 // RNIC returns the configured counters. A static counter is its own source,

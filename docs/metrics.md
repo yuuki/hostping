@@ -48,7 +48,8 @@ own fields. A discarded idle-mode run reaches neither output. See
 ## Metrics
 
 Each confirmed report records the report metrics. Each monitor poll records the
-`hostping.rnic.*`, `hostping.cpu.busy` and `hostping.monitor.*` ones. Every
+`hostping.rnic.*`, `hostping.cpu.busy` and `hostping.monitor.*` ones, and with
+`--pcie-interval` each passive sample records the `hostping.pcie.*` ones. Every
 instrument is a gauge (last value) except the `counter` rows.
 
 The liveness metrics (`hostping.engine.last_*`,
@@ -76,6 +77,8 @@ agent from one with nothing to report. See
 | `hostping.cpu.busy` | gauge (0–1) | `numa`, `socket` | CPU busy fraction of the NUMA node over the poll interval, from `/proc/stat`; no sample when unread (see [CPU load](design.md#cpu-load-on-an-idle-host)) |
 | `hostping.rnic.pause_duration_ratio` | gauge (ratio) | `rnic` | Tx pause seconds per second; `--pfc-high` (default 0.03 = 30 ms/s) compares against it |
 | `hostping.rnic.drop.delta` | gauge | `rnic` | Packet drop counter delta over the last poll |
+| `hostping.pcie.link.errors` | counter | `link`, `severity` | With `--pcie-interval`: AER link errors the PCI functions at the two ends of the PCIe link counted since the daemon started, summed over both ends and read without a probe. `severity` is `correctable` (Receiver Error, Bad TLP, Bad DLLP, REPLAY_NUM Rollover, Replay Timer Timeout) or `uncorrectable` (Data Link Protocol Error, Surprise Down). It adds only differences between two consecutive samples, so what the kernel had counted before the daemon started is not in it. A link is written from its first differenced sample on, at 0 while quiet; a link whose counters cannot be read, or without AER counters, has no series (see [Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring)) |
+| `hostping.pcie.link.error_budget` | gauge (errors/min) | `link` | With `--pcie-interval`: the correctable link errors per minute one end of the link may count at `--pcie-ber`, for the speed and width the link trained to. `pcie_link_errors` compares the worse end of the link against this value rounded up. No sample while the negotiated link is unread or with `--pcie-ber 0` |
 | `hostping.verb.duration` | gauge (µs) | `rnic`, `endpoint`, `endpoint_kind`, `verb` | Execution time of the loopback probe's setup verbs (`gpu_alloc` on GPU endpoints only, `mr_reg`, `qp_setup`; `mem_warmup` on memory endpoints with `--mem-warmup`) in the last run. Not exported with `--metrics-verb-durations=false` |
 | `hostping.endpoint.skipped` | gauge | `kind` | Endpoints (`gpu`/`memory`) whose loopback probes were skipped because registration failed, the GPU's compute mode is not `Default`, or an earlier loopback on the same InfiniBand RNIC failed at the port in that run; 0 when none |
 | `hostping.host.idle` | gauge (0/1) | — | 1 when the last run classified the host as idle |

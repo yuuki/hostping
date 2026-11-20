@@ -73,6 +73,14 @@ const (
 // see, so it is never high confidence.
 const CauseRNICCrossRailUnreachable = "rnic_cross_rail_unreachable"
 
+// CausePCIeLinkErrors is passive evidence, read without a probe: the AER
+// counters at the ends of a PCIe link count more link errors than the link's
+// bit-error budget allows, window after window, or an uncorrectable link
+// error (PCIeLinkFinding). It names the link, not a bandwidth loss: it never
+// changes a path or link status, and it is high only when the same run also
+// measured a bottleneck at that link.
+const CausePCIeLinkErrors = "pcie_link_errors"
+
 // CauseSNCMeshFailure is a fault Algorithm 1 localizes to an snc_mesh link:
 // the fabric between two NUMA nodes of one package under sub-NUMA clustering.
 // No inter-socket bus is involved, so it is never upi_failure. It is judged by

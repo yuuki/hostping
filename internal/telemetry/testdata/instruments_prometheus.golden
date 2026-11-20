@@ -56,6 +56,10 @@
 # TYPE hostping_path_status_code gauge
 # HELP hostping_path_uncertain_reason_code Code of why the path is uncertain, 0 (none) when it is not; hostping.status_code.info names every code
 # TYPE hostping_path_uncertain_reason_code gauge
+# HELP hostping_pcie_link_error_budget Correctable link errors per minute one end of a PCIe link may count at --pcie-ber, for the speed and width the link trained to
+# TYPE hostping_pcie_link_error_budget gauge
+# HELP hostping_pcie_link_errors_total AER link errors the functions at the two ends of a PCIe link counted since the daemon started, read without a probe (--pcie-interval)
+# TYPE hostping_pcie_link_errors_total counter
 # HELP hostping_rnic_drop_delta Packet drop counter delta
 # TYPE hostping_rnic_drop_delta gauge
 # HELP hostping_rnic_info Always 1; the attributes identify the RNIC (IB device, PCI BDF, netdev, link layer, fabric, NUMA placement)

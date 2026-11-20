@@ -3,6 +3,7 @@ package sim_test
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/sim"
@@ -55,11 +56,54 @@ func TestFastRootPortPairFault(t *testing.T) {
 	}
 }
 
+// aer makes the AER counters of one device link count link errors at a steady
+// rate, cumulative as sysfs counters are, and touches nothing a probe reads:
+// a link that errs is not thereby slow.
+func TestAERFault(t *testing.T) {
+	g := topology.Fig2()
+	w := sim.New(g)
+	if err := w.ApplyFault("aer:pcie.gpu3; aer:pcie.rnic1=6"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		link    string
+		elapsed time.Duration
+		want    uint64
+	}{
+		{"pcie.gpu3", 0, 0},
+		{"pcie.gpu3", -time.Minute, 0},
+		{"pcie.gpu3", time.Minute, 1000},
+		{"pcie.gpu3", 90 * time.Second, 1500},
+		{"pcie.rnic1", 10 * time.Minute, 60},
+		{"pcie.rnic1", 5 * time.Second, 0},
+		{"pcie.gpu0", time.Hour, 0},
+	} {
+		if got := w.AERErrors(tc.link, tc.elapsed); got != tc.want {
+			t.Errorf("AERErrors(%s, %v) = %d, want %d", tc.link, tc.elapsed, got, tc.want)
+		}
+	}
+	healthy := sim.New(g)
+	for _, p := range g.Paths {
+		if w.PathBW(p) != healthy.PathBW(p) || w.PathLatNs(p) != healthy.PathLatNs(p) {
+			t.Fatalf("%s->%s reads %d/%dns under the aer fault, %d/%dns without", p.RNIC, p.Endpoint, w.PathBW(p), w.PathLatNs(p), healthy.PathBW(p), healthy.PathLatNs(p))
+		}
+	}
+	if !reflect.DeepEqual(w.PCIe, healthy.PCIe) {
+		t.Error("the aer fault changed a negotiated link")
+	}
+	for _, bad := range []string{"aer", "aer:gpu3", "aer:rp.0", "aer:mem.0", "aer:pcie.gpu9", "aer:pcie.gpu3=", "aer:pcie.gpu3=-1", "aer:pcie.gpu3=NaN", "aer:pcie.gpu3=many", "aer:pcie.gpu3=1e10"} {
+		if err := sim.New(g).ApplyFault(bad); err == nil {
+			t.Errorf("ApplyFault(%q) accepted", bad)
+		}
+	}
+}
+
 // faultHelpKinds are the fault kinds the --fault help text in
 // internal/config/config.go names as examples.
 var faultHelpKinds = []string{
 	"rnic_pcie:rnic0", "gpu_pcie:gpu0", "upi", "mesh:0-1", "acs", "ats:rnic0", "mem_flap:mem0",
 	"connect_fail:rnic0", "flap:rnic0", "tor", "isolate:rnic3", "compute_mode:gpu3", "fast_rp:rp.0,rp.1",
+	"aer:pcie.gpu3",
 }
 
 // Two fault names share one body: mem_flap is mem, gpu_pcie is rnic_pcie on

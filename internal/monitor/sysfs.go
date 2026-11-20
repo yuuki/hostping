@@ -32,6 +32,9 @@ type SysfsSampler struct {
 	// and UPI PMUs; nil when --uncore-util is off or the PMUs cannot be
 	// read.
 	Uncore *Uncore
+	// PCIe is the PCIe links read passively (PCIeLinkSpecs); empty when
+	// --pcie-interval is off.
+	PCIe []PCIeLinkSpec
 }
 
 // PollBus advances the uncore counters one poll; see BusPoller.

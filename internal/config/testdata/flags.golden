@@ -7,7 +7,7 @@ busy-samples | 3 | loopback readings per path on a loaded RNIC in busy mode; the
 cpu-busy-high | 0.5 | CPU busy fraction of a NUMA node (/proc/stat, over the poll interval) at or above which a path through its CPU package that reads abnormal is reported uncertain (cpu_busy) instead (0 disables, at most 1)
 drop-ignore-rnic |  | RNIC whose drop counters start no busy run and are not diagnosed, by RNIC ID (rnic9), IB device name (mlx5_8) or PCI address, repeatable or comma-separated (e.g. a storage NIC that drops under its clients' load); it is still probed, paired and exported. A name that matches no RNIC fails start-up
 exclude-rnic |  | RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up
-fault |  | simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1)
+fault |  | simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1, aer:pcie.gpu3)
 flap-window | 3 | consecutive gray tests on a link that diagnose flapping
 gpu-util-interval | 10s | minimum period between nvidia-smi GPU utilization queries
 idle-gate-command |  | daemon: executable run (no shell, no arguments) right before each idle-trigger run; exit 0 lets the run start; exit 1 (denied), exit 2 or higher (the gate could not decide), a timeout or an exec failure skips it until the next --idle-interval (e.g. a script that exits 1 while a scheduler job holds the host and 2 when the scheduler cannot be queried; empty: no gate)
@@ -34,6 +34,9 @@ mutual-window | 20s | daemon: sliding window of the scheduled mutual probe's tim
 once | false | run the engine once and exit
 otlp |  | OTLP gRPC endpoint (or OTEL_EXPORTER_OTLP_ENDPOINT): host:port, or http:// (plaintext) / https:// (TLS) URL
 otlp-insecure | false | plaintext OTLP for a host:port endpoint (unset: OTEL_EXPORTER_OTLP_INSECURE, else plaintext for loopback and TLS with the system roots otherwise)
+pcie-ber | 1e-12 | bit error ratio a PCIe link is allowed, for --pcie-interval: an end of a link that counts more AER link errors per minute than this ratio gives at the link's negotiated speed and width is over its budget, and three such windows in a row are reported as pcie_link_errors (0 = judge no rate, only uncorrectable link errors; at most 1e-6)
+pcie-interval | 0s | daemon: read, without sending a probe, the negotiated link and the AER link-error counters of the PCIe links the probes cross this often, and report a link that trained below its capability (rnic_pcie_failure, gpu_pcie_failure) or counts link errors beyond --pcie-ber (pcie_link_errors) when it shows, not at the next run (opt-in, 0 = off; at most 10m; e.g. 10s)
+pcie-probe-interval | 0s | daemon: on a host that is not idle, a PCIe link with a passive finding (--pcie-interval) starts a busy-mode run of only the RNICs whose probes cross that link, at most once per link and interval and never inside --busy-cooldown (opt-in, 0 = a passive finding sends no probe; at most 24h; beyond the papers)
 pfc-high | 0.03 | Tx pause duration ratio that triggers busy diagnosis
 report-file |  | append each report to this file as one JSON line (created 0640; reopened per report, so logrotate needs no signal)
 report-format |  | how each report is written to stdout: json (one compact object per line), pretty (indented JSON) or none (default: pretty for one-shot runs, json for the daemon)

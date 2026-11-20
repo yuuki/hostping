@@ -103,8 +103,8 @@ func TestFlagsGoldenCount(t *testing.T) {
 	_, fs := newFlagSet(t)
 	n := 0
 	fs.VisitAll(func(*flag.Flag) { n++ })
-	if n != 51 {
-		t.Fatalf("RegisterFlags registers %d flags, want 51 (update this test and the goldens together with an intended change)", n)
+	if n != 54 {
+		t.Fatalf("RegisterFlags registers %d flags, want 54 (update this test and the goldens together with an intended change)", n)
 	}
 }
 
@@ -213,6 +213,10 @@ func TestFlagValueSetErrors(t *testing.T) {
 		{"upi-bytes-per-flit", "64.0001", `64.0001 out of range [0, 64]`},
 		{"upi-bytes-per-flit", "NaN", `NaN out of range [0, 64]`},
 		{"upi-bytes-per-flit", "many", `strconv.ParseFloat: parsing "many": invalid syntax`},
+		{"pcie-ber", "-1e-12", `-1e-12 out of range [0, 1e-06]`},
+		{"pcie-ber", "1e-5", `1e-05 out of range [0, 1e-06]`},
+		{"pcie-ber", "NaN", `NaN out of range [0, 1e-06]`},
+		{"pcie-ber", "low", `strconv.ParseFloat: parsing "low": invalid syntax`},
 
 		// Bounded duration: [0s, max]; the duration is printed as
 		// time.Duration formats it, so 1m reads 1m0s and 10001ns 10.001µs.
@@ -231,6 +235,12 @@ func TestFlagValueSetErrors(t *testing.T) {
 		{"mem-warmup", "1001ms", `1.001s out of range [0s, 1s]`},
 		{"mem-warmup", "5s", `5s out of range [0s, 1s]`},
 		{"mem-warmup", "fast", `time: invalid duration "fast"`},
+		{"pcie-interval", "-1s", `-1s out of range [0s, 10m0s]`},
+		{"pcie-interval", "601s", `10m1s out of range [0s, 10m0s]`},
+		{"pcie-interval", "10", `time: missing unit in duration "10"`},
+		{"pcie-probe-interval", "-1s", `-1s out of range [0s, 24h0m0s]`},
+		{"pcie-probe-interval", "25h", `25h0m0s out of range [0s, 24h0m0s]`},
+		{"pcie-probe-interval", "often", `time: invalid duration "often"`},
 
 		// --exclude-rnic: an empty entry anywhere in the list.
 		{"exclude-rnic", "", `empty RNIC name in ""`},
@@ -438,6 +448,9 @@ func TestFlagSetWritesConfig(t *testing.T) {
 		"--idle-gate-timeout=1500ms",
 		"--latency-floor=1.5us",
 		"--mem-warmup=250us",
+		"--pcie-interval=10s",
+		"--pcie-ber=1e-11",
+		"--pcie-probe-interval=15m",
 		"--exclude-rnic=mlx5_2",
 		"--baseline=local_mem=270Gbps,1400ns",
 		"--mem-channel-capacity=200GB/s",
@@ -461,6 +474,9 @@ func TestFlagSetWritesConfig(t *testing.T) {
 	want.IdleGateTimeout = 1500 * time.Millisecond
 	want.LatencyFloor = 1500 * time.Nanosecond
 	want.MemWarmup = 250 * time.Microsecond
+	want.PCIeInterval = 10 * time.Second
+	want.PCIeBER = 1e-11
+	want.PCIeProbeInterval = 15 * time.Minute
 	want.ExcludeRNICs = []string{"mlx5_2"}
 	want.BaselineSpecs = []string{"local_mem=270Gbps,1400ns"}
 	want.MemCapacity = LinkCapacity{All: 1600e9}
@@ -484,17 +500,23 @@ func TestBoundedFlagMaxConstants(t *testing.T) {
 	if MaxUPIBytesPerFlit != 64 {
 		t.Errorf("MaxUPIBytesPerFlit=%v", MaxUPIBytesPerFlit)
 	}
+	if MaxPCIeInterval != 10*time.Minute || MaxPCIeBER != 1e-6 || MaxPCIeProbeInterval != 24*time.Hour {
+		t.Errorf("MaxPCIeInterval=%v MaxPCIeBER=%v MaxPCIeProbeInterval=%v", MaxPCIeInterval, MaxPCIeBER, MaxPCIeProbeInterval)
+	}
 	_, fs := newFlagSet(t)
 	for name, want := range map[string]string{
-		"idle-gate-timeout":  "(at most 20s)",
-		"latency-floor":      "(at most 10us;",
-		"mem-warmup":         "at most 1s;",
-		"large-msg":          "at most 16 MiB",
-		"small-msg":          "1 to 16 MiB",
-		"mutual-msg":         "1 to 4096",
-		"upi-bytes-per-flit": "at most 64)",
-		"cpu-busy-high":      "at most 1)",
-		"iters":              "1 to 512",
+		"idle-gate-timeout":   "(at most 20s)",
+		"latency-floor":       "(at most 10us;",
+		"mem-warmup":          "at most 1s;",
+		"large-msg":           "at most 16 MiB",
+		"small-msg":           "1 to 16 MiB",
+		"mutual-msg":          "1 to 4096",
+		"upi-bytes-per-flit":  "at most 64)",
+		"cpu-busy-high":       "at most 1)",
+		"iters":               "1 to 512",
+		"pcie-interval":       "at most 10m;",
+		"pcie-ber":            "at most 1e-6)",
+		"pcie-probe-interval": "at most 24h;",
 	} {
 		if u := fs.Lookup(name).Usage; !strings.Contains(u, want) {
 			t.Errorf("--%s help lacks %q: %s", name, want, u)
@@ -584,6 +606,30 @@ func TestValidateIdleGateMessages(t *testing.T) {
 		if err := ok.ValidateIdleGate(); err != nil {
 			t.Errorf("%+v: %v", ok, err)
 		}
+	}
+}
+
+// TestValidatePCIe pins the one combination ValidatePCIe rejects: a probe
+// for passive findings without the passive reading that makes them.
+func TestValidatePCIe(t *testing.T) {
+	err := Config{PCIeProbeInterval: time.Minute}.ValidatePCIe()
+	if want := "--pcie-probe-interval needs --pcie-interval: it probes the links the passive reading has a finding on"; err == nil || err.Error() != want {
+		t.Errorf("probe interval alone: %v, want %q", err, want)
+	}
+	for _, ok := range []Config{
+		{},
+		{PCIeInterval: time.Second},
+		{PCIeInterval: time.Second, PCIeProbeInterval: time.Minute},
+		{PCIeInterval: time.Second, PCIeBER: 0},
+	} {
+		if err := ok.ValidatePCIe(); err != nil {
+			t.Errorf("%+v: %v", ok, err)
+		}
+	}
+	// The passive reading and everything that acts on it are opt-in; the
+	// ratio it judges against is the PCI Express 10^-12.
+	if d := Defaults(); d.PCIeInterval != 0 || d.PCIeProbeInterval != 0 || d.PCIeBER != 1e-12 {
+		t.Errorf("defaults: interval %v probe interval %v BER %v, want 0, 0 and 1e-12", d.PCIeInterval, d.PCIeProbeInterval, d.PCIeBER)
 	}
 }
 

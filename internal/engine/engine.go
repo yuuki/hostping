@@ -166,6 +166,20 @@ type RunRequest struct {
 	// (monitor.Decision.CPULoad). An abnormal path through a package with a
 	// High node is judged cpu_busy. It is copied into the report.
 	CPULoad []model.CPULoad
+	// OnlyRNICs, when not nil, restricts the sweep and the mutual burst to
+	// these RNICs (a pcie_link run, monitor.Decision.ProbeRNICs). Every
+	// other RNIC is left unprobed and its links untested. Nil sweeps every
+	// RNIC.
+	OnlyRNICs map[string]bool
+	// PCIeLinks is the passive findings on PCIe links that stand as the run
+	// starts (model.PCIePassive.Findings). The proven ones become
+	// pcie_link_errors causes; all of them are copied into the report.
+	PCIeLinks []model.PCIeLinkFinding
+}
+
+// sweeps reports whether the run probes RNIC id.
+func (r RunRequest) sweeps(id string) bool {
+	return r.OnlyRNICs == nil || r.OnlyRNICs[id]
 }
 
 // GPUReleaser is an optional Prober extension: ReleaseGPU hands back whatever
@@ -191,6 +205,9 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	var ms []model.PathMeasurement
 	var skips []probeSkip
 	for _, n := range e.Graph.RNICs {
+		if !req.sweeps(n.ID) {
+			continue
+		}
 		got, skipped, err := e.sweepRNIC(ctx, req, n)
 		if err != nil {
 			return model.Report{}, err
@@ -222,7 +239,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	e.reportInfiniBandExcluded()
 	pairs := e.Graph.MutualPairsFor(e.Cfg.MutualScope, e.Cfg.MutualInfiniBand)
 	e.reportMutualPairs(pairs)
-	mutual, err := e.mutual(ctx, pairs)
+	mutual, err := e.mutual(ctx, sweptPairs(req, pairs))
 	if err != nil {
 		return model.Report{}, err
 	}
@@ -259,6 +276,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 		// And the idle bandwidth recheck, likewise.
 		BWRecheck:      bwRecheck,
 		CPUBusySockets: model.CPUBusySockets(req.CPULoad),
+		PCIeLinks:      req.PCIeLinks,
 	}
 	res := analyzer.Analyze(in)
 	e.Gray = res.GrayHits
@@ -284,7 +302,23 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 		AbnormalRNIC:     abn,
 		Baselines:        baseline.Tables(e.Graph.RNICs, ov),
 		CPULoad:          req.CPULoad,
+		PCIeLinks:        req.PCIeLinks,
 	}, nil
+}
+
+// sweptPairs is the mutual pairs both of whose RNICs the run sweeps: every
+// pair, unless the run is restricted to some RNICs.
+func sweptPairs(req RunRequest, pairs [][2]model.RNIC) [][2]model.RNIC {
+	if req.OnlyRNICs == nil {
+		return pairs
+	}
+	var out [][2]model.RNIC
+	for _, p := range pairs {
+		if req.sweeps(p[0].ID) && req.sweeps(p[1].ID) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // recheckLatency re-measures the paths the sweep reads latency-abnormal

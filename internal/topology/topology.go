@@ -199,6 +199,22 @@ func (g Graph) ProbePaths(rnicID string, mode model.RunMode) []model.Path {
 	return out
 }
 
+// RNICsProbing lists, in graph order, the RNICs whose probe set in mode
+// (ProbePaths) has a path across link: the RNICs a run has to sweep to put a
+// loopback through that link.
+func (g Graph) RNICsProbing(link string, mode model.RunMode) []string {
+	var out []string
+	for _, n := range g.RNICs {
+		for _, p := range g.ProbePaths(n.ID, mode) {
+			if p.ContainsLink(link) {
+				out = append(out, n.ID)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // MutualPair reports whether two RNICs should be probed. Empty fabric
 // (Fig.2) pairs every distinct device. "unknown" means no RoCEv2 GID (or,
 // on InfiniBand, no usable LID) was found and must not pair (avoids a

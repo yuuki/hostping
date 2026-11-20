@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -70,6 +71,9 @@ type Telemetry struct {
 	pollErrors  metric.Int64Counter
 	lastPoll    metric.Float64Gauge
 	monIdle     metric.Int64Gauge
+
+	pcieErrors metric.Int64Counter
+	pcieBudget metric.Float64Gauge
 }
 
 // serviceName is the OpenTelemetry service.name of both binaries. The
@@ -375,6 +379,7 @@ func (t *Telemetry) initInstruments() error {
 		// each setup verb once, so a histogram would bucket runs rather than
 		// calls.
 		{&t.verbDur, "hostping.verb.duration", "us", "Execution time of a loopback probe's setup verbs (ToN'24 §VI-C)"},
+		{&t.pcieBudget, "hostping.pcie.link.error_budget", "", "Correctable link errors per minute one end of a PCIe link may count at --pcie-ber, for the speed and width the link trained to"},
 	}
 	intGauges := []instrument[metric.Int64Gauge]{
 		{&t.pathAbn, "hostping.path.abnormal", "", "1 if RNIC→endpoint path is abnormal"},
@@ -405,6 +410,12 @@ func (t *Telemetry) initInstruments() error {
 	counters := []instrument[metric.Int64Counter]{
 		{&t.diag, "hostping.diagnosis.count", "", "Root-cause diagnoses emitted"},
 		{&t.runs, "hostping.engine.run.count", "", ""},
+		// A counter, not a delta gauge: the passive reading samples every
+		// --pcie-interval, a scrape may fall between two samples, and rate()
+		// over a counter loses none of them. It only ever adds differences
+		// between two samples, so the totals the kernel had counted before
+		// the daemon started are not in it.
+		{&t.pcieErrors, "hostping.pcie.link.errors", "", "AER link errors the functions at the two ends of a PCIe link counted since the daemon started, read without a probe (--pcie-interval)"},
 	}
 	if err := newInstruments(floatGauges, t.meter.Float64Gauge); err != nil {
 		return err
@@ -751,6 +762,12 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		t.latRuns.Record(ctx, int64(p.LatencyStreak), attrs)
 	}
 	for _, l := range rep.Links {
+		// A pcie_link run sweeps a few RNICs only. The links it did not test
+		// keep what the last run that did left, instead of all turning
+		// uncertain until the next full run.
+		if rep.Trigger == model.TriggerPCIeLink && !l.Tested {
+			continue
+		}
 		attrs := metric.WithAttributes(attribute.String("link", l.ID))
 		t.linkAbn.Record(ctx, int64(l.AbnormalCount), attrs)
 		// An unread bus writes no sample rather than a 0 that would read as
@@ -764,9 +781,7 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		t.skipped.Record(ctx, int64(rep.SkippedEndpointCount(k)), metric.WithAttributes(attribute.String("kind", string(k))))
 	}
 	t.recordMutual(ctx, rep.Mutual)
-	for _, c := range rep.Causes {
-		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", string(c.Confidence))))
-	}
+	t.recordCauses(ctx, rep.Causes)
 }
 
 // RecordMutual writes the scheduled mutual probe's window between engine runs,
@@ -837,6 +852,62 @@ func (t *Telemetry) RecordRates(ctx context.Context, rates []model.RNICRates) {
 		if r.DropKnown {
 			t.drops.Record(ctx, int64(r.DropDelta), attrs) //nolint:gosec // G115: one poll's drop delta never reaches 2^63
 		}
+	}
+}
+
+// Values of hostping.pcie.link.errors' severity attribute.
+const (
+	// PCIeCorrectable: the correctable link errors (Receiver Error, Bad TLP,
+	// Bad DLLP, REPLAY_NUM Rollover, Replay Timer Timeout).
+	PCIeCorrectable = "correctable"
+	// PCIeUncorrectable: the uncorrectable link errors (Data Link Protocol
+	// Error, Surprise Down).
+	PCIeUncorrectable = "uncorrectable"
+)
+
+// RecordPCIe writes one passive sample of the PCIe links to
+// hostping.pcie.link.errors and hostping.pcie.link.error_budget. Only a link
+// whose counters were differenced on the sample is written, zero included, so
+// a link that cannot be read, or is being re-baselined, has no series (or
+// keeps its last value) instead of a healthy 0. The budget is written only
+// when the negotiated link gave one.
+func (t *Telemetry) RecordPCIe(ctx context.Context, p *model.PCIePassive) {
+	if t == nil || p == nil || !p.Sampled {
+		return
+	}
+	for _, e := range p.Errors {
+		link := attribute.String("link", e.Link)
+		t.pcieErrors.Add(ctx, countValue(e.Correctable), metric.WithAttributes(link, attribute.String("severity", PCIeCorrectable)))
+		t.pcieErrors.Add(ctx, countValue(e.Uncorrectable), metric.WithAttributes(link, attribute.String("severity", PCIeUncorrectable)))
+		if e.BudgetPerMinute > 0 {
+			t.pcieBudget.Record(ctx, e.BudgetPerMinute, metric.WithAttributes(link))
+		}
+	}
+}
+
+// countValue is a counter delta as the int64 an OpenTelemetry counter takes,
+// saturated instead of wrapped to a negative value.
+func countValue(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
+}
+
+// RecordPassive counts the causes of a passive report (model.TriggerPassive)
+// in hostping.diagnosis.count. No engine run is behind such a report, so
+// nothing else is written: the run counters, the path and link gauges and
+// hostping.host.idle keep what the last run left.
+func (t *Telemetry) RecordPassive(ctx context.Context, rep model.Report) {
+	if t == nil {
+		return
+	}
+	t.recordCauses(ctx, rep.Causes)
+}
+
+func (t *Telemetry) recordCauses(ctx context.Context, causes []model.RootCause) {
+	for _, c := range causes {
+		t.diag.Add(ctx, 1, metric.WithAttributes(attribute.String("code", c.Code), attribute.String("confidence", string(c.Confidence))))
 	}
 }
 

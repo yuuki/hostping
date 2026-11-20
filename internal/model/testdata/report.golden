@@ -158,5 +158,31 @@
       "busy": 0.93,
       "high": true
     }
+  ],
+  "pcie_links": [
+    {
+      "link": "pcie.gpu3",
+      "state": "sustained",
+      "errors_per_minute": 412.5,
+      "budget_per_minute": 15.36,
+      "over_budget_windows": 3,
+      "window_seconds": 60,
+      "ends": [
+        {
+          "bdf": "0000:38:00.0",
+          "port": true,
+          "uncorrectable": {
+            "SDES": 1
+          }
+        },
+        {
+          "bdf": "0000:39:00.0",
+          "correctable": {
+            "BadTLP": 410,
+            "Timeout": 3
+          }
+        }
+      ]
+    }
   ]
 }

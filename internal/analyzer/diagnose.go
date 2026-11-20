@@ -78,6 +78,11 @@ type Input struct {
 	// Algorithm 1 and the diagnoses read it. Nil means no package was loaded,
 	// or the load was not read.
 	CPUBusySockets map[int]bool
+	// PCIeLinks is the passive findings on PCIe links that stood when the
+	// run started (model.PCIePassive.Findings). The proven ones are reported
+	// as pcie_link_errors (diagnoseLinkErrors); they change no path or link
+	// status and no other cause. Nil means none, or no passive reading.
+	PCIeLinks []model.PCIeLinkFinding
 }
 
 // Result is tomography + root-cause output.
@@ -149,6 +154,8 @@ func Analyze(in Input) Result {
 	causes = suppressOverlaps(causes, in.Graph)
 	causes = append(causes, diagnosePCIeDownTrain(in, paths, causes)...)
 	causes = append(causes, diagnoseLatency(in.Graph, paths, causes, in.Cfg.AbnormalTh, in.OneShot)...)
+	// Last, so the passive evidence is read by none of the rules above.
+	causes = append(causes, diagnoseLinkErrors(in, paths, links, causes)...)
 	slices.SortStableFunc(causes, compareCauses)
 
 	return Result{Paths: paths, Links: links, Causes: causes, GrayHits: gray, SlowMRHits: mrHits, LatencyHits: latHits}

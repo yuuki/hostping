@@ -126,6 +126,9 @@ func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	if err := cfg.ValidateIdleGate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.ValidatePCIe(); err != nil {
+		return nil, err
+	}
 	// A baseline file or flag that does not parse would otherwise fail every
 	// engine run, which the daemon only logs: fail at start-up instead, and
 	// say which distances the operator's values replace.
@@ -165,9 +168,14 @@ func newRig(cfg config.Config, logf func(string, ...any)) (*rig, error) {
 	// across runs; the paired recheck stands in (analyzer.Input.OneShot).
 	rt.eng.OneShot = cfg.Once
 	if world != nil {
-		rt.sampler = monitor.StaticSampler{Util: world.Util(), GPU: idleGPUs(g, world.ComputeModes())}
+		s := monitor.StaticSampler{Util: world.Util(), GPU: idleGPUs(g, world.ComputeModes())}
+		if cfg.PCIeInterval > 0 && !cfg.Once {
+			s.PCIe = simPCIeLinks(world, g, time.Now)
+		}
+		rt.sampler = s
 	} else {
 		s, closeUncore := liveSampler(g, cfg)
+		s.PCIe = livePCIeLinks(g, cfg, logf)
 		rt.sampler, rt.close = s, closeUncore
 	}
 	rt.mon = monitor.New(cfg, g, rt.sampler)
@@ -221,7 +229,10 @@ func Run(cfg config.Config) error {
 		rt.mon.MutualAlarm = loop.Alarm
 	}
 	ps.restore(rt.eng, rt.mon)
-	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof)}
+	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof), passive: newPassiveWatch(cfg, g, logging.Infof)}
+	if d.passive != nil {
+		rt.mon.PCIeNeed = d.passive.need
+	}
 	defer ps.shutdown(rt.eng, &d.pending)
 	t := time.NewTicker(cfg.MetricInterval)
 	defer t.Stop()
@@ -248,6 +259,19 @@ type daemon struct {
 	pending idleHold
 	// gate is --idle-gate-command; nil allows every idle run.
 	gate *schedGate
+	// passive is the reports of the passive PCIe reading (--pcie-interval);
+	// nil without it.
+	passive *passiveWatch
+	// now is the clock passive reports are paced by; nil means time.Now.
+	now func() time.Time
+}
+
+// clock is the daemon's wall clock.
+func (d *daemon) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 // tick is one --metric-interval of the loop: a monitor poll, the held
@@ -272,6 +296,8 @@ func (d *daemon) tick(ctx context.Context) bool {
 		d.tel.RecordCPULoad(ctx, dec.CPULoad)
 	}
 	d.tel.RecordRates(ctx, dec.Rates)
+	d.tel.RecordPCIe(ctx, dec.PCIe)
+	d.passive.observe(dec.PCIe)
 	if d.loop != nil {
 		if ms, ready := d.loop.Snapshot(); ready {
 			d.tel.RecordMutual(ctx, ms)
@@ -288,6 +314,9 @@ func (d *daemon) tick(ctx context.Context) bool {
 		d.logf("hostping: discarded idle-mode run (trigger=%s paths=%d): the host became busy during it, so its idle verdicts are unreliable: %s", rep.Trigger, len(rep.Paths), why)
 	}
 	if !dec.Run {
+		// No run starts on this poll to carry them: report what the passive
+		// reading proves on its own, when that is due.
+		d.reportPassive(ctx, dec)
 		return true
 	}
 	if dec.Trigger == model.TriggerIdle {
@@ -318,6 +347,9 @@ func (d *daemon) tick(ctx context.Context) bool {
 		// Read on the poll that started the run, like the idle verdict.
 		GPUComputeMode: dec.GPUComputeMode,
 		CPULoad:        dec.CPULoad,
+		// A pcie_link run sweeps only the RNICs under the affected links.
+		OnlyRNICs: dec.ProbeRNICs,
+		PCIeLinks: d.passive.findings(),
 	})
 	end := time.Now()
 	d.live.RunEnded()
@@ -355,7 +387,26 @@ func (d *daemon) report(ctx context.Context, rep model.Report) {
 		d.tel.RecordRunFailed(ctx, telemetry.FailedReport)
 		return
 	}
+	d.passive.emitted(d.clock(), rep)
 	d.tel.RecordSuccess(ctx, runEnd(rep))
+}
+
+// reportPassive writes the passive report that is due on this poll, if any:
+// the causes the passive PCIe reading proves without a probe. It is no
+// engine run, so only its diagnoses are counted. A report that could not be
+// written counts as a failed report and is not retried: the next one follows
+// the usual pace.
+func (d *daemon) reportPassive(ctx context.Context, dec monitor.Decision) {
+	now := d.clock()
+	rep, ok := d.passive.due(now, dec.Ready && dec.IdleKnown && dec.HostIdle)
+	if !ok {
+		return
+	}
+	d.tel.RecordPassive(ctx, rep)
+	if err := d.rp.emit(rep); err != nil {
+		d.tel.RecordRunFailed(ctx, telemetry.FailedReport)
+	}
+	d.passive.emitted(now, rep)
 }
 
 // mutualMinProbes is the fewest probes a pair needs in the window before its

@@ -150,6 +150,28 @@ type Config struct {
 	// aggregated over (ToN'24 §IV-A-2: 20 s).
 	MutualWindow time.Duration
 
+	// PCIeInterval is how often the daemon's hardware monitor reads, without
+	// sending a probe, the negotiated link and the AER link-error counters
+	// of the PCIe links its probes cross (monitor.PCIeWatch). Zero, the
+	// default, leaves the passive reading off; at most MaxPCIeInterval. It
+	// is opt-in because its error-rate verdict has not been exercised on
+	// hardware: a platform that counts link errors at a steady low rate, or
+	// a mistake in which function's counters stand for which link, would
+	// otherwise read as pcie_link_errors on every host.
+	PCIeInterval time.Duration
+	// PCIeBER is the bit error ratio a PCIe link is allowed: a link whose
+	// end counts more link errors per minute than this ratio gives at the
+	// link's speed and width is over its budget. Zero turns the rate verdict
+	// off, leaving the uncorrectable link errors and the negotiated link; at
+	// most MaxPCIeBER.
+	PCIeBER float64
+	// PCIeProbeInterval lets a passive finding on a PCIe link start a
+	// busy-mode run of only the RNICs whose probes cross that link, on a
+	// host that is not idle, at most once per interval and link (and never
+	// inside BusyCooldown). Zero, the default, sends no probe for a passive
+	// finding. It needs PCIeInterval.
+	PCIeProbeInterval time.Duration
+
 	OTLPEndpoint string
 	// OTLPInsecure is --otlp-insecure, honoured only when OTLPInsecureSet: unset,
 	// the transport follows the endpoint's scheme, OTEL_EXPORTER_OTLP_INSECURE,
@@ -241,6 +263,7 @@ func Defaults() Config {
 		MutualTransport:      model.MutualTransportRC,
 		MutualTimeout:        500 * time.Millisecond,
 		MutualWindow:         20 * time.Second,
+		PCIeBER:              1e-12,
 		PrometheusAddr:       ":9464",
 		MetricsVerbDurations: true,
 		TopologyName:         "fig2",
@@ -287,7 +310,7 @@ func (c Config) TelemetryExporters() (prometheusAddr, otlpEndpoint string) {
 
 func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.Sim, "sim", c.Sim, "run against the in-process intra-host simulator")
-	fs.StringVar(&c.SimFault, "fault", c.SimFault, "simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1)")
+	fs.StringVar(&c.SimFault, "fault", c.SimFault, "simulator fault (e.g. rnic_pcie:rnic0, gpu_pcie:gpu0, upi, mesh:0-1, acs, ats, mem_flap:mem0, connect_fail:rnic0, flap:rnic0, tor, isolate:rnic3, compute_mode:gpu3, fast_rp:rp.0,rp.1, aer:pcie.gpu3)")
 	fs.StringVar(&c.TopologyName, "topology", c.TopologyName, "built-in topology name (fig2; fig2-rails: the same host with one rail per RNIC; fig2-snc: the same host with sub-NUMA clustering, two NUMA nodes per package)")
 	fs.StringVar(&c.TopologyFile, "topology-file", c.TopologyFile, "JSON topology file")
 	fs.Var((*rnicList)(&c.ExcludeRNICs), "exclude-rnic", "RDMA device to leave out of discovery, by IB device name (mlx5_3) or PCI address (0000:3c:00.1), repeatable or comma-separated: never probed, paired or exported (e.g. a fabric-management HCA). A name that matches no device fails start-up")
@@ -315,6 +338,9 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.MutualTimeout, "mutual-timeout", c.MutualTimeout, "wait for one mutual probe's reply before it counts as a timeout (ToN'24: 500ms)")
 	fs.DurationVar(&c.MutualInterval, "mutual-interval", c.MutualInterval, "daemon: every RNIC probes one random peer this often (opt-in, 0 = off: pairs are probed in a burst per engine run; ToN'24 recommends 100ms)")
 	fs.DurationVar(&c.MutualWindow, "mutual-window", c.MutualWindow, "daemon: sliding window of the scheduled mutual probe's timeout ratio (ToN'24: 20s)")
+	fs.Var(&boundedDuration{p: &c.PCIeInterval, max: MaxPCIeInterval}, "pcie-interval", "daemon: read, without sending a probe, the negotiated link and the AER link-error counters of the PCIe links the probes cross this often, and report a link that trained below its capability (rnic_pcie_failure, gpu_pcie_failure) or counts link errors beyond --pcie-ber (pcie_link_errors) when it shows, not at the next run (opt-in, 0 = off; at most 10m; e.g. 10s)")
+	fs.Var(&boundedFloat{p: &c.PCIeBER, max: MaxPCIeBER}, "pcie-ber", "bit error ratio a PCIe link is allowed, for --pcie-interval: an end of a link that counts more AER link errors per minute than this ratio gives at the link's negotiated speed and width is over its budget, and three such windows in a row are reported as pcie_link_errors (0 = judge no rate, only uncorrectable link errors; at most 1e-6)")
+	fs.Var(&boundedDuration{p: &c.PCIeProbeInterval, max: MaxPCIeProbeInterval}, "pcie-probe-interval", "daemon: on a host that is not idle, a PCIe link with a passive finding (--pcie-interval) starts a busy-mode run of only the RNICs whose probes cross that link, at most once per link and interval and never inside --busy-cooldown (opt-in, 0 = a passive finding sends no probe; at most 24h; beyond the papers)")
 	fs.Float64Var(&c.AbnormalTh, "abnormal-th", c.AbnormalTh, "path abnormality threshold")
 	fs.Var(&boundedDuration{p: &c.LatencyFloor, max: MaxLatencyFloor}, "latency-floor", fmt.Sprintf("least excess over the sibling median, on top of --abnormal-th, for a path's small-message latency to be judged abnormal against its siblings (sweep, recheck and locality shift); raise it where healthy paths jitter by more between runs (at most %dus; a set baseline LAT has no floor)", MaxLatencyFloor/time.Microsecond))
 	fs.Float64Var(&c.PFCHigh, "pfc-high", c.PFCHigh, "Tx pause duration ratio that triggers busy diagnosis")
@@ -380,6 +406,16 @@ func (c Config) ValidateMutual() error {
 func (c Config) ValidateIdleGate() error {
 	if c.IdleGateCommand != "" && c.IdleGateTimeout <= 0 {
 		return fmt.Errorf("--idle-gate-timeout must be positive with --idle-gate-command, got %v", c.IdleGateTimeout)
+	}
+	return nil
+}
+
+// ValidatePCIe rejects a targeted probe trigger with nothing to trigger it:
+// --pcie-probe-interval acts on the findings of the passive reading, which
+// --pcie-interval turns on.
+func (c Config) ValidatePCIe() error {
+	if c.PCIeProbeInterval > 0 && c.PCIeInterval <= 0 {
+		return fmt.Errorf("--pcie-probe-interval needs --pcie-interval: it probes the links the passive reading has a finding on")
 	}
 	return nil
 }
@@ -470,6 +506,19 @@ const MaxLatencyFloor = 10 * time.Microsecond
 // MaxUPIBytesPerFlit bounds --upi-bytes-per-flit: one count never carries more
 // than a 64-byte cache line.
 const MaxUPIBytesPerFlit = 64
+
+// MaxPCIeInterval bounds --pcie-interval: a link's errors are judged per
+// window of at least a minute and reported after three of them, so a longer
+// interval than this would leave a verdict half an hour behind the counters.
+const MaxPCIeInterval = 10 * time.Minute
+
+// MaxPCIeBER bounds --pcie-ber, six orders of magnitude above the 10^-12 the
+// default stands for: at 10^-6 a Gen4 x16 link is allowed over fifteen
+// million link errors a minute, which is no threshold at all.
+const MaxPCIeBER = 1e-6
+
+// MaxPCIeProbeInterval bounds --pcie-probe-interval.
+const MaxPCIeProbeInterval = 24 * time.Hour
 
 // boundedFloat is a float64 flag that rejects values outside [0, max].
 type boundedFloat struct {
