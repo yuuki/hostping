@@ -243,8 +243,8 @@ func (m *Monitor) MarkRun(t time.Time) {
 // SkipRun records that the run the last Poll started did not happen (the
 // daemon's --idle-gate-command denied it). Nothing measured the host, so the
 // --busy-interval and the --pcie-probe-interval keep counting from the run
-// before. The attempt itself
-// still counts: the idle cadence, like the busy cooldown, is not rewound.
+// before. The attempt itself still counts: the idle cadence, like the busy
+// cooldown, is not rewound.
 func (m *Monitor) SkipRun() { m.cad.skipRun() }
 
 // ResumeIdle sets the idle cadence as if the last idle-trigger run had

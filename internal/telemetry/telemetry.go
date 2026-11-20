@@ -777,8 +777,13 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 		}
 		t.linkStat.Record(ctx, linkStatusCode(l.Status), attrs)
 	}
-	for _, k := range endpointKinds {
-		t.skipped.Record(ctx, int64(rep.SkippedEndpointCount(k)), metric.WithAttributes(attribute.String("kind", string(k))))
+	// Likewise the skipped endpoints: the count of a run of a few RNICs is
+	// not the host's, and writing it would reset an alert that waits for the
+	// host's count to hold.
+	if rep.Trigger != model.TriggerPCIeLink {
+		for _, k := range endpointKinds {
+			t.skipped.Record(ctx, int64(rep.SkippedEndpointCount(k)), metric.WithAttributes(attribute.String("kind", string(k))))
+		}
 	}
 	t.recordMutual(ctx, rep.Mutual)
 	t.recordCauses(ctx, rep.Causes)

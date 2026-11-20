@@ -47,7 +47,8 @@ becomes the notes of its GitHub Release (see
   (plus up to two unloaded RNICs as references for the bandwidth recheck), at
   most once per link and `D` and never inside `--busy-cooldown`. Such a run
   rewrites `hostping_link_status_code` and `hostping_link_abnormal_count` only
-  for the links it tested.
+  for the links it tested, and leaves `hostping_endpoint_skipped` at the last
+  full run's count.
 - `--sim` fault `aer:<link>` (`aer:pcie.gpu3`, or `aer:pcie.gpu3=12` for a
   rate per minute): the AER counters of an RNIC or GPU link count link errors,
   for the daemon with `--pcie-interval`.

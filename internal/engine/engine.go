@@ -221,7 +221,12 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (model.Report, error) 
 	// Some endpoints answered and some did not: the run continues on a partial
 	// mesh, so say which endpoints are missing and why before analysing it.
 	groups := groupSkips(skips)
-	e.reportSkips(groups)
+	if req.OnlyRNICs == nil {
+		// A run of a few RNICs says nothing about the reasons endpoints are
+		// skipped on the rest of the host: logging its set would announce a
+		// change, and the next full run would announce it back.
+		e.reportSkips(groups)
+	}
 
 	recheck, capped, err := e.recheckLatency(ctx, req, ms, ov)
 	if err != nil {

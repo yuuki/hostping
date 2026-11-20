@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -141,6 +142,41 @@ func linkIDs(fs []model.PCIeLinkFinding) []string {
 		out = append(out, f.Link)
 	}
 	return out
+}
+
+// A run of a few RNICs leaves the engine's log of skipped endpoints alone:
+// what it skipped, or did not, says nothing about the rest of the host, and
+// logging it would announce a change the next full run takes back.
+func TestOnlyRNICsDoesNotLogSkips(t *testing.T) {
+	g := topology.Fig2()
+	// Every GPU probe of rnic0 fails as it does on a host without CUDA for
+	// that RNIC; the other RNICs register their GPUs.
+	p := &flatProber{}
+	p.hook = func(rnic, ep string, _ int, _ *model.PathMeasurement) error {
+		if rnic == "rnic0" && strings.HasPrefix(ep, "gpu") {
+			return fmt.Errorf("%w: NoGDR: no cuda", model.ErrNoGDR)
+		}
+		return nil
+	}
+	e := New(config.Defaults(), g, p)
+	var sink logSink
+	e.Logf = sink.logf
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
+	if len(sink.lines) != 1 || !strings.Contains(sink.lines[0], "endpoints skipped kind=gpu") {
+		t.Fatalf("full run logged %q, want the skipped GPUs once", sink.lines)
+	}
+	// rnic1 alone skips nothing; rnic0 alone skips the same GPUs. Neither
+	// run says so, and the full run after them has nothing new to say.
+	for _, only := range []string{"rnic1", "rnic0"} {
+		rep := runWith(t, e, RunRequest{Mode: model.ModeBusy, BusyRNICs: map[string]bool{only: true}, OnlyRNICs: map[string]bool{only: true}})
+		if only == "rnic0" && rep.SkippedEndpointCount(model.EndpointGPU) == 0 {
+			t.Fatal("the report of the rnic0 run lost its skipped endpoints")
+		}
+	}
+	runWith(t, e, RunRequest{Mode: model.ModeIdle})
+	if len(sink.lines) != 1 {
+		t.Fatalf("log after two restricted runs and a full one: %q, want the first line only", sink.lines)
+	}
 }
 
 // The point of the targeted run: on a loaded host, a GPU link the passive

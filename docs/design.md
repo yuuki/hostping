@@ -480,10 +480,11 @@ An idle host gets no such run. Its next idle run sweeps everything within `--idl
 
 What the run adds depends on §4.3. On a loaded RNIC it can confirm a GPU link, by the sibling comparison. It cannot see a cap on the RNIC's own link or on a root port, which throttle every sibling alike. Those stay with the passive cause until the host is idle.
 
-A `pcie_link` run tests few links. Its report lists every link, the untested ones `uncertain`, but it rewrites `hostping.link.status_code` and `hostping.link.abnormal_count` only for the links it tested, so the others keep the verdict of the last run that did. It leaves the `--busy-interval` counting, which is about the whole host.
+A `pcie_link` run tests few links. Its report lists every link, the untested ones `uncertain`, but it rewrites `hostping.link.status_code` and `hostping.link.abnormal_count` only for the links it tested, so the others keep the verdict of the last run that did. For the same reason it leaves `hostping.endpoint.skipped` and the engine's log of skipped endpoints at what the last full run said; its own skips are in its report. It leaves the `--busy-interval` counting, which is about the whole host.
 
 ### What is not read
 
+- **The root-port totals.** `aer_rootport_total_err_cor` and its siblings count the error messages a root port received from the whole hierarchy below it. They name no link, and the per-function counters above already attribute the same errors to one.
 - **A replay counter.** AER has none. NVIDIA's management library keeps one per GPU, the counter DCGM's health check reads (`DCGM_FI_DEV_PCIE_REPLAY_TOTAL`); hostping reads GPUs through the two bounded `nvidia-smi` queries it already makes and does not read it.
 - **AMD uncore counters.** The kernel registers `amd_df` and `amd_umc_<n>` with a `format/` directory only (`arch/x86/events/amd/uncore.c`): it names no event and publishes no scale or unit, where the Intel IMC PMUs do. The encodings are per processor family and live in perf's event tables, and the bytes one count stands for would have to be measured on each family, as [Inter-socket utilization](#inter-socket-utilization) had to for UPI. Memory and inter-socket utilization on AMD stay unknown.
 - **IOMMU counters.** `amd_iommu_<n>` does name its events (`arch/x86/events/amd/iommu.c`: `mem_iommu_tlb_pte_mis` and others), and they could be opened as the IMC counters are. hostping has no rule that an IOTLB miss rate would feed and no threshold that would make one, so it reads none.

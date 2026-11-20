@@ -90,11 +90,13 @@ func TestRecordPassiveCountsOnlyDiagnoses(t *testing.T) {
 
 // A pcie_link run sweeps a few RNICs. The links it tested are rewritten; the
 // rest keep the verdict of the last run that tested them instead of all
-// turning uncertain. Every other run rewrites every link, as before.
+// turning uncertain, and the count of skipped endpoints stays the last full
+// run's. Every other run rewrites every link and the count, as before.
 func TestRecordReportPCIeLinkRunKeepsUntestedLinks(t *testing.T) {
 	tel, reader := newTestTelemetry(t)
 	ctx := context.Background()
-	tel.RecordReport(ctx, model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle, Links: []model.LinkState{
+	skippedGPUs := []model.EndpointSkip{{Kind: model.EndpointGPU, Reason: "NoGDR: no cuda", Endpoints: []string{"gpu0", "gpu1", "gpu2"}, Probes: 12}}
+	tel.RecordReport(ctx, model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle, SkippedEndpoints: skippedGPUs, Links: []model.LinkState{
 		{ID: "pcie.gpu0", Status: model.LinkAbnormal, AbnormalCount: 2, Tested: true},
 		{ID: "pcie.gpu3", Status: model.LinkNormal, Tested: true},
 	}})
@@ -112,6 +114,12 @@ func TestRecordReportPCIeLinkRunKeepsUntestedLinks(t *testing.T) {
 		"link=pcie.gpu0": 2,
 		"link=pcie.gpu3": 1,
 	})
+	// The run swept one RNIC and skipped nothing there; three GPUs are still
+	// skipped on the host.
+	assertGaugeSeries(t, "hostping.endpoint.skipped", gaugeInt(t, ms, "hostping.endpoint.skipped"), map[string]int64{
+		"kind=gpu":    3,
+		"kind=memory": 0,
+	})
 
 	// The same link states in a run of any other trigger rewrite both.
 	tel.RecordReport(ctx, model.Report{Trigger: model.TriggerPFC, Mode: model.ModeBusy, Links: targeted})
@@ -119,5 +127,9 @@ func TestRecordReportPCIeLinkRunKeepsUntestedLinks(t *testing.T) {
 	assertGaugeSeries(t, "hostping.link.status_code", gaugeInt(t, ms, "hostping.link.status_code"), map[string]int64{
 		"link=pcie.gpu0": linkStatusCode(model.LinkUncertain),
 		"link=pcie.gpu3": linkStatusCode(model.LinkAbnormal),
+	})
+	assertGaugeSeries(t, "hostping.endpoint.skipped", gaugeInt(t, ms, "hostping.endpoint.skipped"), map[string]int64{
+		"kind=gpu":    0,
+		"kind=memory": 0,
 	})
 }
