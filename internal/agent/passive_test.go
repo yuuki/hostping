@@ -619,8 +619,8 @@ func TestPassiveWatchOwesAnUncorrectableErrorTwoReports(t *testing.T) {
 	// The finding ends three windows later, two minutes before the cause is
 	// due again: it is kept, and that is logged.
 	sample()
-	if len(logs) != 1 || !strings.Contains(logs[0], "pcie.rnic2: the uncorrectable link error is reported once more although its finding ended: 1 of the 2 reports") {
-		t.Fatalf("logs %q", logs)
+	if want := []string{"hostping: pcie: pcie.rnic2: the finding ended after 1 of the 2 reports that name every uncorrectable link error; the cause stays in the passive reports until the rest are written"}; !slices.Equal(logs, want) {
+		t.Fatalf("logs %q, want %q", logs, want)
 	}
 	if got := p.need(); len(got) != 0 {
 		t.Fatalf("need %v for a finding that ended: nothing is left to probe", got)
@@ -648,8 +648,8 @@ func TestPassiveWatchOwesAnUncorrectableErrorTwoReports(t *testing.T) {
 	p.emitted(t1, rep)
 	sample()
 	sample(down)
-	if rep, ok = p.due(t1.Add(every), false); !ok || strings.Contains(rep.Causes[0].Evidence, "repeated") || len(rep.PCIeLinks) != 1 {
-		t.Fatalf("report %+v (due %v), want the standing finding", rep, ok)
+	if rep, ok = p.due(t1.Add(every), false); !ok || len(rep.Causes) != 1 || strings.Contains(rep.Causes[0].Evidence, "repeated") || len(rep.PCIeLinks) != 1 {
+		t.Fatalf("report %+v (due %v), want the standing finding, named once", rep, ok)
 	}
 	p.emitted(t1.Add(every), rep)
 	sample()

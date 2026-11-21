@@ -138,7 +138,7 @@ func (p *passiveWatch) observe(pcie *model.PCIePassive) {
 		if n, event := p.events[k]; event && n < passiveEventReports {
 			c.Evidence += owedEvidence
 			p.owed[k] = c
-			p.logf("hostping: pcie: %s: the uncorrectable link error is reported once more although its finding ended: %d of the %d reports that name every one have named it", link, n, passiveEventReports)
+			p.logf("hostping: pcie: %s: the finding ended after %d of the %d reports that name every uncorrectable link error; the cause stays in the passive reports until the rest are written", link, n, passiveEventReports)
 			continue
 		}
 		delete(p.events, k)

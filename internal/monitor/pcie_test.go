@@ -1065,12 +1065,32 @@ func TestPollHandsThePassiveReadingOnWhenAnRNICCannotBeRead(t *testing.T) {
 		t.Fatalf("state %q and %d uncorrectable errors handed on by polls that failed; want the uncorrectable finding and the 1 error, once", state, uncorrectable)
 	}
 
-	// A canceled poll is a shutdown: it hands nothing on.
+	// A canceled poll is a shutdown: it hands nothing on, whether it was
+	// canceled before it began or while it read.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if d, err := m.Poll(ctx); err == nil || d.PCIe != nil {
 		t.Fatalf("canceled poll: %+v, %v", d, err)
 	}
+	s.gone = ""
+	ctx, cancel = context.WithCancel(context.Background())
+	m.Sampler = cancelingGPUs{orderSampler: s, cancel: cancel}
+	clock = clock.Add(10 * time.Second)
+	if d, err := m.Poll(ctx); !errors.Is(err, context.Canceled) || d.PCIe != nil {
+		t.Fatalf("poll canceled during the GPU read: %+v, %v; want no passive reading handed on", d, err)
+	}
+}
+
+// cancelingGPUs cancels the poll's context while the GPUs are read, after
+// the passive sample was taken.
+type cancelingGPUs struct {
+	orderSampler
+	cancel context.CancelFunc
+}
+
+func (s cancelingGPUs) GPUs(ctx context.Context) ([]model.GPUStatus, error) {
+	s.cancel()
+	return s.orderSampler.GPUs(ctx)
 }
 
 // With --pcie-probe-interval a link with a passive finding starts a busy-mode
