@@ -225,14 +225,25 @@ func (s *Store) Save(f File, now time.Time) error {
 	return WriteAtomic(s.path, b)
 }
 
+// tempStaleAfter is how old a temporary file of WriteAtomic must be to count
+// as left behind by a writer that was killed, not as one being written.
+const tempStaleAfter = time.Minute
+
+// tempPrefix and tempSuffix frame the name of a temporary file of path.
+func tempPrefix(path string) string { return "." + filepath.Base(path) + "-" }
+
+const tempSuffix = ".tmp"
+
 // WriteAtomic replaces the file at path with b, mode 0600: a temporary file
 // in the same directory is written, synced and renamed over it, and the
 // directory is synced. A failure leaves the previous file as it was and no
-// temporary file behind. The drift history (internal/drift) is written
-// through it as well.
+// temporary file behind. A temporary file that a writer killed in the middle
+// left behind (a crash, a power loss) is removed by the next write that
+// succeeds, so that they cannot pile up. The drift history (internal/drift)
+// is written through it as well.
 func WriteAtomic(path string, b []byte) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
+	tmp, err := os.CreateTemp(dir, tempPrefix(path)+"*"+tempSuffix)
 	if err != nil {
 		return err
 	}
@@ -266,7 +277,30 @@ func WriteAtomic(path string, b []byte) error {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+	removeStaleTemps(path, time.Now().Add(-tempStaleAfter))
 	return nil
+}
+
+// removeStaleTemps removes the temporary files of path that were last
+// written before the given time. Only regular files with the exact name
+// pattern of WriteAtomic are touched, and a failure is not an error: the
+// file that matters has been written.
+func removeStaleTemps(path string, before time.Time) {
+	dir := filepath.Dir(path)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := tempPrefix(path)
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, tempSuffix) || !e.Type().IsRegular() {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().Before(before) {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 func utc(t time.Time) time.Time {

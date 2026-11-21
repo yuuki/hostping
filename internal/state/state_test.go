@@ -245,6 +245,81 @@ func TestSaveFailureLeavesNoPartialFile(t *testing.T) {
 	}
 }
 
+// A writer that is killed between creating its temporary file and renaming
+// it (a crash, a power loss) leaves that file behind. The next write that
+// succeeds removes it, so that such files cannot pile up in --state-dir. A
+// temporary file that is fresh may be one another write is in the middle of,
+// and anything that only looks similar is not this file's to remove.
+func TestWriteAtomicRemovesStaleTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "drift.json")
+	old := time.Now().Add(-2 * time.Minute)
+	recent := time.Now().Add(-30 * time.Second)
+	touch := func(name string, at time.Time) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("left behind"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch(".drift.json-1234567.tmp", old)     // left by a killed writer
+	touch(".drift.json-7654321.tmp", old)     // and another
+	touch(".drift.json-2222222.tmp", recent)  // may be in flight
+	touch(".state.json-1234567.tmp", old)     // another file's
+	touch(".drift.json-1234567.tmp.bak", old) // not the pattern
+	touch("drift.json-1234567.tmp", old)      // not the pattern
+	touch("drift.json.rejected", old)         // the set-aside history
+	if err := os.Mkdir(filepath.Join(dir, ".drift.json-dir.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, ".drift.json-dir.tmp"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic(path, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range ents {
+		got = append(got, e.Name())
+	}
+	want := []string{
+		".drift.json-1234567.tmp.bak",
+		".drift.json-2222222.tmp",
+		".drift.json-dir.tmp",
+		".state.json-1234567.tmp",
+		"drift.json",
+		"drift.json-1234567.tmp",
+		"drift.json.rejected",
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("directory holds %v, want %v", got, want)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "{}\n" {
+		t.Fatalf("the file holds %q", b)
+	}
+	// A write that fails leaves the other files of the directory alone.
+	touch(".drift.json-9999999.tmp", old)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic(path, []byte("{}\n")); err == nil {
+		t.Fatal("a write over a non-empty directory must fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".drift.json-9999999.tmp")); err != nil {
+		t.Fatalf("a failed write removed a temporary file: %v", err)
+	}
+}
+
 func TestOpenRejectsUnwritableDir(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only directory")
