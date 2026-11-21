@@ -150,9 +150,13 @@ type pcieLinkTrack struct {
 	// recent is the last model.PCIeRecentWindows judged windows, the oldest
 	// first. A window that is unknown or has no budget empties it.
 	recent []pcieWindowCount
-	// sustained is set once recent makes a verdict (pcieSustained) and
-	// stays set until no window of recent was over the budget.
-	sustained bool
+	// hot is set once the errors of recent exceed what the budget allows
+	// them by more than chance explains (pcieWindowSummary.beyondChance),
+	// and sustained once they also came often enough to be no burst or two
+	// (repeated). Both stay set until the errors of recent are within what
+	// the budget allows them: a link is not accused, and not cleared, on
+	// the noise of a count near its budget.
+	hot, sustained bool
 	// uncorrectable counts down the measured windows an uncorrectable link
 	// error still stands for.
 	uncorrectable int
@@ -369,7 +373,7 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 	if len(ends) == 0 {
 		// Unknown is not within budget: what the windows before showed ends
 		// here, and so does a finding, whose evidence is no longer current.
-		t.recent, t.sustained, t.uncorrectable, t.finding = nil, false, 0, nil
+		t.recent, t.hot, t.sustained, t.uncorrectable, t.finding = nil, false, false, 0, nil
 		if before != "" {
 			w.logf("hostping: pcie: %s: its AER counters were not read throughout the last window; the %s finding is dropped, not cleared", s.Link, before)
 		}
@@ -377,14 +381,14 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 	}
 
 	rate := float64(worst) * 60 / elapsed
-	ended := fmt.Sprintf("no window over the budget among the last %d", model.PCIeRecentWindows)
+	ended := ""
 	if budget <= 0 {
 		// No negotiated link, one faster than is judged, or --pcie-ber 0:
 		// the rate is not judged, so nothing shows the link over its budget
 		// now. Like an unknown window, that ends what the windows before
 		// showed and a suspect or sustained finding; it is not a window
 		// within the budget.
-		t.recent, t.sustained = nil, false
+		t.recent, t.hot, t.sustained = nil, false, false
 		ended = "its link-error rate can no longer be judged"
 		if w.ber > 0 {
 			if why := pcieNoBudget(t.winFast); why != t.unjudged {
@@ -402,13 +406,19 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 	}
 	sum := summarizeWindows(t.recent)
 	switch {
-	case sum.over == 0:
-		// A finding ends only when none of the windows it looks back over
-		// was over the budget, so a link that errs now and then is one
-		// finding, logged once, not a new one with every burst.
-		t.sustained = false
-	case sum.sustained():
-		t.sustained = true
+	case !sum.exceeds():
+		// The windows looked back over hold no more errors than the budget
+		// allows them: whatever some of them counted, the link runs within
+		// its budget, and a finding ends.
+		t.hot, t.sustained = false, false
+		if len(t.recent) > 0 {
+			ended = fmt.Sprintf("the link errors of its last %d windows are within what the budget allows them", len(t.recent))
+		}
+	case sum.beyondChance():
+		t.hot = true
+		if sum.repeated() {
+			t.sustained = true
+		}
 	}
 	if uncorrectable {
 		t.uncorrectable = model.PCIeSustainWindows
@@ -422,7 +432,7 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 		state = model.PCIeLinkUncorrectable
 	case t.sustained:
 		state = model.PCIeLinkSustained
-	case sum.over > 0:
+	case t.hot:
 		state = model.PCIeLinkSuspect
 	}
 	if state == "" {
@@ -431,7 +441,8 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 		t.finding = &model.PCIeLinkFinding{
 			Link: s.Link, State: state,
 			ErrorsPerMinute: rate, BudgetPerMinute: budget,
-			RecentWindows: len(t.recent), OverBudgetWindows: sum.over, OverBudgetRuns: sum.runs, OverBudgetLongestRun: sum.longest, RecentErrorsPerMinute: sum.rate(),
+			RecentWindows: len(t.recent), OverBudgetWindows: sum.over, OverBudgetRuns: sum.runs, OverBudgetLongestRun: sum.longest,
+			RecentErrorsPerMinute: sum.rate(), RecentBudgetPerMinute: sum.allowedRate(),
 			WindowSeconds: elapsed, Ends: ends,
 		}
 	}
@@ -491,27 +502,55 @@ func summarizeWindows(recent []pcieWindowCount) pcieWindowSummary {
 	return sum
 }
 
-// sustained reports whether the windows make a verdict. One burst of errors,
-// however large, is over the budget in two windows in a row at most, so a
-// verdict takes more than that: model.PCIeSustainWindows windows in a row, a
-// link that errs steadily, or as many separate times over the budget among
-// the windows looked back over, a link that errs in bursts. The second also
-// needs the errors of all those windows together to be over what the budget
-// allowed them: a link that runs within its budget is over it in a window
-// now and then by chance, and must not be accused for that.
-func (sum pcieWindowSummary) sustained() bool {
-	if sum.longest >= model.PCIeSustainWindows {
-		return true
-	}
-	return sum.runs >= model.PCIeSustainWindows && float64(sum.errors) > sum.allowed
-}
+// pcieExcessSigmas is how far the errors of the windows looked back over must
+// exceed what the budget allows them before a finding begins, in standard
+// deviations of that allowance. Bit errors arrive at random, so a link that
+// runs at its budget counts a Poisson number around the allowance, with the
+// square root of the allowance as its standard deviation, and is over it in
+// about half of all stretches. At three standard deviations a link at or
+// below its budget begins a finding about once in a thousand independent
+// looks, however short the stretch looked at: a few windows need a much
+// larger relative excess than thirty.
+const pcieExcessSigmas = 3
 
-// rate is the errors per minute across the windows, 0 without any.
+// rate is the errors per minute across the windows, and allowedRate what the
+// budget allows them per minute: the rounded-up budgets of the windows,
+// weighted by their length. Both are 0 without a window.
 func (sum pcieWindowSummary) rate() float64 {
 	if sum.minutes <= 0 {
 		return 0
 	}
 	return float64(sum.errors) / sum.minutes
+}
+
+func (sum pcieWindowSummary) allowedRate() float64 {
+	if sum.minutes <= 0 {
+		return 0
+	}
+	return sum.allowed / sum.minutes
+}
+
+// exceeds reports whether the windows together hold more errors than the
+// budget allows them. A finding stands only while they do, and its evidence
+// prints the two rates compared here, so the two cannot disagree.
+func (sum pcieWindowSummary) exceeds() bool {
+	return sum.rate() > sum.allowedRate()
+}
+
+// beyondChance reports whether the windows hold more errors than a link
+// running at its budget would count by chance (pcieExcessSigmas). A finding
+// begins only then.
+func (sum pcieWindowSummary) beyondChance() bool {
+	return sum.exceeds() && float64(sum.errors) > sum.allowed+pcieExcessSigmas*math.Sqrt(sum.allowed)
+}
+
+// repeated reports whether the windows over the budget are more than a burst
+// or two. One burst of errors, however large, is over the budget in two
+// windows in a row at most, so it takes model.PCIeSustainWindows windows in a
+// row, a link that errs steadily, or as many separate times over the budget,
+// a link that errs in bursts.
+func (sum pcieWindowSummary) repeated() bool {
+	return sum.longest >= model.PCIeSustainWindows || sum.runs >= model.PCIeSustainWindows
 }
 
 // logState logs one change of a link's finding; ended says why one that

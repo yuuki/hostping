@@ -14,16 +14,21 @@ import (
 type PCIeLinkState string
 
 const (
-	// PCIeLinkSuspect: one of the link's last PCIeRecentWindows judged
-	// windows counted more link errors than its bit-error budget allows, and
-	// those windows do not make a verdict. It is a hint: it can start a
-	// targeted probe (--pcie-probe-interval) and names no cause.
+	// PCIeLinkSuspect: the link's last PCIeRecentWindows judged windows
+	// together counted more link errors than its bit-error budget allows
+	// them, by more than chance explains, but in a burst or two: never
+	// PCIeSustainWindows windows in a row over the budget, nor that many
+	// separate times. It is a hint: it can start a targeted probe
+	// (--pcie-probe-interval) and names no cause.
 	PCIeLinkSuspect PCIeLinkState = "suspect"
 	// PCIeLinkSustained: the link keeps counting more link errors than its
-	// budget allows. PCIeSustainWindows judged windows in a row were over
-	// it, or the link was over it that many separate times among the last
-	// PCIeRecentWindows while the errors of all of those together are over
-	// what the budget allows them. It is a verdict, pcie_link_errors.
+	// budget allows. Its last PCIeRecentWindows judged windows together
+	// counted more than the budget allows them, by more than chance
+	// explains, and PCIeSustainWindows of them in a row were over the
+	// budget, or the link was over it that many separate times. It is a
+	// verdict, pcie_link_errors. Like a suspect it stands until the errors
+	// of the windows looked back over are within what the budget allows
+	// them.
 	PCIeLinkSustained PCIeLinkState = "sustained"
 	// PCIeLinkUncorrectable: an end of the link recorded an uncorrectable
 	// link error (Data Link Protocol Error, Surprise Down) in one of the
@@ -45,8 +50,9 @@ const PCIeSustainWindows = 3
 
 // PCIeRecentWindows is how many judged windows a link's errors are looked
 // back over: a link that errs in bursts is over its budget in some of them
-// only. A suspect or sustained finding stands until none of them was over
-// the budget.
+// only, and the errors of one window say little about a rate near the
+// budget. A suspect or sustained finding stands while those windows together
+// hold more errors than the budget allows them.
 const PCIeRecentWindows = 30
 
 // PCIeLinkFinding is the passive evidence the hardware monitor holds against
@@ -72,16 +78,21 @@ type PCIeLinkFinding struct {
 	// the last one included: at most PCIeRecentWindows, fewer while the
 	// link has not been judged for that long. OverBudgetWindows is how many
 	// of them were over the budget, OverBudgetRuns how many separate times
-	// that was (windows in a row count as one), OverBudgetLongestRun the
-	// most windows in a row, and RecentErrorsPerMinute the errors per
-	// minute across all of them. A rate with no budget is not judged: no
-	// window is looked back over, the counts are 0 and the rate is absent,
-	// as it is when the windows counted no error.
+	// that was (windows in a row count as one), and OverBudgetLongestRun
+	// the most windows in a row. RecentErrorsPerMinute is the errors per
+	// minute across all of them and RecentBudgetPerMinute what the budget
+	// allows them per minute: the budget of each window, rounded up,
+	// weighted by its length. A suspect or sustained finding stands exactly
+	// while the first is above the second. A rate with no budget is not
+	// judged: no window is looked back over, the counts are 0 and the two
+	// rates are absent. The first is also absent when the windows counted
+	// no error.
 	RecentWindows         int     `json:"recent_windows"`
 	OverBudgetWindows     int     `json:"over_budget_windows"`
 	OverBudgetRuns        int     `json:"over_budget_runs"`
 	OverBudgetLongestRun  int     `json:"over_budget_longest_run"`
 	RecentErrorsPerMinute float64 `json:"recent_errors_per_minute,omitempty"`
+	RecentBudgetPerMinute float64 `json:"recent_budget_per_minute,omitempty"`
 	// WindowSeconds is the length of the last measured window.
 	WindowSeconds float64 `json:"window_seconds"`
 	// Ends are the functions at the two ends of the link whose counters
@@ -90,22 +101,27 @@ type PCIeLinkFinding struct {
 }
 
 // Evidence renders the finding's numbers for a cause or a log line: the rate
-// of the last window against the budget, how many of the windows before it
-// were over the budget, and what each end counted in the last window. A
-// finding outlives the window that made it, so the evidence always says what
-// it stands on.
+// of the last window against the budget, the rate across the windows looked
+// back over against what the budget allows them, and what each end counted
+// in the last window. A finding outlives the window that made it, so the
+// evidence always says what it stands on: a suspect or sustained finding
+// stands while the windows' rate is over what the budget allows them, and
+// the two print the way they compare.
 func (f PCIeLinkFinding) Evidence() string {
 	var b strings.Builder
 	if f.BudgetPerMinute > 0 {
-		budget := math.Ceil(f.BudgetPerMinute)
-		fmt.Fprintf(&b, "%s link errors/min against a budget of %.0f/min in the last window", formatRate(f.ErrorsPerMinute, budget), budget)
-		if f.OverBudgetWindows > 0 {
-			if f.RecentWindows == 1 {
-				b.WriteString("; over the budget in the one window judged so far")
-			} else {
-				fmt.Fprintf(&b, "; over the budget in %d of the last %d windows (%s, at most %d in a row), %s/min across them",
-					f.OverBudgetWindows, f.RecentWindows, times(f.OverBudgetRuns), f.OverBudgetLongestRun, formatRate(f.RecentErrorsPerMinute, budget))
-			}
+		rate, budget := formatAgainst(f.ErrorsPerMinute, math.Ceil(f.BudgetPerMinute))
+		fmt.Fprintf(&b, "%s link errors/min against a budget of %s/min in the last window", rate, budget)
+		switch {
+		case f.RecentBudgetPerMinute <= 0 || f.RecentErrorsPerMinute <= f.RecentBudgetPerMinute:
+			// The windows are within what the budget allows them: nothing
+			// of the rate stands.
+		case f.RecentWindows == 1:
+			b.WriteString(", the one window judged so far")
+		default:
+			rate, allowed := formatAgainst(f.RecentErrorsPerMinute, f.RecentBudgetPerMinute)
+			fmt.Fprintf(&b, "; %s/min across the last %d windows against the %s/min the budget allows them, over it in %d of them (%s, at most %d in a row)",
+				rate, f.RecentWindows, allowed, f.OverBudgetWindows, times(f.OverBudgetRuns), f.OverBudgetLongestRun)
 		}
 	} else {
 		fmt.Fprintf(&b, "%.0f link errors/min with no budget to judge them against", f.ErrorsPerMinute)
@@ -139,19 +155,22 @@ func times(n int) string {
 	return fmt.Sprintf("%d separate times", n)
 }
 
-// formatRate prints a rate next to the budget it was judged against so that
-// the two read the way they compared: a rate over the budget never prints as
-// the budget itself or less, and one within it never as more. It takes the
-// fewest decimals that keep that.
-func formatRate(rate, budget float64) string {
+// formatAgainst prints a rate and the limit it was judged against so that
+// the two read the way they compared: a rate over the limit never prints as
+// the limit or less, and one within it never as more. It takes the fewest
+// decimals, the same for both, that keep that.
+func formatAgainst(rate, limit float64) (string, string) {
 	for decimals := 0; decimals <= 6; decimals++ {
-		s := strconv.FormatFloat(rate, 'f', decimals, 64)
-		if v, err := strconv.ParseFloat(s, 64); err == nil && (v > budget) == (rate > budget) {
-			return s
+		r := strconv.FormatFloat(rate, 'f', decimals, 64)
+		l := strconv.FormatFloat(limit, 'f', decimals, 64)
+		rv, errR := strconv.ParseFloat(r, 64)
+		lv, errL := strconv.ParseFloat(l, 64)
+		if errR == nil && errL == nil && (rv > lv) == (rate > limit) {
+			return r, l
 		}
 	}
-	// The shortest form that reads back as the same number.
-	return strconv.FormatFloat(rate, 'f', -1, 64)
+	// The shortest forms that read back as the same numbers.
+	return strconv.FormatFloat(rate, 'f', -1, 64), strconv.FormatFloat(limit, 'f', -1, 64)
 }
 
 // countedUncorrectable reports whether an end counted an uncorrectable link
