@@ -28,9 +28,10 @@ const (
 	linkDev  = "0000:17:00.0"
 )
 
-// linkDaemon is the daemon loop over the Fig.2 host, loaded on every RNIC,
-// with a scripted passive reading of one Gen4 x16 link, pcie.rnic0, whose
-// RNIC can leave the bus. The test steps the clock the whole loop reads.
+// linkDaemon is the daemon loop over the Fig.2 host with a scripted passive
+// reading of one Gen4 x16 link, pcie.rnic0, whose RNIC can leave the bus.
+// The host is loaded on every RNIC, or idle. The test steps the clock the
+// whole loop reads.
 type linkDaemon struct {
 	*passiveDaemon
 	// port is the cumulative AER counts of the root port. The RNIC's own
@@ -74,19 +75,21 @@ func (s goneRNIC) RNIC(ctx context.Context, n model.RNIC) (model.RNICCounters, e
 	return s.StaticSampler.RNIC(ctx, n)
 }
 
-func newLinkDaemon(t *testing.T, cfg config.Config) *linkDaemon {
+func newLinkDaemon(t *testing.T, cfg config.Config, loaded bool) *linkDaemon {
 	t.Helper()
 	g := topology.Fig2()
 	w := sim.New(g)
 	ld := &linkDaemon{port: zeroLinkErrors()}
-	pd := &passiveDaemon{t: t, clk: time.Unix(1_700_000_000, 0), counters: map[string]model.RNICCounters{},
-		busy: []string{"rnic0", "rnic1", "rnic2", "rnic3"}, world: w}
+	pd := &passiveDaemon{t: t, clk: time.Unix(1_700_000_000, 0), counters: map[string]model.RNICCounters{}, world: w}
 	ld.passiveDaemon = pd
 	now := func() time.Time { return pd.clk }
 	logf := func(f string, a ...any) { pd.logs = append(pd.logs, fmt.Sprintf(f, a...)) }
 	gpus := idleGPUs(g, nil)
-	for i := range gpus {
-		gpus[i].Idle, gpus[i].Util = false, 90
+	if loaded {
+		pd.busy = []string{"rnic0", "rnic1", "rnic2", "rnic3"}
+		for i := range gpus {
+			gpus[i].Idle, gpus[i].Util = false, 90
+		}
 	}
 	link := model.PCIeConfig{BDF: linkDev, Speed: simSlotSpeed, Width: simSlotWidth, MaxSpeed: simSlotSpeed, MaxWidth: simSlotWidth, PortMaxSpeed: simSlotSpeed, PortMaxWidth: simSlotWidth}
 	static := monitor.StaticSampler{Counters: pd.counters, GPU: gpus, PCIe: func(context.Context) []monitor.PCIeLinkSample {
@@ -158,9 +161,10 @@ func (pd *passiveDaemon) logged(sub string) []string {
 // An RNIC's link goes down by surprise: its root port counts a Surprise Down
 // and the RNIC leaves the bus, so every monitor poll fails on its counters
 // from then on. That is when the passive reading matters most, and it does
-// not stand on the RNIC: the verdict is reported while the polls fail.
+// not stand on the RNIC: the verdict is reported while the polls fail, and a
+// second time like every uncorrectable link error.
 func TestDaemonReportsASurpriseDownWhileThePollsFail(t *testing.T) {
-	ld := newLinkDaemon(t, passiveConfig())
+	ld := newLinkDaemon(t, passiveConfig(), true)
 	if got := ld.run(2 * time.Minute); len(got) != 0 {
 		t.Fatalf("reports %+v on a quiet link", got)
 	}
@@ -187,6 +191,22 @@ func TestDaemonReportsASurpriseDownWhileThePollsFail(t *testing.T) {
 	if n, _ := ms.sum("hostping.pcie.link.errors", "link", "pcie.rnic0", "severity", telemetry.PCIeUncorrectable); n != 1 {
 		t.Fatalf("hostping.pcie.link.errors{pcie.rnic0,uncorrectable} = %d, want the 1 the port counted", n)
 	}
+
+	// The RNIC stays away. The finding ends three windows later, and the
+	// error is still named a second time.
+	later := ld.run(20 * time.Minute)
+	if len(later) != 1 || later[0].at.Sub(got[0].at) != passiveConfig().IdleInterval {
+		t.Fatalf("reports %+v in the next 20 minutes of failing polls, want the second one --idle-interval after the first", later)
+	}
+	if c, ok := causeOf(later[0].Report, model.CausePCIeLinkErrors); !ok || !strings.HasSuffix(c.Evidence, owedEvidence) || len(later[0].PCIeLinks) != 0 {
+		t.Fatalf("second report %+v, want the error named once more after its finding ended", later[0].Report)
+	}
+	if n, _ := ld.metrics().sum("hostping.diagnosis.count", "code", model.CausePCIeLinkErrors); n != 2 {
+		t.Fatalf("hostping.diagnosis.count{pcie_link_errors} = %d, want 2", n)
+	}
+	if lines := ld.logged("the uncorrectable finding ends"); len(lines) != 1 || !strings.Contains(lines[0], "no uncorrectable link error in the last 3 windows") {
+		t.Fatalf("end of the finding logged as %q", lines)
+	}
 }
 
 // A link that errs only now and then, as one that errs under traffic does:
@@ -195,7 +215,7 @@ func TestDaemonReportsASurpriseDownWhileThePollsFail(t *testing.T) {
 // in a row. The third burst makes the verdict, and it is reported like any
 // standing cause from then on, without coming and going with the bursts.
 func TestDaemonReportsALinkThatErrsInBursts(t *testing.T) {
-	ld := newLinkDaemon(t, passiveConfig())
+	ld := newLinkDaemon(t, passiveConfig(), true)
 	ld.run(time.Minute)
 	start := ld.clk
 	var got []timedReport
@@ -240,5 +260,71 @@ func TestDaemonReportsALinkThatErrsInBursts(t *testing.T) {
 	}
 	if lines := ld.logged("pcie: pcie.rnic0"); len(lines) != 2 || !strings.Contains(lines[0], "suspect") || !strings.Contains(lines[1], "sustained") {
 		t.Fatalf("log of the link %q, want the hint and the verdict, once each", lines)
+	}
+}
+
+// One uncorrectable link error on a loaded host is named by two reports,
+// --idle-interval apart, which is what the packaged alerting rules need to
+// open a ticket (contrib/prometheus/hostping-rules.test.yml holds the same
+// two increments). The finding itself stands three windows, less than the
+// default --idle-interval, and how long a window is must not decide whether
+// the second report comes.
+func TestDaemonNamesOneUncorrectableErrorInTwoReports(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pcieInterval time.Duration
+	}{
+		{"default flags and a 10 s passive reading", 10 * time.Second},
+		{"windows of three minutes", 3 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.PCIeInterval = tc.pcieInterval
+			ld := newLinkDaemon(t, cfg, true)
+			ld.run(2 * tc.pcieInterval)
+			ld.port.Uncorrectable[pci.AERSDES]++
+			got := ld.run(40 * time.Minute)
+			if len(got) != 2 {
+				t.Fatalf("%d reports in 40 minutes, want 2; log %q", len(got), ld.logged("pcie:"))
+			}
+			for i, rep := range got {
+				c, ok := causeOf(rep.Report, model.CausePCIeLinkErrors)
+				if rep.Trigger != model.TriggerPassive || !ok || len(rep.Causes) != 1 || c.Confidence != model.ConfidenceMedium || c.Summary != "PCIe link reported an uncorrectable link error" {
+					t.Fatalf("report %d: %+v", i, rep.Report)
+				}
+			}
+			if gap := got[1].at.Sub(got[0].at); gap != cfg.IdleInterval {
+				t.Fatalf("second report %v after the first, want --idle-interval (%v)", gap, cfg.IdleInterval)
+			}
+			if n, _ := ld.metrics().sum("hostping.diagnosis.count", "code", model.CausePCIeLinkErrors, "confidence", "medium"); n != 2 {
+				t.Fatalf("hostping.diagnosis.count{pcie_link_errors,medium} = %d, want 2", n)
+			}
+		})
+	}
+}
+
+// The passive report is put off while an idle-mode report is held: the run
+// behind that report was handed the same findings, so the report names the
+// same cause once the next clean poll confirms it, and a passive report a
+// poll ahead of it would say the cause twice.
+func TestDaemonHoldsThePassiveReportBehindAnIdleReport(t *testing.T) {
+	cfg := passiveConfig()
+	cfg.PCIeInterval = time.Second
+	// The second idle run starts on the poll that closes the first window,
+	// the one the Surprise Down is counted in.
+	cfg.IdleInterval = 59 * time.Second
+	ld := newLinkDaemon(t, cfg, false)
+	first := ld.run(30 * time.Second)
+	if len(first) != 1 || first[0].Trigger != model.TriggerIdle || len(first[0].Causes) != 0 {
+		t.Fatalf("reports %+v in the first 30 s of a healthy idle host, want its clean idle report", first)
+	}
+	ld.port.Uncorrectable[pci.AERSDES]++
+	got := ld.run(45 * time.Second)
+	if len(got) != 1 {
+		t.Fatalf("%d reports around the second idle run, want the idle report alone: %+v", len(got), got)
+	}
+	c, ok := causeOf(got[0].Report, model.CausePCIeLinkErrors)
+	if got[0].Trigger != model.TriggerIdle || !ok || !strings.HasSuffix(c.Evidence, "the same run names no other cause at the link (counters only)") {
+		t.Fatalf("report %+v, want the idle report with the uncorrectable link error it was handed", got[0].Report)
 	}
 }

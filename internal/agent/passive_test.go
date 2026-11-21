@@ -510,7 +510,7 @@ func TestPassiveWatchPace(t *testing.T) {
 	}
 
 	// A second cause appears: reported at once, with the first.
-	sample(finding("pcie.gpu1", model.PCIeLinkSustained), finding("pcie.rnic2", model.PCIeLinkUncorrectable))
+	sample(finding("pcie.gpu1", model.PCIeLinkSustained), finding("pcie.rnic2", model.PCIeLinkSustained))
 	rep, ok = p.due(t1.Add(time.Second), false)
 	if !ok || len(rep.Causes) != 2 {
 		t.Fatalf("report %+v (due %v), want both causes at once", rep, ok)
@@ -520,10 +520,11 @@ func TestPassiveWatchPace(t *testing.T) {
 		t.Fatalf("need %v", got)
 	}
 
-	// One goes away: nothing to report. Both go away: logged. A cause that
-	// comes back is reported again, but not within one idle interval of the
-	// last report that named it, so a link that hovers at the threshold
-	// cannot report every few minutes.
+	// One goes away: nothing to report. Both go away: nothing either, and
+	// nothing to log here, since the monitor logs the end of a link-error
+	// finding. A cause that comes back is reported again, but not within one
+	// idle interval of the last report that named it, so a link that hovers
+	// at the threshold cannot report every few minutes.
 	sample(finding("pcie.gpu1", model.PCIeLinkSustained))
 	if _, ok := p.due(t1.Add(2*time.Second), false); ok {
 		t.Fatal("a report because a cause went away")
@@ -532,8 +533,8 @@ func TestPassiveWatchPace(t *testing.T) {
 	if _, ok := p.due(t1.Add(time.Hour), false); ok {
 		t.Fatal("a report with no cause standing")
 	}
-	if len(logs) != 1 || !strings.Contains(logs[0], "passive PCIe findings ended") {
-		t.Fatalf("logs %q, want the end of the findings once", logs)
+	if len(logs) != 0 {
+		t.Fatalf("logs %q for link-error findings that ended, which the monitor logs", logs)
 	}
 	sample(finding("pcie.gpu1", model.PCIeLinkSustained))
 	if _, ok := p.due(t1.Add(cfg.IdleInterval-time.Second), false); ok {
@@ -558,6 +559,129 @@ func TestPassiveWatchPace(t *testing.T) {
 	}
 	if rep, ok := q.due(t0.Add(cfg.IdleInterval), true); !ok || len(rep.Causes) != 1 || rep.Causes[0].Code != model.CauseGPUPCIeFailure {
 		t.Fatalf("report %+v (due %v) one idle interval later, want the down-train cause", rep, ok)
+	}
+}
+
+// A cause that goes away is logged, one by one: a link that trained up again
+// by the passive watch, also while another cause stands, and a link-error
+// finding by the monitor that held it. A condition that is over is not
+// reported again.
+func TestPassiveWatchLogsADownTrainThatEnds(t *testing.T) {
+	var logs []string
+	p := newPassiveWatch(passiveConfig(), topology.Fig2(), func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	narrow := model.PCIeConfig{Speed: "16.0 GT/s PCIe", Width: 4, MaxSpeed: "16.0 GT/s PCIe", MaxWidth: 16, PortMaxSpeed: "16.0 GT/s PCIe", PortMaxWidth: 16}
+	wide := narrow
+	wide.Width = 16
+	errs := []model.PCIeLinkFinding{{Link: "pcie.gpu1", State: model.PCIeLinkSustained, WindowSeconds: 60}}
+	t0 := time.Unix(1_700_000_000, 0)
+	p.observe(&model.PCIePassive{Sampled: true, Findings: errs, Configs: map[string]model.PCIeConfig{"gpu3": narrow, "rnic2": narrow}})
+	rep, ok := p.due(t0, false)
+	if !ok || len(rep.Causes) != 3 {
+		t.Fatalf("report %+v (due %v), want the two down-trains and the link errors", rep.Causes, ok)
+	}
+	p.emitted(t0, rep)
+	// gpu3 trains up again; the other two causes stand.
+	p.observe(&model.PCIePassive{Sampled: true, Findings: errs, Configs: map[string]model.PCIeConfig{"gpu3": wide, "rnic2": narrow}})
+	if want := []string{"hostping: pcie: pcie.gpu3: no longer reads as trained below its capability; the passive gpu_pcie_failure finding ends"}; !slices.Equal(logs, want) {
+		t.Fatalf("logs %q, want %q", logs, want)
+	}
+	if rep, ok := p.due(t0.Add(time.Hour), false); !ok || len(rep.Causes) != 2 {
+		t.Fatalf("report %+v (due %v) an hour later, want the two causes that stand and not the one that ended", rep.Causes, ok)
+	}
+	// The link errors end: the monitor's line, none here.
+	p.observe(&model.PCIePassive{Sampled: true, Configs: map[string]model.PCIeConfig{"gpu3": wide, "rnic2": narrow}})
+	if len(logs) != 1 {
+		t.Fatalf("logs %q, want no line for a link-error finding the monitor logs", logs[1:])
+	}
+}
+
+// An uncorrectable link error is an event: its finding ends after a few
+// windows, which can be before the cause is due again. It is still named by
+// two reports, the second after its finding ended, because one report raises
+// no alert that wants a code twice.
+func TestPassiveWatchOwesAnUncorrectableErrorTwoReports(t *testing.T) {
+	var logs []string
+	p := newPassiveWatch(passiveConfig(), topology.Fig2(), func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	every := passiveConfig().IdleInterval
+	down := model.PCIeLinkFinding{Link: "pcie.rnic2", State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60,
+		Ends: []model.PCIeLinkEnd{{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}}}}
+	sample := func(fs ...model.PCIeLinkFinding) { p.observe(&model.PCIePassive{Sampled: true, Findings: fs}) }
+	t0 := time.Unix(1_700_000_000, 0)
+
+	sample(down)
+	rep, ok := p.due(t0, false)
+	if !ok || len(rep.Causes) != 1 || strings.Contains(rep.Causes[0].Evidence, "repeated") {
+		t.Fatalf("report %+v (due %v), want the error at once", rep.Causes, ok)
+	}
+	first := rep.Causes[0].Evidence
+	p.emitted(t0, rep)
+
+	// The finding ends three windows later, two minutes before the cause is
+	// due again: it is kept, and that is logged.
+	sample()
+	if len(logs) != 1 || !strings.Contains(logs[0], "pcie.rnic2: the uncorrectable link error is reported once more although its finding ended: 1 of the 2 reports") {
+		t.Fatalf("logs %q", logs)
+	}
+	if got := p.need(); len(got) != 0 {
+		t.Fatalf("need %v for a finding that ended: nothing is left to probe", got)
+	}
+	if _, ok := p.due(t0.Add(every-time.Second), false); ok {
+		t.Fatal("the second report comes before the cause is due")
+	}
+	rep, ok = p.due(t0.Add(every), false)
+	if !ok || len(rep.Causes) != 1 || rep.Causes[0].Code != model.CausePCIeLinkErrors || len(rep.PCIeLinks) != 0 {
+		t.Fatalf("report %+v (due %v), want the error named once more, without a standing finding", rep, ok)
+	}
+	if want := first + owedEvidence; rep.Causes[0].Evidence != want {
+		t.Fatalf("evidence %q, want %q", rep.Causes[0].Evidence, want)
+	}
+	p.emitted(t0.Add(every), rep)
+	if _, ok := p.due(t0.Add(100*every), false); ok {
+		t.Fatal("a third report of one uncorrectable error")
+	}
+
+	// A second error while the first is still owed: the cause stands again
+	// and the report it had counts, so one more names it.
+	t1 := t0.Add(time.Hour)
+	sample(down)
+	rep, _ = p.due(t1, false)
+	p.emitted(t1, rep)
+	sample()
+	sample(down)
+	if rep, ok = p.due(t1.Add(every), false); !ok || strings.Contains(rep.Causes[0].Evidence, "repeated") || len(rep.PCIeLinks) != 1 {
+		t.Fatalf("report %+v (due %v), want the standing finding", rep, ok)
+	}
+	p.emitted(t1.Add(every), rep)
+	sample()
+	if _, ok := p.due(t1.Add(100*every), false); ok {
+		t.Fatal("a report after two had named the error")
+	}
+
+	// An engine run that names it counts as one of the two.
+	t2 := t1.Add(time.Hour)
+	sample(down)
+	p.emitted(t2, model.Report{Trigger: model.TriggerIdle, Causes: []model.RootCause{{Code: model.CausePCIeLinkErrors, Links: []string{"pcie.rnic2"}}}})
+	sample()
+	rep, ok = p.due(t2.Add(every), false)
+	if !ok || !strings.HasSuffix(rep.Causes[0].Evidence, owedEvidence) {
+		t.Fatalf("report %+v (due %v), want the error named once more after the run that named it", rep.Causes, ok)
+	}
+	p.emitted(t2.Add(every), rep)
+	if _, ok := p.due(t2.Add(100*every), false); ok {
+		t.Fatal("a report after the run and the passive report had named the error")
+	}
+
+	// A rate that ended is a condition that is over: not repeated.
+	t3 := t2.Add(time.Hour)
+	sample(model.PCIeLinkFinding{Link: "pcie.rnic2", State: model.PCIeLinkSustained, WindowSeconds: 60})
+	rep, _ = p.due(t3, false)
+	p.emitted(t3, rep)
+	sample()
+	if _, ok := p.due(t3.Add(100*every), false); ok {
+		t.Fatal("a sustained finding that ended is reported again")
+	}
+	if len(p.owed) != 0 || len(p.events) != 0 {
+		t.Fatalf("state left behind: owed %v events %v", p.owed, p.events)
 	}
 }
 

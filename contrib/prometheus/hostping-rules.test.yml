@@ -176,6 +176,66 @@ tests:
               description: "hostping reported rnic_connectivity_failure at confidence high in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
               runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#rnic_connectivity_failure"
 
+  # One uncorrectable PCIe link error (a Surprise Down, say) on a loaded
+  # host, with --pcie-interval and the default --idle-interval of 5m. The
+  # daemon names it in two passive reports five minutes apart, the second
+  # after the finding itself has ended
+  # (TestDaemonNamesOneUncorrectableErrorInTwoReports in internal/agent), so
+  # the counter moves twice. That is a ticket, on a host that never reported
+  # the code (host-e, at 5m and 10m) and on one that did long ago (host-f,
+  # at 41m and 46m), and it clears within half an hour.
+  - interval: 1m
+    input_series:
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-e:9464",otel_scope_name="github.com/yuuki/hostping",code="pcie_link_errors",confidence="medium"}'
+        values: '_x5 1x4 2x80'
+      - series: 'hostping_diagnosis_count_total{job="hostping",instance="host-f:9464",otel_scope_name="github.com/yuuki/hostping",code="pcie_link_errors",confidence="medium"}'
+        values: '3x40 4x4 5x40'
+    alert_rule_test:
+      # The first report alone: no alert yet.
+      - eval_time: 9m
+        alertname: HostpingDiagnosis
+        exp_alerts: []
+      # The second report, five minutes after the first.
+      - eval_time: 10m
+        alertname: HostpingDiagnosis
+        exp_alerts: &host_e_link_error
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-e:9464
+              code: pcie_link_errors
+              confidence: medium
+            exp_annotations:
+              summary: "hostping: pcie_link_errors (medium) on host-e:9464"
+              description: "hostping reported pcie_link_errors at confidence medium in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#pcie_link_errors"
+      - eval_time: 30m
+        alertname: HostpingDiagnosis
+        exp_alerts: *host_e_link_error
+      # It is never a page.
+      - eval_time: 30m
+        alertname: HostpingHardwareFault
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HostpingDiagnosis
+        exp_alerts: []
+      - eval_time: 46m
+        alertname: HostpingDiagnosis
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: hostping
+              instance: host-f:9464
+              code: pcie_link_errors
+              confidence: medium
+            exp_annotations:
+              summary: "hostping: pcie_link_errors (medium) on host-f:9464"
+              description: "hostping reported pcie_link_errors at confidence medium in 2 engine runs within 30 minutes. The report (journal or --report-file) names the RNICs, links and endpoints."
+              runbook_url: "https://github.com/yuuki/hostping/blob/main/docs/runbook.md#pcie_link_errors"
+      - eval_time: 80m
+        alertname: HostpingDiagnosis
+        exp_alerts: []
+
   # Staleness. Test time starts at the Unix epoch, so a timestamp of 0 is
   # "at the start of the test".
   - interval: 1m

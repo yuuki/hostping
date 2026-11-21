@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -37,7 +38,16 @@ import (
 //
 // So every standing passive cause is named by some report at least once per
 // --idle-interval, and a passive report is only written when no engine run
-// did it. A cause that goes away is logged, not reported.
+// did it.
+//
+// An uncorrectable link error is an event, not a condition: its finding
+// stands for a few windows and may be gone before the cause is due again,
+// and one report alone raises no alert that wants a code in two. Such a
+// cause is therefore kept after its finding ended until passiveEventReports
+// reports have named it, and is named in the next passive report that is
+// due. A link that trained below its capability, or whose error rate ended,
+// is not repeated once the passive reading no longer shows it: that would
+// state a condition that is over.
 type passiveWatch struct {
 	g     topology.Graph
 	every time.Duration
@@ -47,8 +57,17 @@ type passiveWatch struct {
 	latest *model.PCIePassive
 	// causes is what latest proves on its own.
 	causes []model.RootCause
+	// owed is the causes of an uncorrectable link error whose finding ended
+	// before passiveEventReports reports had named them, by passiveKey, as
+	// they stood last.
+	owed map[string]model.RootCause
+	// events counts, for each cause in causes or owed that stands or stood
+	// on an uncorrectable link error, by passiveKey, the reports that have
+	// named it since it appeared.
+	events map[string]int
 	// named is when a report last named each passive cause, by passiveKey.
-	// It holds at most one entry per PCIe link and code.
+	// Like owed and events it holds at most one entry per PCIe link and
+	// code.
 	named map[string]time.Time
 }
 
@@ -59,12 +78,22 @@ func newPassiveWatch(cfg config.Config, g topology.Graph, logf func(string, ...a
 	// Never faster than the minute a link's errors are judged over: an
 	// --idle-interval of 0 must not turn a standing cause into a report per
 	// poll.
-	return &passiveWatch{g: g, every: max(cfg.IdleInterval, passiveMinPace), logf: logf, named: map[string]time.Time{}}
+	return &passiveWatch{g: g, every: max(cfg.IdleInterval, passiveMinPace), logf: logf,
+		owed: map[string]model.RootCause{}, events: map[string]int{}, named: map[string]time.Time{}}
 }
 
 // passiveMinPace is the shortest time between two reports of one standing
 // passive cause, whatever --idle-interval says.
 const passiveMinPace = time.Minute
+
+// passiveEventReports is how many reports name an uncorrectable link error
+// at the least: as many as the packaged alerting rules want of a code before
+// they raise an alert (contrib/prometheus/hostping-rules.yml).
+const passiveEventReports = 2
+
+// owedEvidence ends the evidence of a cause that is named after its finding
+// ended.
+const owedEvidence = "; no uncorrectable link error was counted since and the finding has ended: it is repeated because every uncorrectable link error is named by two reports"
 
 // passiveKey is the identity of a passive cause: its code and the link it
 // names. The confidence and the endpoints of a cause differ between a passive
@@ -83,10 +112,40 @@ func (p *passiveWatch) observe(pcie *model.PCIePassive) {
 	if !pcie.Sampled {
 		return
 	}
-	before := len(p.causes)
+	before := p.causes
 	p.causes = analyzer.PassiveCauses(p.g, *pcie)
-	if before > 0 && len(p.causes) == 0 {
-		p.logf("hostping: passive PCIe findings ended: no link is down-trained or counting link errors beyond its budget now")
+	uncorrectable := map[string]bool{}
+	for _, f := range pcie.Findings {
+		uncorrectable[f.Link] = f.State == model.PCIeLinkUncorrectable
+	}
+	stands := map[string]bool{}
+	for _, c := range p.causes {
+		k := passiveKey(c)
+		stands[k] = true
+		// A cause that stands again is no longer owed: the reports it had
+		// still count.
+		delete(p.owed, k)
+		if _, known := p.events[k]; !known && c.Code == model.CausePCIeLinkErrors && len(c.Links) == 1 && uncorrectable[c.Links[0]] {
+			p.events[k] = 0
+		}
+	}
+	for _, c := range before {
+		k := passiveKey(c)
+		if stands[k] {
+			continue
+		}
+		link := strings.Join(c.Links, ",")
+		if n, event := p.events[k]; event && n < passiveEventReports {
+			c.Evidence += owedEvidence
+			p.owed[k] = c
+			p.logf("hostping: pcie: %s: the uncorrectable link error is reported once more although its finding ended: %d of the %d reports that name every one have named it", link, n, passiveEventReports)
+			continue
+		}
+		delete(p.events, k)
+		if c.Code != model.CausePCIeLinkErrors {
+			// The monitor logs the end of a link-error finding itself.
+			p.logf("hostping: pcie: %s: no longer reads as trained below its capability; the passive %s finding ends", link, c.Code)
+		}
 	}
 }
 
@@ -122,15 +181,26 @@ func (p *passiveWatch) need() []string {
 	return out
 }
 
+// reportable is the causes a passive report names now: what the passive
+// reading proves, then the causes still owed a report, by key.
+func (p *passiveWatch) reportable() []model.RootCause {
+	out := slices.Clone(p.causes)
+	for _, k := range slices.Sorted(maps.Keys(p.owed)) {
+		out = append(out, p.owed[k])
+	}
+	return out
+}
+
 // due returns the passive report to make at now, if one is due: a cause
-// stands that no report has named within the last --idle-interval. The
-// report names every standing cause, not only that one.
+// stands, or is owed a report, that no report has named within the last
+// --idle-interval. The report names every such cause, not only that one.
 func (p *passiveWatch) due(now time.Time, hostIdle bool) (model.Report, bool) {
-	if p == nil || len(p.causes) == 0 {
+	if p == nil {
 		return model.Report{}, false
 	}
+	causes := p.reportable()
 	stale := false
-	for _, c := range p.causes {
+	for _, c := range causes {
 		if at, ok := p.named[passiveKey(c)]; !ok || now.Sub(at) >= p.every {
 			stale = true
 			break
@@ -147,7 +217,7 @@ func (p *passiveWatch) due(now time.Time, hostIdle bool) (model.Report, bool) {
 		Started:   now,
 		Paths:     []model.PathMeasurement{},
 		Links:     []model.LinkState{},
-		Causes:    slices.Clone(p.causes),
+		Causes:    causes,
 		HostIdle:  hostIdle,
 		PCIeLinks: p.findings(),
 	}, true
@@ -160,14 +230,26 @@ var passiveCodes = []string{model.CauseRNICPCIeFailure, model.CauseGPUPCIeFailur
 // at now: every cause in it that a passive report could hold counts as named
 // then. An engine run that names a link under the same code, from the same
 // config space or the findings it was handed, puts the passive report of
-// that cause off by one --idle-interval; one that does not, does not.
+// that cause off by one --idle-interval; one that does not, does not. A
+// cause that was owed a report is dropped once enough have named it.
 func (p *passiveWatch) emitted(now time.Time, rep model.Report) {
 	if p == nil {
 		return
 	}
 	for _, c := range rep.Causes {
-		if slices.Contains(passiveCodes, c.Code) && len(c.Links) > 0 {
-			p.named[passiveKey(c)] = now
+		if !slices.Contains(passiveCodes, c.Code) || len(c.Links) == 0 {
+			continue
+		}
+		k := passiveKey(c)
+		p.named[k] = now
+		n, event := p.events[k]
+		if !event {
+			continue
+		}
+		p.events[k] = n + 1
+		if _, owed := p.owed[k]; owed && n+1 >= passiveEventReports {
+			delete(p.owed, k)
+			delete(p.events, k)
 		}
 	}
 }
