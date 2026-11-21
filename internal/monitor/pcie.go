@@ -419,7 +419,7 @@ func (m *Monitor) pollPCIe(ctx context.Context, now time.Time) *model.PCIePassiv
 	if m.pcieLast.IsZero() || now.Sub(m.pcieLast) >= m.Cfg.PCIeInterval {
 		// The counters are differenced over the time between their own
 		// reads, which the RNIC reads of this poll came before.
-		at := m.now()
+		at := m.Now()
 		samples := ps.PCIeLinks(ctx)
 		if ctx.Err() != nil {
 			// A read cut short is no reading: nothing is differenced.

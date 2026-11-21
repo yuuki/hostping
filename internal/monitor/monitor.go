@@ -102,8 +102,10 @@ type Monitor struct {
 	prev    map[string]model.RNICCounters
 	// cad is the trigger cadence: when each trigger last ran.
 	cad cadence
-	// now is the poll clock; tests replace it to step through intervals.
-	now func() time.Time
+	// Now is the poll clock, time.Now unless replaced. Every interval of
+	// the cadence is measured on it, so the times the daemon hands in
+	// (MarkRun, ResumeIdle) must come from the same clock.
+	Now func() time.Time
 	// rebaseline drops the next counter delta because it also contains the
 	// engine's own probe traffic.
 	rebaseline bool
@@ -143,13 +145,9 @@ type Monitor struct {
 }
 
 func New(cfg config.Config, g topology.Graph, s Sampler) *Monitor {
-	return &Monitor{Cfg: cfg, Graph: g, Sampler: s, prev: map[string]model.RNICCounters{}, now: time.Now,
+	return &Monitor{Cfg: cfg, Graph: g, Sampler: s, prev: map[string]model.RNICCounters{}, Now: time.Now,
 		pauseSrc: map[string]*sourceTrack{}, dropSrc: map[string]*sourceTrack{}, dropResidual: map[string]map[string]int64{}}
 }
-
-// SetClock replaces the poll clock, which is time.Now. Tests step through
-// intervals with it, in this package and in the daemon's.
-func (m *Monitor) SetClock(now func() time.Time) { m.now = now }
 
 func (m *Monitor) logf(format string, args ...any) {
 	if m.Logf != nil {
@@ -277,7 +275,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	if bp, ok := m.Sampler.(BusPoller); ok {
 		bp.PollBus(ctx, reset)
 	}
-	now := m.now()
+	now := m.Now()
 	rn, err := m.pollRNICs(ctx, now)
 	// After the RNIC counters, which are stamped with now: a passive read
 	// that takes long (a bridge that resumes from runtime suspend) between

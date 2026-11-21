@@ -61,7 +61,7 @@ func newPassiveDaemon(t *testing.T, cfg config.Config, fault string, busy ...str
 	s := monitor.StaticSampler{Counters: pd.counters, GPU: gpus, PCIe: simPCIeLinks(w, g, now)}
 	mon := monitor.New(cfg, g, s)
 	mon.Logf = logf
-	mon.SetClock(now)
+	mon.Now = now
 	eng := engine.New(cfg, g, sim.Prober{World: w})
 	eng.Logf = logf
 
@@ -379,24 +379,33 @@ func TestDaemonPCIeLinkRunOnALoadedHost(t *testing.T) {
 	cfg.PCIeProbeInterval = 10 * time.Minute
 	pd := newPassiveDaemon(t, cfg, "aer:pcie.gpu3;gpu_pcie:gpu3", "rnic0", "rnic1")
 	// The passive reading names gpu3's narrow link after two samples; the
-	// pcie_link run follows on the next ready poll.
-	var all []model.Report
-	for i := 0; i < 30; i++ {
+	// pcie_link run follows on the next ready poll, and then once per
+	// --pcie-probe-interval while the finding stands: the run's end, which
+	// the interval counts from, is read on the clock the polls are.
+	var runs []model.Report
+	var at []time.Duration
+	start := pd.clk
+	for i := 0; i < 25*60; i++ {
 		pd.step()
-		all = append(all, pd.reports()...)
-	}
-	var run *model.Report
-	for i := range all {
-		if all[i].Trigger == model.TriggerPCIeLink {
-			if run != nil {
-				t.Fatalf("two pcie_link runs within %v: %+v", cfg.PCIeProbeInterval, all)
+		for _, rep := range pd.reports() {
+			if rep.Trigger == model.TriggerPCIeLink {
+				runs = append(runs, rep)
+				at = append(at, pd.clk.Sub(start))
 			}
-			run = &all[i]
 		}
 	}
-	if run == nil {
-		t.Fatalf("no pcie_link run; reports %+v", all)
+	if len(runs) != 3 {
+		t.Fatalf("%d pcie_link runs in 25 minutes at %v, want one at the start and one per %v after it", len(runs), at, cfg.PCIeProbeInterval)
 	}
+	if at[0] > 30*time.Second {
+		t.Fatalf("first pcie_link run after %v, want it right after the second passive sample", at[0])
+	}
+	for i := 1; i < len(at); i++ {
+		if gap := at[i] - at[i-1]; gap < cfg.PCIeProbeInterval || gap > cfg.PCIeProbeInterval+15*time.Second {
+			t.Fatalf("pcie_link runs at %v: gap %v, want one per %v", at, gap, cfg.PCIeProbeInterval)
+		}
+	}
+	run := &runs[0]
 	if run.Mode != model.ModeBusy {
 		t.Fatalf("pcie_link run in mode %q, want busy", run.Mode)
 	}
@@ -415,8 +424,8 @@ func TestDaemonPCIeLinkRunOnALoadedHost(t *testing.T) {
 	}
 
 	ms := pd.metrics()
-	if n, _ := ms.sum("hostping.engine.run.count", "trigger", string(model.TriggerPCIeLink), "mode", string(model.ModeBusy)); n != 1 {
-		t.Fatalf("hostping.engine.run.count{pcie_link,busy} = %d, want 1", n)
+	if n, _ := ms.sum("hostping.engine.run.count", "trigger", string(model.TriggerPCIeLink), "mode", string(model.ModeBusy)); n != 3 {
+		t.Fatalf("hostping.engine.run.count{pcie_link,busy} = %d, want 3", n)
 	}
 	// Only the links the run tested have a status series: the rest keep
 	// whatever the last run that tested them left, here nothing.

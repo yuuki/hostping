@@ -82,6 +82,7 @@ func newTestDaemon(t *testing.T, prober engine.Prober) *testDaemon {
 		tel:  tel,
 		live: telemetry.NewLiveness(cfg.MetricInterval, func() time.Time { return td.clk }),
 		rp:   &reporter{format: config.ReportFormatJSON, stdout: io.Discard, now: time.Now, logf: nolog},
+		now:  mon.Now,
 	}
 	return td
 }

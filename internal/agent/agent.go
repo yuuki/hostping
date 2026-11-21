@@ -229,7 +229,7 @@ func Run(cfg config.Config) error {
 		rt.mon.MutualAlarm = loop.Alarm
 	}
 	ps.restore(rt.eng, rt.mon)
-	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof), passive: newPassiveWatch(cfg, g, logging.Infof)}
+	d := &daemon{rig: rt, loop: loop, tel: tel, live: live, rp: rp, ps: ps, gate: newSchedGate(cfg, logging.Infof), passive: newPassiveWatch(cfg, g, logging.Infof), now: rt.mon.Now}
 	if d.passive != nil {
 		rt.mon.PCIeNeed = d.passive.need
 	}
@@ -262,16 +262,10 @@ type daemon struct {
 	// passive is the reports of the passive PCIe reading (--pcie-interval);
 	// nil without it.
 	passive *passiveWatch
-	// now is the clock passive reports are paced by; nil means time.Now.
+	// now is the loop's clock, the monitor's (monitor.Monitor.Now): the
+	// end of a run the monitor's cooldowns count from and the pace of the
+	// passive reports are read on the clock the polls are.
 	now func() time.Time
-}
-
-// clock is the daemon's wall clock.
-func (d *daemon) clock() time.Time {
-	if d.now != nil {
-		return d.now()
-	}
-	return time.Now()
 }
 
 // tick is one --metric-interval of the loop: a monitor poll, the held
@@ -285,7 +279,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 			return false
 		}
 		d.live.Polled()
-		d.tel.RecordPoll(ctx, time.Now(), err)
+		d.tel.RecordPoll(ctx, d.now(), err)
 		d.logf("monitor: %v", err)
 		// The passive PCIe reading does not stand on what failed, and may be
 		// what explains it: an RNIC whose link went down leaves the bus, and
@@ -298,7 +292,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 		return true
 	}
 	d.live.Polled()
-	d.tel.RecordPoll(ctx, time.Now(), nil)
+	d.tel.RecordPoll(ctx, d.now(), nil)
 	if dec.Ready {
 		d.tel.RecordMonitorIdle(ctx, dec.IdleKnown && dec.HostIdle)
 		d.tel.RecordCPULoad(ctx, dec.CPULoad)
@@ -363,7 +357,7 @@ func (d *daemon) tick(ctx context.Context) bool {
 		OnlyRNICs: dec.ProbeRNICs,
 		PCIeLinks: d.passive.findings(),
 	})
-	end := time.Now()
+	end := d.now()
 	d.live.RunEnded()
 	// The engine ran synchronously; its probe traffic must not be read back
 	// as host load on the next poll.
@@ -399,7 +393,7 @@ func (d *daemon) report(ctx context.Context, rep model.Report) {
 		d.tel.RecordRunFailed(ctx, telemetry.FailedReport)
 		return
 	}
-	d.passive.emitted(d.clock(), rep)
+	d.passive.emitted(d.now(), rep)
 	d.tel.RecordSuccess(ctx, runEnd(rep))
 }
 
@@ -409,7 +403,7 @@ func (d *daemon) report(ctx context.Context, rep model.Report) {
 // written counts as a failed report and is not retried: the next one follows
 // the usual pace.
 func (d *daemon) reportPassive(ctx context.Context, dec monitor.Decision) {
-	now := d.clock()
+	now := d.now()
 	rep, ok := d.passive.due(now, dec.Ready && dec.IdleKnown && dec.HostIdle)
 	if !ok {
 		return

@@ -102,7 +102,7 @@ func newLinkDaemon(t *testing.T, cfg config.Config) *linkDaemon {
 	s := goneRNIC{StaticSampler: static, gone: &ld.gone}
 	mon := monitor.New(cfg, g, s)
 	mon.Logf = logf
-	mon.SetClock(now)
+	mon.Now = now
 	eng := engine.New(cfg, g, sim.Prober{World: w})
 	eng.Logf = logf
 	pd.reader = sdkmetric.NewManualReader()
