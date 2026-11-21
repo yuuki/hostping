@@ -22,7 +22,8 @@
 #     "medium": the AER counters name a link that errs, not a measured
 #     bottleneck, and the bottleneck, when the probes find one, pages under
 #     its own code. A passive report counts as a run here: it increments the
-#     same counter.
+#     same counter. One uncorrectable link error is named by two passive
+#     reports one --idle-interval apart, so it is a ticket at the default 5m.
 #   - info: the advisory codes (`path_latency_abnormal`,
 #     `gpu_mr_registration_slow`, `rnic_pcie_undersized`,
 #     `rnic_lossy_class_discards`) and `unknown`, which never change a path or

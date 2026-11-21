@@ -223,7 +223,10 @@ Why:
   under `rnic_pcie_failure`, `gpu_pcie_failure` or `cpu_root_port_failure`,
   which do. A passive report increments the diagnosis counter like a run, so
   "two runs" reads "two reports" for a passive cause: at once and one
-  `--idle-interval` later.
+  `--idle-interval` later. One uncorrectable link error (a Surprise Down) is
+  two reports too: the daemon names it a second time even when its finding
+  has ended by then. With an `--idle-interval` of 30 minutes or more the two
+  reports fall outside the rule's window, as two idle runs would.
 - **Advisory and topology-expected codes never page.** `path_latency_abnormal`,
   `gpu_mr_registration_slow` and `rnic_pcie_undersized` change no path or link
   status, and `unknown` names no component. `rnic_pcie_undersized` describes
@@ -564,12 +567,18 @@ bandwidth: the link may still carry everything. Beyond the papers; see
 **Confidence and derivation.**
 
 - `medium`, summary "counts link errors beyond its bit-error budget": an end
-  of the link counted more correctable link errors per minute (`RxErr`,
-  `BadTLP`, `BadDLLP`, `Rollover`, `Timeout`) than `--pcie-ber` gives at the
-  link's negotiated speed and width, in three consecutive one-minute windows.
+  of the link counted more correctable link errors per minute than
+  `--pcie-ber` gives at the link's negotiated speed and width. The count of
+  an end is its largest row among `RxErr`, `BadTLP`, `BadDLLP`, `Rollover`
+  and `Timeout`. It did so in three one-minute windows in a row (a link that
+  errs steadily), or three separate times within its last 30 windows with the
+  errors of those windows together over the budget (a link that errs in
+  bursts). One burst, in one window or two in a row, is not reported. A link
+  faster than 32 GT/s is not judged by its rate.
 - `medium`, summary "reported an uncorrectable link error": an end counted a
   Data Link Protocol Error (`DLP`) or a Surprise Down (`SDES`) in one of the
-  last three windows. One is enough.
+  last three windows. One is enough, and it is named by two reports, the
+  second one `--idle-interval` after the first.
 
 It is never `high`. When the probes of the same run measure a bottleneck at
 the same link, that is another cause in the report
@@ -580,20 +589,23 @@ and this one's evidence ends "the same run also names the link (…)".
 
 The cause names the link in `links`: `pcie.<rnic>`, `pcie.<gpu>`, `rp.<bdf>`
 (the link from a root port to the switch below it) or `sw.<bdf>` (the link
-above that switch). The evidence gives the rate of the worse end against the
-budget, the consecutive windows, and what each end counted in the last window:
+above that switch). The evidence gives the rate of the worse end in the last
+window against the budget, how many of the windows looked back over were over
+the budget, and what each end counted in the last window:
 
 ```
-AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:17:00.0 (port): RxErr=95; 0000:18:00.0: BadTLP=409 Timeout=3; last window 60s; read without a probe (counters only)
+AER: 409 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 12 windows (1 time, at most 3 in a row), 102/min across them; 0000:17:00.0 (port): RxErr=95; 0000:18:00.0: BadTLP=409 Timeout=3; last window 60s; read without a probe (counters only)
 ```
 
 `(port)` marks the port above the link; the other address is the device or the
 switch upstream port below it. The report's `pcie_links` has the same numbers.
-The numbers are those of the last window. A finding stands until three
-windows in a row are within the budget, and in those windows the evidence
-reads `within it in the last window (the finding ends after 3 such windows in
-a row)`, or `an uncorrectable link error was counted within the last 3
-windows`.
+A link that errs in bursts reads `over the budget in 5 of the last 30 windows
+(5 separate times, at most 1 in a row)`, and its last window may show no error
+at all. A finding stands until none of the last 30 windows was over the
+budget. For an uncorrectable error that the last window did not count, the
+evidence reads `an uncorrectable link error was counted within the last 3
+windows`; in its second report, after the finding ended, it ends `it is
+repeated because every uncorrectable link error is named by two reports`.
 
 **Check first.**
 
@@ -605,8 +617,10 @@ windows`.
   the evidence, twice a minute apart. hostping reports differences; the file
   holds totals since boot.
 - `dmesg | grep -i -e aer -e <bdf>`. The kernel logs each error report with
-  its layer ("Physical Layer", "Data Link Layer") and rate-limits the
-  correctable ones.
+  its layer and rate-limits the correctable ones. The correctable link errors
+  and a Data Link Protocol Error read "Physical Layer" or "Data Link Layer".
+  A Surprise Down reads "Transaction Layer" with `SDES` in its status line:
+  the kernel files every uncorrectable bit but `DLP` under that label.
 - The negotiated link against its capability
   (`lspci -vvv -s <bdf>`, `LnkCap` vs `LnkSta`). A link that errs often
   retrains lower next, which is [`rnic_pcie_failure`](#rnic_pcie_failure) or
@@ -633,9 +647,17 @@ that cause's section; the counters then say why the link is slow.
   receiver errors around power-state changes. If the finding stands on links
   you know are fine, raise `--pcie-ber` (see
   [Passive PCIe link monitoring](operations.md#passive-pcie-link-monitoring)).
-- A device reset, a driver reload or a hot-plug puts a burst into one window.
-  That is a suspect, which is logged and not reported. A Surprise Down that
-  maintenance caused on purpose is reported once and ends after three windows.
+- A device reset, a driver reload or a hot-plug puts a burst into one window,
+  or into two in a row. That is a suspect, which is logged and not reported,
+  and two of them are still one. Three within half an hour, each far over the
+  budget, are reported: a driver that reloads in a loop looks like a link
+  that errs in bursts.
+- A Surprise Down that maintenance caused on purpose (a card pulled without
+  removing the device first) is reported like any other: twice, one
+  `--idle-interval` apart, which opens a ticket under the packaged rules. Its
+  finding ends after three windows.
+- A link that runs at 64 GT/s is never reported for its rate; that is a
+  missing check, not a clean bill.
 - Two functions of one device share a link, so one erring link is reported
   under each of them (two RNIC ports of one card, say).
 - The thresholds have not been validated on hardware. Compare the evidence

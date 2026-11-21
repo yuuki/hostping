@@ -21,18 +21,28 @@ becomes the notes of its GitHub Release (see
     samples. A host that stays loaded without PFC pauses or drops no longer
     has to go idle first.
   - New cause `pcie_link_errors`: an end of a link counted more correctable
-    link errors per minute (Receiver Error, Bad TLP, Bad DLLP, REPLAY_NUM
-    Rollover, Replay Timer Timeout) than a bit error ratio of `--pcie-ber`
-    (default `1e-12`) gives at the link's negotiated speed and width, in three
-    consecutive one-minute windows; or an end counted a Data Link Protocol
-    Error or a Surprise Down. It is always `medium`, changes no path or link
-    status and no other cause, and the packaged alerting rules ticket it
-    without paging. A bottleneck the probes measure at the same link is
-    reported next to it under its own code.
+    link errors per minute (the largest of its rows Receiver Error, Bad TLP,
+    Bad DLLP, REPLAY_NUM Rollover, Replay Timer Timeout) than a bit error
+    ratio of `--pcie-ber` (default `1e-12`) gives at the link's negotiated
+    speed and width, in three one-minute windows in a row, or three separate
+    times within its last 30 windows with the errors of those windows
+    together over the budget; or an end counted a Data Link Protocol Error
+    or a Surprise Down. One burst of errors is a logged hint, not a cause. A
+    link faster than 32 GT/s is judged for uncorrectable errors only. The
+    cause is always `medium`, changes no path or link status and no other
+    cause, and the packaged alerting rules ticket it without paging. A
+    bottleneck the probes measure at the same link is reported next to it
+    under its own code.
   - These causes are written between runs as a report with `"trigger"` and
     `"mode"` `"passive"`, empty `paths` and `links`, at once and then once per
-    `--idle-interval` while they stand. A passive report counts in
-    `hostping_diagnosis_count_total` and in no run or liveness series.
+    `--idle-interval` while they stand, also while the monitor's polls fail
+    (an RNIC that left the bus). An uncorrectable link error is named by two
+    reports even when its finding has ended before the second, so one error
+    opens a ticket under the packaged rules at the default
+    `--idle-interval`. A passive report counts in
+    `hostping_diagnosis_count_total` and in no run or liveness series; one
+    that cannot be written adds to
+    `hostping_engine_run_failed_total{stage="report"}`.
   - New report field `pcie_links` (omitted when empty): the standing findings
     with the counters behind them. New metrics
     `hostping_pcie_link_errors_total{link,severity}` and

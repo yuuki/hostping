@@ -250,7 +250,7 @@ or idle. Where a source has no unknown state, the table says so.
 | AER link-error counters (`--pcie-interval`): never found | The function has no `aer_dev_*` files: no AER capability, or a kernel older than 4.19 or without `CONFIG_PCIEAER` | **Not applicable**, logged once at start: `hostping: pcie: pcie.gpu1: no AER statistics at 0000:7c:00.0 (…)`. That function is no end of the link. The link is still counted from its other end when that has the files, and still read for its negotiated link. A link with no end at all has no `hostping.pcie.link.errors` series and can have no `pcie_link_errors`. |
 | AER link-error counters: quiet | The files read and do not move. A platform whose firmware keeps AER to itself may show this whatever the link does, and so does a function whose error reporting is masked | Read as no errors counted, which is all it says. hostping never reports a link healthy for it; it only reports a link that errs. `dmesg \| grep -i aer` at boot says whether the kernel owns AER (`AER: enabled with IRQ`). |
 | AER link-error counters: lost or reset | A function that read before does not now (the device left the bus, the files stopped parsing), or a counter went down (the device was removed and enumerated again) | **Unknown**, logged once per change: `hostping: pcie: pcie.gpu3: AER counters of 0000:39:00.0 could not be read (…)` or `… went down (the device was enumerated again); re-baselined`. No difference is taken across the gap, and that end does not count for the window it fell in. `hostping.pcie.link.errors` is written from the other end only, or not at all. A window no end was read through ends a standing finding, logged as `… the sustained finding is dropped, not cleared`. The first sample that reads again is a baseline. |
-| PCIe link-error budget | The negotiated speed or width of the link is unread (`Unknown`, width 0) | The link's errors are still counted and exported, but its rate is not judged: no suspect, no `pcie_link_errors` from the rate. Logged once per link. `hostping.pcie.link.error_budget` is not written. An uncorrectable link error is still reported. |
+| PCIe link-error budget | The negotiated speed or width of the link is unread (`Unknown`, width 0), or the link runs faster than 32 GT/s (a PCIe 6.0 link corrects bit errors as it runs, and what its counters count then is not established) | The link's errors are still counted and exported, but its rate is not judged: no suspect, no `pcie_link_errors` from the rate. Logged once per link with the reason. `hostping.pcie.link.error_budget` is not written, and `budget_per_minute` is absent from the link's entry in `pcie_links`. An uncorrectable link error is still reported. |
 | ACS / ATS | Not root (see above), or the device has no such capability | `acs_enabled` / `ats_disabled` not reported. Not logged. |
 | GPU PCIe utilization | No `nvidia-smi` | `pcie.<gpu>` utilization unknown. |
 | Memory utilization | No `--uncore-util`, no `--mem-channel-capacity`, no perf access, AMD, sub-NUMA clustering whose start-up IMC mapping was not clear (a host loading memory hard while the agent starts) | `mem.N` unknown. The reason is logged at start. |
@@ -948,8 +948,11 @@ it back.
 Without `--state-dir`, a restart loses in-memory state: flapping streaks
 (`--flap-window`), a held idle-mode report awaiting confirmation, and the
 mutual probe window. The passive PCIe state (`--pcie-interval`) is lost with
-or without it: every link starts from a new baseline, and a sustained
-`pcie_link_errors` is reported again after three windows. The idle timer also restarts. On an idle host the first
+or without it: every link starts from a new baseline and with no window to
+look back over. A link that errs steadily is reported as `pcie_link_errors`
+again after three windows, one that errs in bursts after its next three
+bursts, and an uncorrectable link error that was still owed its second
+report does not get it. The idle timer also restarts. On an idle host the first
 idle full-mesh run then follows within seconds of the restart instead of
 `--idle-interval` later. On a fleet whose agents restart regularly, a link that
 flaps slowly relative to `--idle-interval` × `--flap-window` may never be
@@ -1329,9 +1332,12 @@ What it adds, and when:
 | Event | After | What you see |
 | --- | --- | --- |
 | An RNIC or GPU link trains below its capability | Two samples that read the same (at most 2 × `D`) | A passive report with `rnic_pcie_failure` or `gpu_pcie_failure` at `medium`, as an engine run would name it from config space alone. An RNIC is named only when the link no longer carries its line rate; a GPU only for its width. |
-| A link end counts more link errors than its budget | One window (a minute) | A log line, `hostping: pcie: pcie.gpu3: suspect (…): a hint, no verdict yet`. No report. The suspect stands until three windows in a row are within the budget. |
+| A link end counts more link errors than its budget | One window (a minute) | A log line, `hostping: pcie: pcie.gpu3: suspect (…): a hint, no verdict yet`. No report. One burst is over the budget in one window, or two in a row, and stays a suspect however large it is. The suspect stands until none of the link's last 30 windows was over the budget, so for half an hour after the burst. |
 | It stays over the budget | Three windows in a row (three minutes) | `hostping: pcie: pcie.gpu3: sustained (…): reported as pcie_link_errors`, and a passive report with `pcie_link_errors` at `medium`. |
-| A link end counts a Data Link Protocol Error or a Surprise Down | The window it happened in closes (within a minute) | A passive report with `pcie_link_errors` at `medium`, summary "reported an uncorrectable link error". |
+| It is over the budget in bursts | The third separate time within 30 windows, when the errors of those windows together exceed what the budget allows them | The same line and report. A link that errs for a minute every few minutes is reported at its third burst. Bursts more than about a quarter of an hour apart stay a suspect. |
+| The errors stop | 30 windows in a row within the budget | `hostping: pcie: pcie.gpu3: no window over the budget among the last 30; the sustained finding ends`. Until then the cause stands and is repeated. |
+| A link end counts a Data Link Protocol Error or a Surprise Down | The window it happened in closes (within a minute) | A passive report with `pcie_link_errors` at `medium`, summary "reported an uncorrectable link error". It is named a second time one `--idle-interval` later, also when its finding has ended by then (after three windows), so one such error is two reports and opens a ticket under the packaged rules. |
+| An RNIC leaves the bus and every poll fails on its counters (`monitor: no RNIC counters readable for …`) | The same poll | The passive reading is still exported and reported: the Surprise Down its port counted is a passive report while the polls fail. |
 | A cause still stands | Every `--idle-interval` | The next engine run names it. If no run did, a passive report repeats it. |
 
 A passive report is one JSON line like any other report, with
@@ -1345,10 +1351,13 @@ journalctl -u hostping --since -1h -o cat \
 
 It counts in `hostping_diagnosis_count_total` like the causes of a run, so the
 packaged [alerting rules](#alerting-rules) need no change: a passive cause
-that stands for two reports opens a ticket. Nothing else is written for it.
-In particular it is no engine run: `hostping_engine_run_count_total` and
+that two reports name within 30 minutes opens a ticket. That takes an
+`--idle-interval` under 30 minutes, as it does for the causes of idle runs.
+It is no engine run: `hostping_engine_run_count_total` and
 `hostping_engine_last_success_timestamp_seconds` do not move, so the liveness
-alerts still say whether the engine runs.
+alerts still say whether the engine runs. The one series it shares with the
+runs is `hostping_engine_run_failed_total{stage="report"}`, which also counts
+a passive report that could not be written.
 
 The error counters are exported whether or not they amount to a finding:
 
@@ -1361,9 +1370,13 @@ hostping_pcie_link_error_budget
 increase(hostping_pcie_link_errors_total{severity="uncorrectable"}[1d]) > 0
 ```
 
-The counter sums both ends of a link; the verdict holds each end to the
-budget on its own. A link at the budget in both directions therefore graphs at
-twice the budget without being a finding. A series exists from the first
+The counter adds up what every row of both ends counted. The verdict holds
+each end to the budget on its own and counts an end by its largest row,
+because one error can add to more than one row. So the graph can sit above
+the budget without a finding: a link at the budget in both directions graphs
+at twice the budget, and one whose errors each count as a Receiver Error and
+a Bad TLP at twice again. Read the finding in `pcie_links` for the rate that
+was judged. A series exists from the first
 sample that could be differenced, at 0 while the link is quiet. No series
 means the link has no AER counters, or they do not read (see
 [What "unknown" means](#what-unknown-means-per-data-source)).
@@ -1374,7 +1387,8 @@ around link power-state changes) will show suspects, or a sustained finding,
 on links you know are fine. Raise the ratio there, for example
 `--pcie-ber 1e-10` for a hundred times the budget, and keep the counters on a
 dashboard. `--pcie-ber 0` judges no rate and keeps the down-train reports and
-the uncorrectable link errors.
+the uncorrectable link errors. A link that runs at 64 GT/s is held to no
+budget whatever the ratio; the log names each such link once.
 
 **Cost.** Per sample and link, the daemon reads the link attributes of one
 function and three small files per function at the link's ends. Reading the
@@ -1388,7 +1402,9 @@ files are kernel counters and touch no hardware.
 **Probing on a finding.** By default a passive finding sends no probe.
 `--pcie-probe-interval D` lets one start a busy-mode run (trigger `pcie_link`)
 on a host that is not idle: only the RNICs whose probes cross the link, at
-most once per `D` and link. It costs those RNICs' workloads what any busy run
+most once per `D` and link while the finding stands. A suspect stands for 30
+windows after its last window over the budget, so one burst is probed once
+per `D` for half an hour. It costs those RNICs' workloads what any busy run
 costs (see [Cost to running workloads](#cost-to-running-workloads)), so set it
 in tens of minutes. It is most useful for GPU links, where the busy sibling
 comparison can say whether the link is also a bottleneck; see

@@ -52,10 +52,17 @@ its `causes` are a link that trained below its capability
 (`rnic_pcie_failure`, `gpu_pcie_failure`) or `pcie_link_errors`. Every report
 made while a link has a passive finding, passive or not, lists the findings
 in `pcie_links`: per link its `state` (`suspect`, `sustained`,
-`uncorrectable`), `errors_per_minute` against `budget_per_minute`,
-`over_budget_windows`, `window_seconds`, and per end (`bdf`, `port` for the
-port above the link) the `correctable` and `uncorrectable` rows that moved in
-the last window. The field is absent without a finding. A run started for
+`uncorrectable`); `errors_per_minute` of the last window against
+`budget_per_minute` (absent when the rate has no budget: the negotiated link
+is unread or faster than 32 GT/s); the judged windows the finding looks back
+over, `recent_windows` (at most 30), with `over_budget_windows` of them over
+the budget, in `over_budget_runs` separate times and at most
+`over_budget_longest_run` in a row, and `recent_errors_per_minute` across
+them (absent when that is 0 or no window was judged); `window_seconds`; and
+per end (`bdf`, `port` for the port above the link) the `correctable` and
+`uncorrectable` rows that moved in the last window. The field is absent
+without a finding. The second report of an uncorrectable link error can name
+the cause after its finding has ended, and then lists no entry for the link. A run started for
 such a link has `"trigger":"pcie_link"` and holds only the paths of the RNICs
 it swept. See
 [Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring).
@@ -92,15 +99,15 @@ agent from one with nothing to report. See
 | `hostping.cpu.busy` | gauge (0–1) | `numa`, `socket` | CPU busy fraction of the NUMA node over the poll interval, from `/proc/stat`; no sample when unread (see [CPU load](design.md#cpu-load-on-an-idle-host)) |
 | `hostping.rnic.pause_duration_ratio` | gauge (ratio) | `rnic` | Tx pause seconds per second; `--pfc-high` (default 0.03 = 30 ms/s) compares against it |
 | `hostping.rnic.drop.delta` | gauge | `rnic` | Packet drop counter delta over the last poll |
-| `hostping.pcie.link.errors` | counter | `link`, `severity` | With `--pcie-interval`: AER link errors the PCI functions at the two ends of the PCIe link counted since the daemon started, summed over both ends and read without a probe. `severity` is `correctable` (Receiver Error, Bad TLP, Bad DLLP, REPLAY_NUM Rollover, Replay Timer Timeout) or `uncorrectable` (Data Link Protocol Error, Surprise Down). It adds only differences between two consecutive samples, so what the kernel had counted before the daemon started is not in it. A link is written from its first differenced sample on, at 0 while quiet; a link whose counters cannot be read, or without AER counters, has no series (see [Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring)) |
-| `hostping.pcie.link.error_budget` | gauge (errors/min) | `link` | With `--pcie-interval`: the correctable link errors per minute one end of the link may count at `--pcie-ber`, for the speed and width the link trained to. `pcie_link_errors` compares the worse end of the link against this value rounded up. No sample while the negotiated link is unread or with `--pcie-ber 0` |
+| `hostping.pcie.link.errors` | counter | `link`, `severity` | With `--pcie-interval`: what the AER link-error rows of the PCI functions at the two ends of the PCIe link counted since the daemon started, added up over the rows and both ends and read without a probe. One error can add to more than one row, so this is the kernel's count of row increments, not a number of errors; a finding counts an end by its largest row. `severity` is `correctable` (Receiver Error, Bad TLP, Bad DLLP, REPLAY_NUM Rollover, Replay Timer Timeout) or `uncorrectable` (Data Link Protocol Error, Surprise Down). It adds only differences between two consecutive samples, so what the kernel had counted before the daemon started is not in it. A link is written from its first differenced sample on, at 0 while quiet; a link whose counters cannot be read, or without AER counters, has no series (see [Passive PCIe link monitoring](design.md#passive-pcie-link-monitoring)) |
+| `hostping.pcie.link.error_budget` | gauge (errors/min) | `link` | With `--pcie-interval`: the correctable link errors per minute one end of the link may count at `--pcie-ber`, for the speed and width the link trained to. `pcie_link_errors` compares the worse end of the link against this value rounded up. No sample while the negotiated link is unread, for a link faster than 32 GT/s, or with `--pcie-ber 0` |
 | `hostping.verb.duration` | gauge (µs) | `rnic`, `endpoint`, `endpoint_kind`, `verb` | Execution time of the loopback probe's setup verbs (`gpu_alloc` on GPU endpoints only, `mr_reg`, `qp_setup`; `mem_warmup` on memory endpoints with `--mem-warmup`) in the last run. Not exported with `--metrics-verb-durations=false` |
 | `hostping.endpoint.skipped` | gauge | `kind` | Endpoints (`gpu`/`memory`) whose loopback probes were skipped because registration failed, the GPU's compute mode is not `Default`, or an earlier loopback on the same InfiniBand RNIC failed at the port in that run; 0 when none. A `pcie_link` run, which sweeps a few RNICs, does not write it |
 | `hostping.host.idle` | gauge (0/1) | — | 1 when the last run classified the host as idle |
 | `hostping.engine.run.count` | counter | `trigger`, `mode` | Engine runs whose report was confirmed (held idle-mode runs count once confirmed). A passive report is no run and is not counted |
 | `hostping.engine.last_run_timestamp` | gauge (s) | — | Unix time the last engine run ended, whatever its outcome; absent until the first run |
 | `hostping.engine.last_success_timestamp` | gauge (s) | — | Unix time the last run whose report was confirmed and written ended; absent until then |
-| `hostping.engine.run.failed` | counter | `stage` | Runs that failed: `engine` (the run returned an error) or `report` (a confirmed report could not be written to stdout or `--report-file`). 0 from start-up |
+| `hostping.engine.run.failed` | counter | `stage` | Runs that failed: `engine` (the run returned an error) or `report` (a confirmed report could not be written to stdout or `--report-file`; a passive report of `--pcie-interval` that could not be written counts here too, although no run is behind it). 0 from start-up |
 | `hostping.engine.run.discarded` | counter | `reason` | Idle-mode runs discarded because the clean poll after them found the host `host_busy` or `idle_unknown` (idle state unreadable). 0 from start-up |
 | `hostping.engine.idle_gate.skipped` | counter | `reason` | Idle runs that `--idle-gate-command` kept from starting: `denied` (exit 1), `timeout` (no exit within `--idle-gate-timeout`) or `error` (exit 2 or higher: the gate could not decide; or it could not run, or was killed by a signal). 0 from start-up with a gate; not exported without one |
 | `hostping.monitor.poll.errors` | counter | — | Monitor polls that returned an error (counters or GPU state unreadable). 0 from start-up |
