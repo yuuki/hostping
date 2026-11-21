@@ -1157,6 +1157,26 @@ func TestPCIeLinkTriggerConditions(t *testing.T) {
 			}
 		}
 	})
+	t.Run("an RNIC that cannot be classified", func(t *testing.T) {
+		// Without a line rate rnic0 cannot be told loaded from unloaded,
+		// and a busy run would judge it against the idle baseline: no
+		// pcie_link run, as no periodic one.
+		h := newPCIeHost(t, base, "rnic1")
+		h.m.Graph.RNICs[0].LineRate = 0
+		h.need = []string{"pcie.gpu3"}
+		for i := 0; i < 300; i++ {
+			if d := h.mustStep(time.Second); d.Run {
+				t.Fatalf("step %d: %+v with an RNIC of unknown line rate", i, d)
+			}
+		}
+		// The same host with the line rate known does start one.
+		h = newPCIeHost(t, base, "rnic1")
+		h.need = []string{"pcie.gpu3"}
+		h.mustStep(time.Second)
+		if d := h.mustStep(time.Second); !d.Run || d.Trigger != model.TriggerPCIeLink {
+			t.Fatalf("first ready poll %+v, want the pcie_link run", d)
+		}
+	})
 	t.Run("cooldown", func(t *testing.T) {
 		cfg := base
 		cfg.BusyCooldown = 90 * time.Second
