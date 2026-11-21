@@ -87,8 +87,10 @@
       "link": "",
       "state": "",
       "errors_per_minute": 0,
-      "budget_per_minute": 0,
+      "recent_windows": 0,
       "over_budget_windows": 0,
+      "over_budget_runs": 0,
+      "over_budget_longest_run": 0,
       "window_seconds": 0,
       "ends": [
         {

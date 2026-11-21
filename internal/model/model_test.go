@@ -723,12 +723,16 @@ func fullReport() model.Report {
 		}},
 		CPULoad: []model.CPULoad{{NUMA: 1, Socket: 1, Busy: 0.93, High: true}},
 		PCIeLinks: []model.PCIeLinkFinding{{
-			Link:              "pcie.gpu3",
-			State:             model.PCIeLinkSustained,
-			ErrorsPerMinute:   412.5,
-			BudgetPerMinute:   15.36,
-			OverBudgetWindows: 3,
-			WindowSeconds:     60,
+			Link:                  "pcie.gpu3",
+			State:                 model.PCIeLinkSustained,
+			ErrorsPerMinute:       412.5,
+			BudgetPerMinute:       15.36,
+			RecentWindows:         30,
+			OverBudgetWindows:     5,
+			OverBudgetRuns:        2,
+			OverBudgetLongestRun:  3,
+			RecentErrorsPerMinute: 70.25,
+			WindowSeconds:         60,
 			Ends: []model.PCIeLinkEnd{
 				{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}},
 				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 410, "Timeout": 3}},
@@ -907,13 +911,14 @@ func TestPCIeLinkStateProven(t *testing.T) {
 			t.Errorf("%q.Proven() = %v, want %v", state, got, want)
 		}
 	}
-	if model.PCIeSustainWindows != 3 {
-		t.Errorf("PCIeSustainWindows = %d; the docs and the --pcie-ber help say three", model.PCIeSustainWindows)
+	if model.PCIeSustainWindows != 3 || model.PCIeRecentWindows != 30 {
+		t.Errorf("PCIeSustainWindows = %d, PCIeRecentWindows = %d; the docs and the --pcie-ber help say three and 30", model.PCIeSustainWindows, model.PCIeRecentWindows)
 	}
 }
 
-// The evidence of a finding is part of the report contract: the rate against
-// the budget rounded up, the streak, each end's rows by name with the port
+// The evidence of a finding is part of the report contract: the rate of the
+// last window against the budget rounded up, the windows over the budget
+// among those looked back over, each end's rows by name with the port
 // marked, and the window.
 func TestPCIeLinkFindingEvidence(t *testing.T) {
 	for _, tc := range []struct {
@@ -921,43 +926,58 @@ func TestPCIeLinkFindingEvidence(t *testing.T) {
 		f    model.PCIeLinkFinding
 		want string
 	}{
-		{"sustained", model.PCIeLinkFinding{
-			ErrorsPerMinute: 412.4, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
+		{"sustained, three windows in a row", model.PCIeLinkFinding{
+			ErrorsPerMinute: 412.4, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			RecentWindows: 12, OverBudgetWindows: 3, OverBudgetRuns: 1, OverBudgetLongestRun: 3, RecentErrorsPerMinute: 103.1,
 			Ends: []model.PCIeLinkEnd{
 				{BDF: "0000:38:00.0", Port: true, Correctable: map[string]uint64{"RxErr": 95}},
 				{BDF: "0000:39:00.0", Correctable: map[string]uint64{"Timeout": 3, "BadTLP": 402, "BadDLLP": 7}},
 			},
-		}, "412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:38:00.0 (port): RxErr=95; 0000:39:00.0: BadDLLP=7 BadTLP=402 Timeout=3; last window 60s"},
+		}, "412 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 12 windows (1 time, at most 3 in a row), 103/min across them; 0000:38:00.0 (port): RxErr=95; 0000:39:00.0: BadDLLP=7 BadTLP=402 Timeout=3; last window 60s"},
+		// A finding outlives the window that made it: the evidence of a
+		// window that counted nothing says what the finding stands on.
+		{"sustained, in bursts, the last window quiet", model.PCIeLinkFinding{
+			State: model.PCIeLinkSustained, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			RecentWindows: 30, OverBudgetWindows: 10, OverBudgetRuns: 10, OverBudgetLongestRun: 1, RecentErrorsPerMinute: 400,
+			Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0"}},
+		}, "0 link errors/min against a budget of 16/min in the last window; over the budget in 10 of the last 30 windows (10 separate times, at most 1 in a row), 400/min across them; last window 60s"},
+		{"suspect, the first window judged", model.PCIeLinkFinding{
+			State: model.PCIeLinkSuspect, ErrorsPerMinute: 17, BudgetPerMinute: 16, WindowSeconds: 60,
+			RecentWindows: 1, OverBudgetWindows: 1, OverBudgetRuns: 1, OverBudgetLongestRun: 1, RecentErrorsPerMinute: 17,
+		}, "17 link errors/min against a budget of 16/min in the last window; over the budget in the one window judged so far; last window 60s"},
+		// The rate and the budget print the way they compared: a rate over
+		// the budget never reads as the budget, nor one within it as more.
+		{"just over the budget", model.PCIeLinkFinding{
+			State: model.PCIeLinkSuspect, ErrorsPerMinute: 16.45, BudgetPerMinute: 15.36, WindowSeconds: 62,
+			RecentWindows: 2, OverBudgetWindows: 1, OverBudgetRuns: 1, OverBudgetLongestRun: 1, RecentErrorsPerMinute: 16.002,
+		}, "16.4 link errors/min against a budget of 16/min in the last window; over the budget in 1 of the last 2 windows (1 time, at most 1 in a row), 16.002/min across them; last window 62s"},
+		{"just within the budget", model.PCIeLinkFinding{
+			State: model.PCIeLinkSuspect, ErrorsPerMinute: 15.7, BudgetPerMinute: 15.36, WindowSeconds: 61,
+			RecentWindows: 2, OverBudgetWindows: 1, OverBudgetRuns: 1, OverBudgetLongestRun: 1, RecentErrorsPerMinute: 16.6,
+		}, "16 link errors/min against a budget of 16/min in the last window; over the budget in 1 of the last 2 windows (1 time, at most 1 in a row), 17/min across them; last window 61s"},
+		{"over the budget by less than any rounding shows", model.PCIeLinkFinding{
+			State: model.PCIeLinkSuspect, ErrorsPerMinute: 16.00000004, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			RecentWindows: 1, OverBudgetWindows: 1, OverBudgetRuns: 1, OverBudgetLongestRun: 1,
+		}, "16.00000004 link errors/min against a budget of 16/min in the last window; over the budget in the one window judged so far; last window 60s"},
 		{"uncorrectable only", model.PCIeLinkFinding{
-			BudgetPerMinute: 30.72, WindowSeconds: 61.4,
+			BudgetPerMinute: 30.72, WindowSeconds: 61.4, RecentWindows: 4,
 			Ends: []model.PCIeLinkEnd{
 				{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1, "DLP": 2}},
 				{BDF: "0000:39:00.0"},
 			},
-		}, "0 link errors/min against a budget of 31/min; 0000:38:00.0 (port): uncorrectable DLP=2 SDES=1; last window 61s"},
+		}, "0 link errors/min against a budget of 31/min in the last window; 0000:38:00.0 (port): uncorrectable DLP=2 SDES=1; last window 61s"},
 		{"both kinds at one end, no budget", model.PCIeLinkFinding{
 			ErrorsPerMinute: 9, WindowSeconds: 600,
 			Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 90}, Uncorrectable: map[string]uint64{"DLP": 1}}},
 		}, "9 link errors/min with no budget to judge them against; 0000:39:00.0: BadTLP=90 uncorrectable DLP=1; last window 600s"},
-		{"a whole budget is not rounded up", model.PCIeLinkFinding{ErrorsPerMinute: 17, BudgetPerMinute: 16, OverBudgetWindows: 1, WindowSeconds: 60},
-			"17 link errors/min against a budget of 16/min, over it in 1 consecutive windows; last window 60s"},
-		// A finding outlives the window that made it: the evidence of a
-		// later window says what the finding still stands on.
-		{"sustained, the last window within the budget", model.PCIeLinkFinding{
-			State: model.PCIeLinkSustained, ErrorsPerMinute: 3, BudgetPerMinute: 15.36, WindowSeconds: 60,
-			Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 3}}},
-		}, "3 link errors/min against a budget of 16/min, within it in the last window (the finding ends after 3 such windows in a row); 0000:39:00.0: BadTLP=3; last window 60s"},
-		{"suspect, the last window within the budget", model.PCIeLinkFinding{
-			State: model.PCIeLinkSuspect, BudgetPerMinute: 15.36, WindowSeconds: 60, Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0"}},
-		}, "0 link errors/min against a budget of 16/min, within it in the last window (the finding ends after 3 such windows in a row); last window 60s"},
 		{"uncorrectable, counted in an earlier window", model.PCIeLinkFinding{
-			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60, RecentWindows: 9,
 			Ends: []model.PCIeLinkEnd{{BDF: "0000:38:00.0", Port: true}, {BDF: "0000:39:00.0"}},
-		}, "0 link errors/min against a budget of 16/min; an uncorrectable link error was counted within the last 3 windows; last window 60s"},
+		}, "0 link errors/min against a budget of 16/min in the last window; an uncorrectable link error was counted within the last 3 windows; last window 60s"},
 		{"uncorrectable, counted in the last window", model.PCIeLinkFinding{
-			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			State: model.PCIeLinkUncorrectable, BudgetPerMinute: 15.36, WindowSeconds: 60, RecentWindows: 9,
 			Ends: []model.PCIeLinkEnd{{BDF: "0000:38:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}}},
-		}, "0 link errors/min against a budget of 16/min; 0000:38:00.0 (port): uncorrectable SDES=1; last window 60s"},
+		}, "0 link errors/min against a budget of 16/min in the last window; 0000:38:00.0 (port): uncorrectable SDES=1; last window 60s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.f.Evidence(); got != tc.want {

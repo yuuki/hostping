@@ -71,7 +71,7 @@
   -otlp-insecure
     	plaintext OTLP for a host:port endpoint (unset: OTEL_EXPORTER_OTLP_INSECURE, else plaintext for loopback and TLS with the system roots otherwise)
   -pcie-ber value
-    	bit error ratio a PCIe link is allowed, for --pcie-interval: an end of a link that counts more AER link errors per minute than this ratio gives at the link's negotiated speed and width is over its budget, and three such windows in a row are reported as pcie_link_errors (0 = judge no rate, only uncorrectable link errors; at most 1e-6) (default 1e-12)
+    	bit error ratio a PCIe link is allowed, for --pcie-interval: an end of a link that counts more AER link errors per minute than this ratio gives at the link's negotiated speed and width is over its budget in that window, and a link over it in three windows in a row, or three separate times within its last 30 windows, is reported as pcie_link_errors; a link faster than 32 GT/s is held to no budget (0 = judge no rate, only uncorrectable link errors; at most 1e-6) (default 1e-12)
   -pcie-interval value
     	daemon: read, without sending a probe, the negotiated link and the AER link-error counters of the PCIe links the probes cross this often, and report a link that trained below its capability (rnic_pcie_failure, gpu_pcie_failure) or counts link errors beyond --pcie-ber (pcie_link_errors) when it shows, not at the next run (opt-in, 0 = off; at most 10m; e.g. 10s)
   -pcie-probe-interval value

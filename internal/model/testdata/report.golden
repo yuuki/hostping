@@ -165,7 +165,11 @@
       "state": "sustained",
       "errors_per_minute": 412.5,
       "budget_per_minute": 15.36,
-      "over_budget_windows": 3,
+      "recent_windows": 30,
+      "over_budget_windows": 5,
+      "over_budget_runs": 2,
+      "over_budget_longest_run": 3,
+      "recent_errors_per_minute": 70.25,
       "window_seconds": 60,
       "ends": [
         {

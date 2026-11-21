@@ -16,14 +16,15 @@ import (
 func linkFinding(link string, state model.PCIeLinkState) model.PCIeLinkFinding {
 	f := model.PCIeLinkFinding{
 		Link: link, State: state,
-		ErrorsPerMinute: 412, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
+		ErrorsPerMinute: 412, BudgetPerMinute: 15.36, WindowSeconds: 60,
+		RecentWindows: 3, OverBudgetWindows: 3, OverBudgetRuns: 1, OverBudgetLongestRun: 3, RecentErrorsPerMinute: 412,
 		Ends: []model.PCIeLinkEnd{
 			{BDF: "0000:16:00.0", Port: true},
 			{BDF: "0000:17:00.0", Correctable: map[string]uint64{"BadTLP": 409, "Timeout": 3}},
 		},
 	}
 	if state == model.PCIeLinkUncorrectable {
-		f.ErrorsPerMinute, f.OverBudgetWindows = 0, 0
+		f.ErrorsPerMinute, f.OverBudgetWindows, f.OverBudgetRuns, f.OverBudgetLongestRun, f.RecentErrorsPerMinute = 0, 0, 0, 0, 0
 		f.Ends = []model.PCIeLinkEnd{{BDF: "0000:16:00.0", Port: true, Uncorrectable: map[string]uint64{"SDES": 1}}}
 	}
 	return f
@@ -60,11 +61,11 @@ func TestLinkErrorsAloneAreMedium(t *testing.T) {
 		rnics, endpoints        []string
 	}{
 		{"pcie.gpu5", "PCIe link reported an uncorrectable link error",
-			"AER: 0 link errors/min against a budget of 16/min; 0000:16:00.0 (port): uncorrectable SDES=1; last window 60s; the same run names no other cause at the link (counters only)",
+			"AER: 0 link errors/min against a budget of 16/min in the last window; 0000:16:00.0 (port): uncorrectable SDES=1; last window 60s; the same run names no other cause at the link (counters only)",
 			nil, []string{"gpu5"}},
 		{"rp.2", "PCIe link counts link errors beyond its bit-error budget", "", nil, nil},
 		{"pcie.rnic1", "PCIe link counts link errors beyond its bit-error budget",
-			"AER: 412 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:17:00.0: BadTLP=409 Timeout=3; last window 60s; the same run names no other cause at the link (counters only)",
+			"AER: 412 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 3 windows (1 time, at most 3 in a row), 412/min across them; 0000:17:00.0: BadTLP=409 Timeout=3; last window 60s; the same run names no other cause at the link (counters only)",
 			[]string{"rnic1"}, nil},
 	}
 	for i, w := range want {

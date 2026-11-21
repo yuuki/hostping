@@ -44,6 +44,8 @@ func TestPCIeErrorBudget(t *testing.T) {
 		{"no ratio", 0, gen4, 16, 0},
 		{"negative ratio", -1e-12, gen4, 16, 0},
 		{"NaN ratio", math.NaN(), gen4, 16, 0},
+		// Above 32 GT/s the rate is held to no budget.
+		{"gen6 x16", 1e-12, "64.0 GT/s PCIe", 16, 0},
 		{"speed unknown", 1e-12, "Unknown", 16, 0},
 		{"speed unread", 1e-12, "", 16, 0},
 		{"width unread", 1e-12, gen4, 0, 0},
@@ -173,8 +175,8 @@ func TestPCIeWatchLifetimeTotalIsNoEvidence(t *testing.T) {
 
 // Gen4 x16 is allowed ceil(15.36) = 16 link errors a minute per end. A rate
 // within that, however steady, is no finding; one over it is a hint for two
-// windows and a verdict from the third; it ends after three windows within
-// the budget, not after one.
+// windows and a verdict from the third. The finding then stands for as long
+// as one of the last 30 windows was over the budget, and says so.
 func TestPCIeWatchSuspectThenSustainedThenEnds(t *testing.T) {
 	s := newLinkScript(t, 1e-12)
 	s.sample(0)
@@ -190,7 +192,8 @@ func TestPCIeWatchSuspectThenSustainedThenEnds(t *testing.T) {
 			t.Fatalf("window %d over the budget: state %q, want %q", i+1, s.state(), w)
 		}
 		f := s.last.Findings[0]
-		if f.OverBudgetWindows != i+1 || f.ErrorsPerMinute != 17 || f.BudgetPerMinute != 15.36 || f.WindowSeconds != 60 {
+		if f.OverBudgetWindows != i+1 || f.OverBudgetRuns != 1 || f.OverBudgetLongestRun != i+1 || f.RecentWindows != 11+i ||
+			f.ErrorsPerMinute != 17 || f.BudgetPerMinute != 15.36 || f.WindowSeconds != 60 {
 			t.Fatalf("window %d finding %+v", i+1, f)
 		}
 		if len(f.Ends) != 2 || f.Ends[0].BDF != scriptPort || !f.Ends[0].Port || f.Ends[0].Correctable != nil ||
@@ -201,63 +204,251 @@ func TestPCIeWatchSuspectThenSustainedThenEnds(t *testing.T) {
 	if !s.logged("pcie.rnic0: suspect") || !s.logged("pcie.rnic0: sustained") || !s.logged("reported as pcie_link_errors") {
 		t.Fatalf("state changes not logged: %q", s.logs)
 	}
-	// One window, and a second, within the budget: the verdict still stands.
+	logs := len(s.logs)
+	// Windows within the budget: the verdict stands on the four before, and
+	// the evidence says which windows it stands on.
 	for i := 0; i < 2; i++ {
 		if s.minute(3); s.state() != model.PCIeLinkSustained {
 			t.Fatalf("clean window %d: state %q, want the sustained finding to stand", i+1, s.state())
 		}
-		if f := s.last.Findings[0]; f.OverBudgetWindows != 0 || f.ErrorsPerMinute != 3 {
-			t.Fatalf("clean window %d finding %+v, want the last window's numbers", i+1, f)
+		if f := s.last.Findings[0]; f.OverBudgetWindows != 4 || f.OverBudgetLongestRun != 4 || f.ErrorsPerMinute != 3 {
+			t.Fatalf("clean window %d finding %+v, want the last window's rate and the four windows over the budget", i+1, f)
 		}
 	}
-	// A relapse starts the three clean windows over.
-	if s.minute(40); s.state() != model.PCIeLinkSustained || s.last.Findings[0].OverBudgetWindows != 1 {
+	if ev := s.last.Findings[0].Evidence(); !strings.HasPrefix(ev, "3 link errors/min against a budget of 16/min in the last window; over the budget in 4 of the last 16 windows (1 time, at most 4 in a row), 15/min across them; ") {
+		t.Fatalf("evidence %q", ev)
+	}
+	// A relapse is one more time over the budget, and the 30 windows start
+	// over from it.
+	if s.minute(40); s.state() != model.PCIeLinkSustained || s.last.Findings[0].OverBudgetWindows != 5 || s.last.Findings[0].OverBudgetRuns != 2 {
 		t.Fatalf("relapse: %+v", s.last.Findings)
 	}
-	for i := 0; i < 2; i++ {
+	for i := 1; i < model.PCIeRecentWindows; i++ {
 		if s.minute(0); s.state() != model.PCIeLinkSustained {
-			t.Fatalf("clean window %d after the relapse: state %q", i+1, s.state())
+			t.Fatalf("clean window %d after the relapse: state %q, want the finding to stand while a window over the budget is among the last %d", i, s.state(), model.PCIeRecentWindows)
 		}
 	}
-	if s.minute(0); s.state() != "" {
-		t.Fatalf("third clean window: finding %+v still stands", s.last.Findings)
+	if f := s.last.Findings[0]; f.OverBudgetWindows != 1 || f.RecentWindows != model.PCIeRecentWindows {
+		t.Fatalf("finding %+v, want it to stand on the relapse alone by now", f)
 	}
-	if !s.logged("link errors within budget again; the sustained finding ends") {
-		t.Fatalf("end of the finding not logged: %q", s.logs)
+	if s.minute(0); s.state() != "" {
+		t.Fatalf("%d clean windows: finding %+v still stands", model.PCIeRecentWindows, s.last.Findings)
+	}
+	if got := s.logs[logs:]; len(got) != 1 || !strings.Contains(got[0], "pcie.rnic0: no window over the budget among the last 30; the sustained finding ends") {
+		t.Fatalf("log lines since the verdict %q, want the end of the finding and nothing else", got)
 	}
 }
 
-// A burst over the budget in one window that does not come back is a hint
-// that goes away after three windows within the budget: it never becomes a
-// verdict. Neither does a link that is over the budget again and again but
-// never three windows in a row; it stays one suspect, logged once.
+// One burst of errors, however large, is a hint and never a verdict: it is
+// over the budget in one window, or in two in a row when it straddles their
+// boundary. Neither are two bursts. The hint stands, logged once, until none
+// of the last 30 windows was over the budget.
 func TestPCIeWatchOneBurstIsOnlyAHint(t *testing.T) {
 	s := newLinkScript(t, 1e-12)
 	s.sample(0)
-	if s.minute(5000); s.state() != model.PCIeLinkSuspect {
+	if s.minute(1_000_000); s.state() != model.PCIeLinkSuspect {
 		t.Fatalf("burst: state %q, want suspect", s.state())
 	}
-	for i := 0; i < 2; i++ {
-		if s.minute(0); s.state() != model.PCIeLinkSuspect || s.last.Findings[0].OverBudgetWindows != 0 {
-			t.Fatalf("window %d after the burst: %+v, want the suspect to stand with no window over the budget", i+1, s.last.Findings)
+	if ev := s.last.Findings[0].Evidence(); !strings.Contains(ev, "over the budget in the one window judged so far") {
+		t.Fatalf("evidence %q", ev)
+	}
+	for i := 1; i < model.PCIeRecentWindows; i++ {
+		if s.minute(0); s.state() != model.PCIeLinkSuspect || s.last.Findings[0].OverBudgetWindows != 1 {
+			t.Fatalf("window %d after the burst: %+v, want the suspect to stand on the one window", i, s.last.Findings)
 		}
 	}
 	if s.minute(0); s.state() != "" {
-		t.Fatalf("third window after the burst: %+v", s.last.Findings)
+		t.Fatalf("%d windows after the burst: %+v", model.PCIeRecentWindows, s.last.Findings)
+	}
+	if !s.logged("pcie.rnic0: no window over the budget among the last 30; the suspect finding ends") {
+		t.Fatalf("end of the hint not logged: %q", s.logs)
 	}
 	logs := len(s.logs)
-	// Two windows over, one within, again and again: never three in a row.
-	for i, n := range []uint64{100, 100, 0, 100, 100, 0, 100, 100, 0, 0} {
+	// Two bursts, each across a window boundary: four windows over the
+	// budget, two separate times, and still a hint.
+	for i, n := range []uint64{1_000_000, 1_000_000, 0, 0, 0, 1_000_000, 1_000_000, 0, 0, 0, 0, 0} {
 		s.minute(n)
 		if s.state() != model.PCIeLinkSuspect {
 			t.Fatalf("window %d (%d errors): state %q, want a standing suspect", i, n, s.state())
 		}
 	}
+	if f := s.last.Findings[0]; f.OverBudgetWindows != 4 || f.OverBudgetRuns != 2 || f.OverBudgetLongestRun != 2 {
+		t.Fatalf("finding %+v, want 4 windows over the budget in 2 runs of 2", f)
+	}
 	if got := len(s.logs) - logs; got != 1 {
 		t.Fatalf("%d log lines for one suspect that never ended: %q", got, s.logs[logs:])
 	}
-	if s.minute(0); s.state() != "" {
-		t.Fatalf("after three windows within the budget: %+v", s.last.Findings)
+}
+
+// A link that errs in bursts is over its budget in some windows only, never
+// three in a row. It is a verdict from the third separate time, and stays
+// one: the finding does not come and go with the bursts.
+func TestPCIeWatchBurstsMakeAVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// errors is what window i counts.
+		errors func(i int) uint64
+		// verdict is the window, from 1, that makes the verdict.
+		verdict int
+	}{
+		{"every other minute", func(i int) uint64 { return uint64(100_000 * (1 - i%2)) }, 5},
+		{"two minutes in three", func(i int) uint64 {
+			if i%3 == 2 {
+				return 0
+			}
+			return 100_000
+		}, 7},
+		{"one minute in fourteen", func(i int) uint64 {
+			if i%14 == 0 {
+				return 1200
+			}
+			return 0
+		}, 29},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newLinkScript(t, 1e-12)
+			s.sample(0)
+			for i := 0; i < 240; i++ {
+				s.minute(tc.errors(i))
+				want := model.PCIeLinkSuspect
+				if i+1 >= tc.verdict {
+					want = model.PCIeLinkSustained
+				}
+				if s.state() != want {
+					t.Fatalf("window %d: state %q, want %q: %+v", i+1, s.state(), want, s.last.Findings)
+				}
+			}
+			if len(s.logs) != 2 || !strings.Contains(s.logs[0], "suspect") || !strings.Contains(s.logs[1], "sustained") || !strings.Contains(s.logs[1], "reported as pcie_link_errors") {
+				t.Fatalf("log of four hours %q, want the hint and the verdict, once each", s.logs)
+			}
+		})
+	}
+
+	// 1200 errors in one minute of every three, 75 times the budget while
+	// they last: the third burst is the verdict, and the evidence names what
+	// it stands on in a window that counted nothing.
+	s := newLinkScript(t, 1e-12)
+	s.sample(0)
+	for i := 0; i < 8; i++ {
+		n := uint64(0)
+		if i%3 == 0 {
+			n = 1200
+		}
+		s.minute(n)
+		want := model.PCIeLinkSuspect
+		if i >= 6 {
+			want = model.PCIeLinkSustained
+		}
+		if s.state() != want {
+			t.Fatalf("window %d: state %q, want %q", i+1, s.state(), want)
+		}
+	}
+	want := "0 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 8 windows (3 separate times, at most 1 in a row), 450/min across them; last window 60s"
+	if got := s.last.Findings[0].Evidence(); got != want {
+		t.Fatalf("evidence %q, want %q", got, want)
+	}
+}
+
+// What bursts do not make a verdict. A link whose errors stay within its
+// budget over the windows looked back on is not accused for being over it
+// in a window three separate times: at a rate near the budget that happens
+// by chance. And bursts so far apart that fewer than three fall into the
+// last 30 windows stay a hint, which is the price of looking back no
+// further.
+func TestPCIeWatchBurstsThatAreNoVerdict(t *testing.T) {
+	// 17 errors in one window of every ten, nothing in between: over the
+	// budget of 16 a minute three times in 30 windows, at 1.7 a minute.
+	s := newLinkScript(t, 1e-12)
+	s.sample(0)
+	for i := 0; i < 240; i++ {
+		n := uint64(0)
+		if i%10 == 0 {
+			n = 17
+		}
+		if s.minute(n); s.state() != model.PCIeLinkSuspect {
+			t.Fatalf("window %d: state %q, want suspect: %+v", i+1, s.state(), s.last.Findings)
+		}
+	}
+	if f := s.last.Findings[0]; f.OverBudgetRuns != 3 || math.Abs(f.RecentErrorsPerMinute-1.7) > 1e-9 {
+		t.Fatalf("finding %+v, want 3 times over the budget at 1.7 errors a minute", f)
+	}
+
+	// A large burst every 15 minutes: two in any 30 windows.
+	s = newLinkScript(t, 1e-12)
+	s.sample(0)
+	for i := 0; i < 240; i++ {
+		n := uint64(0)
+		if i%15 == 0 {
+			n = 100_000
+		}
+		if s.minute(n); s.state() != model.PCIeLinkSuspect {
+			t.Fatalf("window %d: state %q, want suspect: %+v", i+1, s.state(), s.last.Findings)
+		}
+	}
+	if len(s.logs) != 1 {
+		t.Fatalf("log %q, want the one hint", s.logs)
+	}
+}
+
+// One error can add to more than one row: the kernel adds one to every row
+// whose status bit an error report carries, and a corrupted TLP sets
+// Receiver Error and Bad TLP. An end's errors are therefore its largest row,
+// not the sum: nine such errors a minute are nine, within Gen4 x16's 16.
+func TestPCIeWatchCountsAnEndByItsLargestRow(t *testing.T) {
+	s := newLinkScript(t, 1e-12)
+	s.sample(0)
+	for w := 0; w < 4; w++ {
+		for i := 0; i < 6; i++ {
+			add := uint64(1)
+			if i < 3 {
+				add = 2
+			}
+			s.dev.Correctable[pci.AERRxErr] += add
+			s.dev.Correctable[pci.AERBadTLP] += add
+			s.sample(10 * time.Second)
+		}
+		if s.state() != "" {
+			t.Fatalf("window %d: %+v for 9 errors a minute that each set two rows", w+1, s.last.Findings)
+		}
+	}
+	// What was read is still exported row by row.
+	if e := s.last.Errors; len(e) != 1 || e[0].Correctable != 2 {
+		t.Fatalf("errors %+v, want the 2 row increments of the last sample", e)
+	}
+	// Three rows of 10 at one end are at least 10 errors, not 30.
+	for w := 0; w < 4; w++ {
+		s.dev.Correctable[pci.AERRxErr] += 10
+		s.dev.Correctable[pci.AERBadDLLP] += 10
+		if s.minute(10); s.state() != "" {
+			t.Fatalf("window %d: %+v for three rows of 10 at one end", w+1, s.last.Findings)
+		}
+	}
+	// The largest row over the budget is over it, whatever the others hold.
+	s.dev.Correctable[pci.AERRxErr] += 5
+	if s.minute(17); s.state() != model.PCIeLinkSuspect || s.last.Findings[0].ErrorsPerMinute != 17 {
+		t.Fatalf("17 Bad TLPs and 5 Receiver Errors: %+v, want a suspect at 17 a minute", s.last.Findings)
+	}
+}
+
+// The evidence prints the rate and the budget the way they compared. Windows
+// are seldom exactly a minute long, so a count just over the budget is a
+// rate that rounds to the budget.
+func TestPCIeWatchEvidenceNeverSaysOverAtTheBudget(t *testing.T) {
+	s := newLinkScript(t, 1e-12)
+	s.sample(0)
+	for i := 0; i < 5; i++ {
+		s.sample(10 * time.Second)
+	}
+	// The sixth sample comes two seconds late, as a loaded daemon's does:
+	// 17 errors in 62 s are 16.45 a minute, over 16.
+	s.dev.Correctable[pci.AERBadTLP] += 17
+	s.sample(12 * time.Second)
+	if s.state() != model.PCIeLinkSuspect {
+		t.Fatalf("state %q, want suspect", s.state())
+	}
+	want := "16.5 link errors/min against a budget of 16/min in the last window; over the budget in the one window judged so far; 0000:3b:00.0: BadTLP=17; last window 62s"
+	if got := s.last.Findings[0].Evidence(); got != want {
+		t.Fatalf("evidence %q, want %q", got, want)
 	}
 }
 
@@ -274,11 +465,11 @@ func TestPCIeWatchBudgetFollowsTheFastestSpeedInTheWindow(t *testing.T) {
 	if s.state() != model.PCIeLinkSustained {
 		t.Fatalf("state %q for 10 errors a minute at Gen1 x16, want sustained", s.state())
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < model.PCIeRecentWindows; i++ {
 		s.minute(0)
 	}
 	if s.state() != "" {
-		t.Fatalf("finding %+v outlived three quiet windows", s.last.Findings)
+		t.Fatalf("finding %+v outlived %d quiet windows", s.last.Findings, model.PCIeRecentWindows)
 	}
 	// Each window now has one sample at Gen4, in its middle.
 	for i := 0; i < 4; i++ {
@@ -496,6 +687,71 @@ func TestPCIeWatchUnreadLinkIsNotJudged(t *testing.T) {
 	s.cfg.Speed = gen4
 	if s.minute(100); s.state() != model.PCIeLinkSuspect {
 		t.Fatalf("state %q once the link reads again, want suspect", s.state())
+	}
+}
+
+// A link at 64 GT/s corrects bit errors as it runs, and what its AER counters
+// count then is not established: its rate is held to no budget, which is
+// said once, and only its uncorrectable errors are judged.
+func TestPCIeWatchJudgesNoRateAbove32GT(t *testing.T) {
+	s := newLinkScript(t, 1e-12)
+	s.cfg.Speed, s.cfg.MaxSpeed, s.cfg.PortMaxSpeed = "64.0 GT/s PCIe", "64.0 GT/s PCIe", "64.0 GT/s PCIe"
+	s.sample(0)
+	for i := 0; i < 5; i++ {
+		if s.minute(1_000_000); s.state() != "" {
+			t.Fatalf("window %d: %+v for a rate with no budget", i+1, s.last.Findings)
+		}
+	}
+	if e := s.last.Errors; len(e) != 1 || e[0].BudgetPerMinute != 0 || e[0].Correctable == 0 {
+		t.Fatalf("errors %+v, want them counted with no budget", e)
+	}
+	if len(s.logs) != 1 || !strings.Contains(s.logs[0], "pcie.rnic0: trained at 64.0 GT/s PCIe: a link faster than 32 GT/s corrects bit errors as it runs") {
+		t.Fatalf("logs %q, want the reason once", s.logs)
+	}
+	s.port.Uncorrectable[pci.AERDLP]++
+	if s.minute(1_000_000); s.state() != model.PCIeLinkUncorrectable {
+		t.Fatalf("state %q after a Data Link Protocol Error, want uncorrectable", s.state())
+	}
+	f := s.last.Findings[0]
+	if f.BudgetPerMinute != 0 || f.RecentWindows != 0 || f.OverBudgetWindows != 0 {
+		t.Fatalf("finding %+v, want no budget and no window judged", f)
+	}
+	if ev := f.Evidence(); !strings.HasPrefix(ev, "1000000 link errors/min with no budget to judge them against; 0000:3a:00.0 (port): uncorrectable DLP=1; ") {
+		t.Fatalf("evidence %q", ev)
+	}
+	// A link that retrains to 32 GT/s is judged from its first window that
+	// holds no sample at 64 GT/s: the window it retrained in began on one.
+	s.cfg.Speed = gen5
+	if s.minute(1_000_000); s.last.Findings[0].RecentWindows != 0 {
+		t.Fatalf("findings %+v for the window the link retrained in, want it unjudged", s.last.Findings)
+	}
+	if s.minute(1_000_000); len(s.last.Findings) != 1 || s.last.Findings[0].OverBudgetWindows != 1 || s.last.Findings[0].BudgetPerMinute != 30.72 {
+		t.Fatalf("findings %+v once the link runs at 32 GT/s, want its first window over the budget", s.last.Findings)
+	}
+}
+
+// An uncorrectable finding ends because three windows counted no
+// uncorrectable error, and the log says that whatever became of the rate:
+// here the device left the bus, and the link's rate has no budget either.
+func TestPCIeWatchSaysWhyAnUncorrectableFindingEnds(t *testing.T) {
+	s := newLinkScript(t, 1e-12)
+	s.sample(0)
+	s.minute(0)
+	s.port.Uncorrectable[pci.AERSDES]++
+	s.cfgOK = false
+	s.devErr = fmt.Errorf("%w: %s: gone", pci.ErrAERAbsent, scriptDev)
+	if s.minute(0); s.state() != model.PCIeLinkUncorrectable {
+		t.Fatalf("state %q after the Surprise Down, want uncorrectable", s.state())
+	}
+	for s.state() != "" {
+		s.minute(0)
+		if len(s.logs) > 20 {
+			t.Fatalf("the finding does not end: %q", s.logs)
+		}
+	}
+	last := s.logs[len(s.logs)-1]
+	if want := "hostping: pcie: pcie.rnic0: no uncorrectable link error in the last 3 windows; the uncorrectable finding ends"; last != want {
+		t.Fatalf("log %q, want %q", last, want)
 	}
 }
 
@@ -1281,7 +1537,7 @@ func TestMonitorPCIeFromSysfs(t *testing.T) {
 	if f.Link != "pcie.gpu0" || f.State != model.PCIeLinkSustained || f.ErrorsPerMinute != 60 || f.OverBudgetWindows != 3 {
 		t.Fatalf("finding %+v, want pcie.gpu0 sustained at 60/min", f)
 	}
-	want := "60 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:41:00.0: BadTLP=60; last window 60s"
+	want := "60 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 3 windows (1 time, at most 3 in a row), 60/min across them; 0000:41:00.0: BadTLP=60; last window 60s"
 	if f.Evidence() != want {
 		t.Fatalf("evidence %q, want %q", f.Evidence(), want)
 	}

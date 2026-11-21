@@ -225,7 +225,7 @@ func TestDaemonPassiveReportOnALoadedHost(t *testing.T) {
 	if c.Code != model.CausePCIeLinkErrors || c.Confidence != model.ConfidenceMedium || !slices.Equal(c.Links, []string{"pcie.gpu3"}) || !slices.Equal(c.Endpoints, []string{"gpu3"}) {
 		t.Fatalf("cause %+v, want pcie_link_errors [medium] on pcie.gpu3", c)
 	}
-	if !strings.Contains(c.Evidence, "1000 link errors/min against a budget of 16/min, over it in 3 consecutive windows") || !strings.HasSuffix(c.Evidence, "read without a probe (counters only)") {
+	if !strings.Contains(c.Evidence, "1000 link errors/min against a budget of 16/min in the last window; over the budget in 3 of the last 3 windows (1 time, at most 3 in a row), 1000/min across them") || !strings.HasSuffix(c.Evidence, "read without a probe (counters only)") {
 		t.Fatalf("evidence %q", c.Evidence)
 	}
 	if len(rep.PCIeLinks) != 1 || rep.PCIeLinks[0].State != model.PCIeLinkSustained {
@@ -461,7 +461,8 @@ func TestPassiveWatchPace(t *testing.T) {
 	p := newPassiveWatch(cfg, g, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
 	t0 := time.Unix(1_700_000_000, 0)
 	finding := func(link string, state model.PCIeLinkState) model.PCIeLinkFinding {
-		return model.PCIeLinkFinding{Link: link, State: state, ErrorsPerMinute: 100, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60}
+		return model.PCIeLinkFinding{Link: link, State: state, ErrorsPerMinute: 100, BudgetPerMinute: 15.36, WindowSeconds: 60,
+			RecentWindows: 3, OverBudgetWindows: 3, OverBudgetRuns: 1, OverBudgetLongestRun: 3, RecentErrorsPerMinute: 100}
 	}
 	sample := func(fs ...model.PCIeLinkFinding) {
 		p.observe(&model.PCIePassive{Sampled: true, Findings: fs})

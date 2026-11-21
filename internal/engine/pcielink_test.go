@@ -45,7 +45,8 @@ func (r *probeRecorder) sweptRNICs() []string {
 
 func sustained(link string) model.PCIeLinkFinding {
 	return model.PCIeLinkFinding{
-		Link: link, State: model.PCIeLinkSustained, ErrorsPerMinute: 412, BudgetPerMinute: 15.36, OverBudgetWindows: 3, WindowSeconds: 60,
+		Link: link, State: model.PCIeLinkSustained, ErrorsPerMinute: 412, BudgetPerMinute: 15.36, WindowSeconds: 60,
+		RecentWindows: 3, OverBudgetWindows: 3, OverBudgetRuns: 1, OverBudgetLongestRun: 3, RecentErrorsPerMinute: 412,
 		Ends: []model.PCIeLinkEnd{{BDF: "0000:39:00.0", Correctable: map[string]uint64{"BadTLP": 412}}},
 	}
 }

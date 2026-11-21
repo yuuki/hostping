@@ -188,3 +188,57 @@ func TestDaemonReportsASurpriseDownWhileThePollsFail(t *testing.T) {
 		t.Fatalf("hostping.pcie.link.errors{pcie.rnic0,uncorrectable} = %d, want the 1 the port counted", n)
 	}
 }
+
+// A link that errs only now and then, as one that errs under traffic does:
+// its port counts 1200 Bad TLPs, 75 times the budget, in one minute of every
+// three and nothing in between, so it is never over the budget three windows
+// in a row. The third burst makes the verdict, and it is reported like any
+// standing cause from then on, without coming and going with the bursts.
+func TestDaemonReportsALinkThatErrsInBursts(t *testing.T) {
+	ld := newLinkDaemon(t, passiveConfig())
+	ld.run(time.Minute)
+	start := ld.clk
+	var got []timedReport
+	for minute := 0; minute < 60; minute++ {
+		for s := 0; s < 60; s++ {
+			if minute%3 == 0 && s%5 == 0 {
+				ld.port.Correctable[pci.AERBadTLP] += 100
+			}
+			got = append(got, ld.run(time.Second)...)
+		}
+	}
+	if len(got) == 0 {
+		t.Fatalf("no report in an hour of bursts; log %q", ld.logged("pcie:"))
+	}
+	// Each burst can fall across two windows, so the third is over by the
+	// ninth minute at the latest.
+	if first := got[0].at.Sub(start); first < 6*time.Minute || first > 9*time.Minute {
+		t.Fatalf("first report after %v, want it with the third burst", first)
+	}
+	for i, rep := range got {
+		c, ok := causeOf(rep.Report, model.CausePCIeLinkErrors)
+		if rep.Trigger != model.TriggerPassive || !ok || len(rep.Causes) != 1 || c.Confidence != model.ConfidenceMedium {
+			t.Fatalf("report %d: %+v, want a passive report of pcie_link_errors [medium]", i, rep.Report)
+		}
+		if len(rep.PCIeLinks) != 1 || rep.PCIeLinks[0].State != model.PCIeLinkSustained || rep.PCIeLinks[0].OverBudgetLongestRun > 2 {
+			t.Fatalf("report %d: findings %+v, want pcie.rnic0 sustained on windows that were never three in a row", i, rep.PCIeLinks)
+		}
+		if i > 0 {
+			if gap := rep.at.Sub(got[i-1].at); gap != passiveConfig().IdleInterval {
+				t.Fatalf("report %d comes %v after the one before, want one per --idle-interval", i, gap)
+			}
+		}
+	}
+	if len(got) < 10 {
+		t.Fatalf("%d reports in an hour, want one per --idle-interval from the verdict on", len(got))
+	}
+	if !strings.Contains(got[0].Causes[0].Evidence, "separate times, at most ") {
+		t.Fatalf("evidence %q does not say what the verdict stands on", got[0].Causes[0].Evidence)
+	}
+	if n, _ := ld.metrics().sum("hostping.diagnosis.count", "code", model.CausePCIeLinkErrors); n != int64(len(got)) {
+		t.Fatalf("hostping.diagnosis.count{pcie_link_errors} = %d for %d reports", n, len(got))
+	}
+	if lines := ld.logged("pcie: pcie.rnic0"); len(lines) != 2 || !strings.Contains(lines[0], "suspect") || !strings.Contains(lines[1], "sustained") {
+		t.Fatalf("log of the link %q, want the hint and the verdict, once each", lines)
+	}
+}
