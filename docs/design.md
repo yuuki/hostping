@@ -738,7 +738,7 @@ finds in a section of its own, described under
 
 It is opt-in for two reasons. Its thresholds have been exercised on the
 simulator and on synthetic series only, not on RDMA hardware. It also adds
-five series per path.
+eight series per path.
 
 ### What enters the history
 
@@ -770,13 +770,30 @@ clean. Left out are:
   (`recheck_cleared`, `locality_shift`), or that is `cpu_busy`. The sweep
   reading was high for the time or the NUMA node it was taken in;
 - a path that is `uncertain` with `host_shift`, `cpu_busy`, `rnic_busy` or
-  `no_path`. The steady states of a healthy idle host (`non_affinitive`,
-  `below_ceiling`, `no_ceiling`) are kept;
-- a path with no bandwidth, p50 or p99 reading.
+  `no_path`. A path that is `uncertain` with `non_affinitive`,
+  `below_ceiling` or `no_ceiling` is kept. It met its baseline, and the
+  reason only says that a baseline alone does not prove it healthy
+  ([Baselines](#baselines)). Its reading is as good as that of a `normal`
+  path, and a path that sits `below_ceiling` is one whose level is worth
+  following;
+- a path with no bandwidth, p50 or p99 reading, or with one outside 1 to
+  10^18 (bit/s, ns), which no probe reads.
 
 A reading is three signals taken by one probe: the bandwidth, and the
 small-message latency p50 and p99. A path that stops giving clean readings
 keeps its reference and becomes unknown.
+
+A reading depends on the probe settings it was taken with. `--small-msg` is
+the message the latency is the latency of, `--large-msg` and `--small-msg`
+together give the bandwidth (Eq.1), `--iters` is the number of samples the
+p50 and p99 are drawn from, and `--mem-warmup` changes what a memory path
+reads. A reference taken with other settings is not a reference for today's
+readings. The history therefore records these settings per path (the warm-up
+for memory paths only), and a path whose settings differ from the recorded
+ones starts a new history, with one log line. Comparing across the change
+would report every path as drifted hardware on the day an operator changed a
+flag, and the findings would never clear. No other flag changes what a clean
+reading measures.
 
 ### Daily values
 
@@ -796,13 +813,21 @@ and so on. The kept readings stay evenly spread over the day, and their
 median is an order statistic of real readings. A streaming estimate would
 need tuning and is not exact for a day with five runs.
 
-A path keeps the daily values of the last 30 calendar days. A day counts
+A path keeps its last 30 daily values, whatever their dates. A day counts
 once it is over, so the verdict of a path changes at most once a day.
+
+The window is counted in daily values and not in calendar days, and nothing
+leaves it for its age. A window of 30 calendar days would be emptied by one
+run under a clock that reads a month ahead ([Clock](#clock)), and a host that
+was off for a month would come back without the days its next verdict is
+compared with. Whether old days may still be judged is a separate rule: only
+days within the last 14 calendar days count as recent
+([Drift verdict](#drift-verdict)).
 
 ### Reference
 
-A path's reference is the median of its first 7 daily values, and their
-scatter, per signal. It is formed once and then kept.
+A path's reference is the median of its first 7 daily values, per signal.
+It is formed once and then kept.
 
 - It is the path's own level, not a baseline. A baseline is one value per
   distance class, and a calibrated one is a floor for a hardware class
@@ -811,16 +836,17 @@ scatter, per signal. It is formed once and then kept.
 - It does not move. A reference that followed the recent weeks would follow
   a slow drift and never see it. Against a fixed one, a decay of 5% over six
   months is reported when it has added up to 5%.
-- It needs 7 days with a clean reading inside 30 calendar days. A host that
-  is idle on fewer days than that never forms one, and its paths stay
-  unknown.
+- It needs 7 days with a clean reading. They need not follow each other: a
+  host that is idle on one day a week forms its reference in seven weeks.
 - A changed `--baseline-file` does not reset it. A fleet file is edited for
   reasons that have nothing to do with a host, such as a section for another
   hardware class, and a reset costs at least ten days in which nothing can be
   judged.
-- A kernel or firmware update does not reset it. A regression after an
-  update is one of the things tracking is there to show. The update is
-  recorded instead ([Software changes](#software-changes)).
+- A kernel, firmware or hostping update does not reset it. A regression
+  after an update is one of the things tracking is there to show. The update
+  is recorded instead ([Software changes](#software-changes)).
+- A change of the probe settings does reset it, for the paths the setting
+  applies to ([What enters the history](#what-enters-the-history)).
 - A path that reads better than its reference is `stable`, with a negative
   change. The reference is not raised. A rule that raised it would turn one
   unusually good week into a drift finding for the weeks after it.
@@ -843,9 +869,11 @@ What tracking cannot see:
   as a step on the day of the replacement. Reset the history after such a
   replacement ([operations](operations.md#tracking-slow-drift)).
 
-The history of a path the topology no longer has is kept for 90 days, in
-case the device comes back (a GPU that fell off the bus, an RNIC excluded
-for a while), and then dropped.
+The history of a path the topology no longer has is kept in case the device
+comes back (a GPU that fell off the bus, an RNIC excluded for a while). It is
+dropped once the daemon has observed idle runs on more than 90 days without
+the path. Days are counted by runs, not by the calendar, for the reason the
+window is: one run under a clock that reads ahead is one day.
 
 ### Drift verdict
 
@@ -871,54 +899,151 @@ The recent level of a signal is the median of the last 7 daily values that
 lie after the reference and within the last 14 calendar days. Its change is
 how far it lies on the worse side of the reference, as a fraction of the
 reference: lower for bandwidth, higher for the latencies. A signal becomes
-drifted when its change reaches the larger of:
+drifted when its change reaches its threshold, the larger of:
 
 - `--drift-th` (default 0.05, between 0.01 and 0.5), and
-- three times the path's day-to-day scatter, as a fraction of the
-  reference. The scatter is the larger of two estimates, described below:
-  that of the 7 reference values, and that of the daily values of the
-  window.
+- three times the scatter of the path's daily values, as a fraction of the
+  reference ([Scatter](#scatter)).
 
-It stops being drifted when its change falls below half of that. In between,
-it keeps the verdict it had. Without that band a path sitting at the
-threshold would change its verdict with every day's noise. The verdict
-before a gap is remembered through the gap for the same reason, but a path
-without 3 recent days is `unknown`, not what it was.
+A drifted signal keeps the threshold it drifted at. It stops being drifted
+when at most one of its recent days still reads worse than the reference by
+half of that threshold. The two rules differ on purpose:
+
+- Entering is decided on the median of the recent days, so that single bad
+  days do not report a path.
+- Leaving is decided on the days themselves. A device that is degraded on
+  some days and fine on others has a recent median that jumps between its
+  two levels as the share of bad days in the week changes. A rule on the
+  median would report the path and take the report back again and again
+  while the device is as degraded as before. Two bad days among the recent
+  seven keep the verdict.
+- Half the threshold, because a path that sits near the threshold must not
+  change its verdict with every day's noise. A path that hovers between
+  half the threshold and the threshold keeps the verdict it had.
+- The threshold it drifted at, because the days since then hold the
+  degradation itself. A threshold recomputed from them would rise with the
+  movement between the healthy and the degraded level, and the path would
+  clear a bar that it raised itself. The threshold of a drifted signal still
+  rises in two cases: when `--drift-th` is raised past it, and when the path
+  shows on the better side of its reference that it scatters by more
+  ([Scatter](#scatter)). A lower `--drift-th` does not lower it.
+
+The verdict before a gap is remembered through the gap, but a path without
+3 recent days is `unknown`, not what it was.
 
 Medians do the outlier handling. One bad run does not move its day, and
 three bad days in seven do not move the recent level or the reference.
 
-The scatter guards against a threshold that is inside a path's own noise.
-Two estimates are needed, because each misses what the other sees:
+The threshold in force is reported, because the rule above cannot be read
+off `--drift-th` alone. Every judged path has it per signal
+(`hostping.path.drift.threshold_ratio`), and every finding has it together
+with the number of recent days that read worse by half of it (`threshold`,
+`worse_days`, `recent_days`). A change above `--drift-th` that is not
+reported is a path whose threshold is higher, and a finding whose change is
+below its threshold is a signal that has not left yet.
 
-- The scatter of the reference: the interquartile range of the 7 reference
-  values divided by 1.349, the factor that makes it the standard deviation
-  of a normal distribution. It covers a path that does not read at one
-  level. On a host whose memory paths read at two levels from day to day
-  ([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)),
-  a week dominated by the lower level is not a drift. The median absolute
-  deviation was rejected for this. It ignores any minority of the values,
-  so four days at one level and three at another count as no scatter at
-  all. Seven values make a rough estimate, though. With it alone, 62
-  of 1000 synthetic paths at one level with a scatter of 3% were reported
-  within a year; with both estimates, 12
+When a signal stops being drifted, the log says which of two things
+happened. It `recovered` when its change is back below half the threshold it
+drifted at. Otherwise it `is no longer counted as drifted`, with the
+threshold now in force: `--drift-th` was raised, or the path has shown that
+it scatters. The path has not moved back in that case, and the log must not
+say that it has.
+
+### Scatter
+
+The scatter guards against a threshold that lies inside a path's own noise.
+It is an estimate of the standard deviation of the path's daily values
+around their level, read from the window once the window holds 8 values.
+
+It starts from the day-to-day scatter: the mean absolute difference between
+consecutive daily values, without the largest fifth of the differences,
+divided by 0.790 (the value of that mean for independent normal values with
+a standard deviation of 1). Differences of neighbours see neither a slow
+trend, whose share of one difference is small, nor a step, which is one
+large difference and is among those left out. The estimate can therefore be
+taken from the very days that drift. The mean of the differences is used
+and not their median, because it varies less from one window to the next:
+an estimate that comes out too small now and then is what reports noise as
+drift.
+
+Noise moves a path to both sides of its level. Degradation moves it to one.
+A device that is degraded on some days and fine on others moves as much
+from day to day as a noisy path does, but only ever to the worse side. That
+movement is the degradation, and counting it as scatter is what let a path
+that read 15% low on two days out of three raise its own threshold past 15%
+and be reported as recovered. The day-to-day scatter therefore counts only
+as far as the better side of the path bears it out: up to three times the
+larger of two estimates of the scatter that the better side shows.
+
+- Against the reference: how far the path's best days (the 10th percentile
+  of the window, counted from the better end) lie on the better side of the
+  reference, divided by 1.2816. That is the distance of that percentile from
+  the mean of a normal distribution, in standard deviations. It is 0 when
+  the best days are no better than the reference.
+- Among the better days: how far the best days lie from the good days (the
+  25th percentile), divided by 0.607, the distance between those two
+  percentiles of a normal distribution. This estimate does not depend on the
+  reference. The reference is a median of 7 values and lies off the path's
+  true level by a share of the scatter. Where it lies on the better side,
+  the first estimate alone takes real noise for degradation: with it alone,
+  60 of 1000 synthetic paths at one level with a scatter of 3% were
+  reported within a year, against 7 with both
   ([On synthetic series](#on-synthetic-series)).
-- The scatter of the window: the median absolute difference between
-  consecutive daily values of the last 30 days, divided by 0.954 (the same
-  normalization), once the window holds 8. Differences of neighbours see
-  neither a slow trend nor a step, so this estimate can be taken from the
-  very days that drift. It is steady, being drawn from up to 29
-  differences, but it does not see two levels that each last for days. It
-  also lags: a path that turns noisy after a quiet reference week can be
-  reported during the first weeks, until the window shows its scatter.
 
-The factor of three is on the scatter of single days, not on that of the two
-medians being compared, which is about two thirds of it. The bar is
-therefore about 4.5 standard deviations of the comparison.
+The factor of three is slack. Both estimates are drawn from the best few
+days of 30 and are rough, and real noise is not exactly symmetric.
+
+For a signal that is already drifted, only the estimate against the
+reference counts. Its window holds the degradation, and when most of its
+days are degraded, the "best days" are the few healthy ones against the many
+degraded ones, which the second estimate would take for scatter. Values on
+the better side of the reference cannot be degradation.
+
+The scatter of the 7 reference values is not used. An earlier form of this
+rule took the larger of it and the window's, so that a path which reads at
+two levels from day to day was not reported when the lower level took over.
+Seven values make a rough estimate, and one that never expired: two days
+that read 10% low among the seven raised the threshold of the path to about
+12% for good, and nothing showed it.
+
+What these choices cost:
+
+- A path that read at a lower level on a minority of its reference days and
+  reads there on most days now is reported, at a threshold of `--drift-th`.
+  Seven reference days cannot tell a path with two healthy levels
+  ([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management))
+  from a device that is degraded on some days, and the tracker takes the
+  pattern for the second. The earlier rule took it for the first, which hid
+  a throttling device. Where the two levels are healthy, the finding stays
+  until the lower level is rare again; raise `--drift-th` above the distance
+  between the levels there. A path that swings to both sides of its
+  reference is not affected: one that reads 6% low and 6% high in turn
+  after a quiet reference week is never reported.
+- A device that is degraded on a minority of days is reported in the weeks
+  in which its bad days are the majority of the recent seven, and the
+  report is taken back in a week with one bad day or none. On synthetic
+  paths that read 15% low on 30% of their days, a path is `drifted` on 32%
+  of the days and its verdict is taken back 2.6 times in four months. At
+  55% of the days it is `drifted` on 90% of the days and taken back 1.4
+  times, and at 75% on all of them and taken back 0.1 times. Under the
+  earlier rule the path at 55% was `drifted` on 32% of the days, and was
+  logged as recovered 5.3 times.
+- A host whose level differs by weekday can form its reference on the
+  better days and be reported on the others. On synthetic hosts that read
+  6% higher at weekends, none of 300 is reported when every day is read, or
+  when every day is read during the reference and only weekdays later. When
+  most of the 7 reference days are weekend days and only weekdays are read
+  later, 83 of 300 are. The earlier rule reported none of them, because the
+  scatter of the reference covered the weekday level.
+
+The factor of three on the scatter is on the scatter of single days, not on
+that of the two medians being compared, which is about two thirds of it. The
+threshold is therefore about 4.5 standard deviations of the comparison.
 
 ### Shape
 
-A drifted signal carries the shape of its change inside the 30-day window.
+A drifted signal carries the shape of its change inside the window of 30
+daily values.
 The shape separates the causes the operator looks for:
 
 - `step`: the best single step through the window accounts for at least two
@@ -953,24 +1078,38 @@ daily values. The same generator over 1000 paths each gives:
 
 | Series | Scatter 0.5% | 1% | 2% | 3% | 5% |
 | --- | --- | --- | --- | --- | --- |
-| Level only, one year: paths ever `drifted` | 0 | 0 | 3 | 12 | 22 |
-| Decay of 0.3% a day: day of the decay it is found on (median) | 21 | 21 | 25 | 34 | |
+| Level only, one year: paths ever `drifted` | 0 | 0 | 1 | 7 | 18 |
+| Decay of 0.3% a day: paths found within 40 days | 1000 | 1000 | 996 | 823 | |
+| Decay: day of the decay it is found on (median of those found) | 21 | 21 | 24 | 31 | |
 | Decay, 40 days in: findings read `gradual` | 100% | 100% | 99% | 93% | |
-| Decay, 25 days in (the window still holds days before it): `gradual` | 100% | 99% | 76% | 58% | |
-| Step of 8%: paths found within 30 days | 1000 | 1000 | 950 | 606 | |
-| Step of 8%: days until it is found (median) | 4 | 4 | 5 | 9 | |
+| Decay, 25 days in (the window still holds days before it): `gradual` | 100% | 97% | 73% | 64% | |
+| Step of 8%: paths found within 30 days | 1000 | 1000 | 989 | 690 | |
+| Step of 8%: days until it is found (median) | 4 | 4 | 5 | 10 | |
 
 Read with care:
 
+- The table scatters the bandwidth only. A path has three signals, and
+  each can be the one that is reported. With all three scattering by 1%,
+  2% and 3%, 0, 7 and 36 of 1000 paths are reported within a year.
 - A path whose daily medians scatter by 3% cannot show a step of 8%
-  reliably, because the bar is then about 9%. That is the price of the
-  noise guard, and the `change_ratio` series still shows the level.
+  reliably, because the threshold is then about 9%. That is the price of
+  the noise guard, and the `change_ratio` series still shows the level.
 - A young decay under a scatter of 2% or more reads as `step` in a quarter
   of the cases and more. The shape of a finding is evidence, not a verdict.
+- Scatter that is skewed to the worse side counts for less than normal
+  scatter of the same size, because only what shows on the better side
+  counts ([Scatter](#scatter)). A tail latency is skewed that way. With a
+  log-normal p99 whose logarithm scatters by 0.05, 0.1, 0.2 and 0.3, 13,
+  14, 23 and 33 of 1000 paths are reported within a year. The rule cannot
+  tell a long tail to the worse side from degradation on some days, and is
+  set to report the second.
 - Scatter that is not independent from day to day is not noise to this
-  rule. A level that wanders by ±3% over a quarter (a sine with a period of
-  90 days) is reported on one path in a thousand, and one that wanders by
-  ±4% on every second path, for the weeks it is low. Tracking cannot tell such a wander from a drift that
+  rule. A level that wanders by ±2% over a quarter (a sine with a period of
+  90 days, a random phase and a scatter of 0.5%) is not reported. One that
+  wanders by ±3% is reported on 283 of 1000 paths within a year, for 11% of
+  the days, and one that wanders by ±4% on 433, for 19% of the days: the
+  paths whose reference week fell near the top of the wander, in the weeks
+  near its bottom. Tracking cannot tell such a wander from a drift that
   reverses: both are a path that reads worse than in its reference week.
   Where healthy paths wander like that, raise `--drift-th`.
 
@@ -1023,36 +1162,72 @@ Under `--sim` there is no sensor and the status is always `unknown`.
 ### Software changes
 
 With each tracked run the daemon reads the kernel release
-(`/proc/sys/kernel/osrelease`) and each RNIC's firmware version
-(`fw_ver` of its verbs device). A value that differs from the stored one is
-recorded with the day it was first seen, and the last 16 changes are kept. A
-value that cannot be read is not a change.
+(`/proc/sys/kernel/osrelease`) and each RNIC's firmware version (`fw_ver` of
+its verbs device), and knows its own build (version and commit). A value
+that differs from the stored one is recorded with the day it was first seen.
+A value that cannot be read is not a change, and neither is a build that
+cannot name itself (a development build without a version and a commit).
 
-A finding lists the changes recorded since its reference began, so a `step`
-can be matched against the update that came with it. GPU driver versions and
-RNIC driver versions are not read.
+The hostping build is recorded because another build may read the same
+hardware differently: a changed probe, another default. Unlike a change of
+the probe settings it does not start a new history. Most upgrades change
+nothing about the readings, and a regression that comes with one should be
+seen against the reference from before it.
+
+The history keeps the last 4 changes of each component: of the kernel, of
+hostping, and of each RNIC's firmware. A single list of the last 16, as an
+earlier form had, lets two firmware updates of a host with eight RNICs push
+out the kernel change that a finding is about.
+
+A report names the changes once, for the whole drift section: those recorded
+since the oldest reference behind one of its findings began, so that a
+`step` can be matched against the update that came with it. Firmware changes
+of several RNICs from one version to another on one day are one entry with
+the number of RNICs. Naming them in every finding made a report with 32
+findings 63 kB. A section carries the 16 newest entries and counts the rest
+in `software_changes_omitted`. A report without a finding names none. GPU
+driver versions and RNIC driver versions are not read.
 
 ### Clock
 
-Days are counted by the wall clock, which can be wrong.
+Days are counted by the wall clock, which can be wrong. A host can boot with
+a reset RTC and read years behind until time synchronization corrects it, or
+read ahead for the same reason, and the daemon is not ordered after time
+synchronization. The history must come through both without an operator.
 
-- A clock that reads earlier than the newest day of the history (a host
-  that booted with a reset RTC, before time synchronization) records nothing.
-  Every path is `unknown` with `clock_behind` until the clock is past the
-  history again. Recording under it would put today's readings before days
-  that already exist.
-- A clock that stays behind for 2 days is taken to be right, and the history
-  ahead of it to have been recorded under a wrong clock. The daily values
-  dated after it are dropped, and a path whose reference reaches past it
-  starts over. One log line says how much went.
-- A clock that jumps ahead is a gap. The daily values leave the 30-day
-  window, the paths are `unknown` with `few_recent_days` until 3 new days
-  exist, and the reference is kept.
+- A clock that reads ahead for a run or two leaves readings dated in the
+  future. They cost nothing while the clock is wrong: the window is counted
+  in daily values and stale paths by days with a run, so nothing ages out
+  ([Daily values](#daily-values)). The paths are `unknown` with
+  `few_recent_days`, because the days before the jump are more than 14
+  calendar days back, and a log line names the jump. Once the clock is
+  corrected, it reads earlier than the newest day of the history.
+- A clock that reads earlier than the newest day of the history decides
+  between the two by how much the history holds after it. Readings dated
+  after the clock that span fewer than 2 days were taken under a clock that
+  read ahead for a short while. They are dropped at once, with one log line,
+  and tracking goes on in the same run.
+- Readings that span 2 days or more are a history, and the clock is the
+  suspect. Nothing is recorded under it, and every path is `unknown` with
+  `clock_behind`. Recording would put today's readings before days that
+  already exist. When the clock is past the history again, tracking goes on
+  as if nothing had happened.
+- A clock that stays behind for 2 days is taken to be right after all, and
+  the history ahead of it to have been recorded under a wrong clock. The
+  daily values dated after it are dropped, and a path whose reference
+  reaches past it starts over. One log line says how much went. The day the
+  clock was first seen behind is kept in the history file, so the 2 days do
+  not start over with every restart of the daemon.
 - A clock that steps back onto a day that is already closed adds nothing to
   that day.
 
-A host that is powered off for weeks is the same gap. Its paths are judged
-again, against the reference from before, once 3 days have been read.
+What is dropped is only what is dated after the clock. The reference and the
+daily values from before the wrong dates are kept, so one run under a wrong
+clock does not cost a host the weeks it took to form them.
+
+A host that is powered off for weeks looks like a clock that jumped ahead,
+and is handled the same way: its paths are judged again, against the
+reference and the window from before, once 3 days have been read.
 
 ### History file
 
@@ -1074,7 +1249,8 @@ included, takes a new version. At start the daemon reads it as follows:
   a downgrade that may be rolled forward again. A file that cannot be read
   is treated the same way.
 - Anything else the build cannot use (truncated, corrupt, written by
-  something else, a value outside what the tracker writes): the file is
+  something else, a value outside what the tracker writes, such as a
+  bandwidth or latency outside 1 to 10^18): the file is
   renamed to `drift.json.rejected`, replacing an earlier one, one log line
   says why, and a new history starts. A damaged file never heals, so leaving
   tracking off would need an operator on every such host. Keeping one
@@ -1082,21 +1258,33 @@ included, takes a new version. At start the daemon reads it as follows:
 
 The parser rejects unknown fields and checks every bound the tracker relies
 on, and a fuzz target holds it to that. A file larger than 32 MiB is not
-read.
+read. The bounds on a value are those of a reading: at least 1 (bit/s, ns)
+and at most 10^18. A positive value below that, which only a hand edit or a
+damaged file can hold, would make the change against it infinite, and JSON
+cannot carry that number: the report of every idle run would fail to encode.
+The fuzz target also encodes the report section of every history it accepts.
+As a second guard, a drift section that cannot be encoded is left out of the
+report, with a log line, so that the rest of the report is still written.
 
 The history is bounded:
 
-- per path, the reference, at most 30 daily values, at most 16 readings of
-  the current day and the verdict memory: about 3.5 kB;
-- at most 2048 paths. When the history is full, the stale path seen longest
-  ago makes room. A path of the topology is never dropped for one. A
-  topology with more paths than that leaves the rest `not_tracked`.
+- per path, the probe settings, the reference, at most 30 daily values, at
+  most 16 readings of the current day and the verdict memory: about
+  3.5 kB with the whole numbers hostping reads (bit/s, ns), and below 9 kB
+  whatever the numbers, so a full history stays far below the 32 MiB the
+  daemon reads;
+- at most 2048 paths. When the history is full, the path the topology has
+  lacked for the most days makes room. A path of the topology is never
+  dropped for one. A topology with more paths than that leaves the rest
+  `not_tracked`;
+- at most 4 software changes per component.
 
 The file is replaced atomically, as the state file is. Within a day it is
 written at most every 30 minutes, since only the readings of the current day
 change. It is written at once when a day rolls over, a verdict changes or a
 software change is seen, and on shutdown. A daemon that is killed loses at
-most 30 minutes of the current day's readings.
+most 30 minutes of the current day's readings. A temporary file that a
+killed daemon left behind is removed by the next write.
 
 ### How drift is reported
 
@@ -1114,16 +1302,22 @@ It is reported through:
 
 - the report's `drift` section, on every tracked run: the number of paths
   that are `stable`, `drifted` and `unknown`, the unknown paths per reason,
-  and one finding per drifted signal with its change, both levels, their
-  dates, the shape, the temperature evidence and the software changes
+  one finding per drifted signal with its change, its threshold, both
+  levels, their dates, the shape and the temperature evidence, and the
+  software changes since the oldest reference
   ([metrics.md](metrics.md#drift-section)). A report carries the 32 largest
   findings and counts the rest in `findings_omitted`, so an update that
-  moves every path does not add a finding per path to every report;
-- `hostping.path.drift.status_code`, `hostping.path.drift.reason_code` and
-  `hostping.path.drift.change_ratio`, which exist only with
+  moves every path does not add a finding per path to every report. Such a
+  section is about 16 kB;
+- `hostping.path.drift.status_code`, `hostping.path.drift.reason_code`,
+  `hostping.path.drift.change_ratio` and
+  `hostping.path.drift.threshold_ratio`, which exist only with
   `--drift-tracking`;
-- one log line when a signal drifts and one when it recovers;
-- the `HostpingPathDrift` alert, at severity `info`.
+- one log line when a signal drifts and one when it stops being drifted;
+- the `HostpingPathDrift` alert, at severity `info`. It counts the last
+  state of each path within 2 hours, so that a daemon restart, after which
+  the gauges are absent until the next idle run, neither resolves it nor
+  fires it a second time.
 
 Reports of other runs carry no `drift` section. Exit codes, existing causes
 and existing alerts are the same with and without the flag.

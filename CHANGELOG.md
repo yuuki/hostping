@@ -17,27 +17,37 @@ becomes the notes of its GitHub Release (see
   hotter, or a regression after an update. A path is `drifted` when
   the median of its last 7 idle days is `--drift-th` (new flag, default 0.05)
   worse than its reference, or three times its day-to-day scatter if that is
-  more, and `stable` again below half of that. Until it has been
+  more. Only scatter that shows on the better side of the path counts, so a
+  device that is degraded on some days and fine on others does not raise its
+  own threshold. The path is `stable` again when at most one of those days
+  still reads worse by half the threshold it drifted at. Until it has been
   read on 7 idle days and 3 more it is `unknown`, with the reason. A finding
   says whether the change is a `step` (with its date), `gradual` or
   `sustained`, what the temperature of the path's RNIC and GPU did between
-  the two periods (`rose`, `steady`, or `unknown` with the reason), and which
-  kernel and RNIC firmware changes were seen since the reference. Only
-  confirmed idle-trigger runs feed the history, and only paths the run judged
-  clean. See
+  the two periods (`rose`, `steady`, or `unknown` with the reason), which
+  threshold it is held against and how many of the recent days read worse.
+  The section names the kernel, hostping and RNIC firmware changes seen
+  since the reference. Only confirmed idle-trigger runs feed the history,
+  and only paths the run judged clean. A change of `--small-msg`,
+  `--large-msg`, `--iters` or, for memory paths, `--mem-warmup` starts the
+  paths it applies to over, because readings taken with other probe settings
+  are not comparable. See
   [Drift against the host's own history](docs/design.md#drift-against-the-hosts-own-history)
   and [Tracking slow drift](docs/operations.md#tracking-slow-drift). The
   thresholds and the temperature readings have not been exercised on RDMA
   hardware.
 - With `--drift-tracking`, the report of each confirmed idle-trigger run
-  carries a `drift` section, and three series are exported:
-  `hostping.path.drift.status_code`, `hostping.path.drift.reason_code` and
-  `hostping.path.drift.change_ratio` (5 series per path). A drift finding is
-  not a cause: `causes`, path and link statuses, exit codes and the existing
-  alerts are unchanged.
+  carries a `drift` section, and four series are exported:
+  `hostping.path.drift.status_code`, `hostping.path.drift.reason_code`,
+  `hostping.path.drift.change_ratio` and
+  `hostping.path.drift.threshold_ratio`, the threshold each change is held
+  against (8 series per path). A drift finding is not a cause: `causes`,
+  path and link statuses, exit codes and the existing alerts are unchanged.
 - `HostpingPathDrift` alert (severity `info`) and the
   `hostping:path_drift_status:count` recording rule in
-  `contrib/prometheus/hostping-rules.yml`, with a runbook section.
+  `contrib/prometheus/hostping-rules.yml`, with a runbook section. The alert
+  holds the last state of each path for 2 hours, so a daemon restart neither
+  resolves it nor fires it again.
 - Device temperatures for the drift findings are read from the hwmon sensors
   under each RNIC's and GPU's PCI function and, for a GPU without one, from
   `nvidia-smi` (one more bounded run per idle run, only with
@@ -49,6 +59,13 @@ becomes the notes of its GitHub Release (see
   codes of the two new drift gauges are named there with and without
   `--drift-tracking`. The Fig.2 `--sim` host scrapes 620 `hostping_*` series
   instead of 611.
+
+### Fixed
+
+- A daemon that was killed while writing a file in `--state-dir` (a crash, a
+  power loss) left a temporary file (`.state.json-*.tmp`) behind, and
+  nothing removed it. The next write now removes the temporary files of the
+  same file that are older than a minute.
 
 ## [0.2.5] - 2026-11-11
 

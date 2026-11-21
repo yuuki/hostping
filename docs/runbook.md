@@ -1060,16 +1060,22 @@ names it, and `hostping_diagnosis_count_total` does not count it.
 
 **Meaning.** For an hour, at least one path has read worse than the host's
 own first week of idle readings: the median of its last 7 idle days is at
-least `--drift-th` (default 5%) below its reference on bandwidth, or above
-it on small-message latency p50 or p99. The alert's value is the number of
-such paths. Severity `info`: nothing is broken by the standards of the
-baselines, and the verdict takes days to form and to clear.
+least its threshold below its reference on bandwidth, or above it on
+small-message latency p50 or p99. The threshold is `--drift-th` (default
+5%), or more on a path whose idle days scatter. The alert's value is the
+number of such paths. Severity `info`: nothing is broken by the standards of
+the baselines, and the verdict takes days to form and to clear.
 
-**Derivation.** `hostping_path_drift_status_code == 3`. A status gauge is
-the right signal here, unlike for the diagnoses
+**Derivation.** `last_over_time(hostping_path_drift_status_code[2h]) == 3`.
+A status gauge is the right signal here, unlike for the diagnoses
 ([Paging policy](#paging-policy)): the drift state is formed from daily
 medians of confirmed idle runs, one run cannot set it, and it changes at
-most once a day.
+most once a day. The alert holds the last state of each path for 2 hours.
+After a daemon restart the gauges are absent until the next confirmed idle
+run, and without the hold every restart would resolve the alert and fire it
+again an hour later. A path that recovers stops counting at once. A path
+whose series is gone for good (the device was removed, the daemon runs
+without `--drift-tracking`) stops counting after the 2 hours.
 
 **Find the path.** The report of the last idle run has a `findings` entry
 per drifted signal, and the journal has one line from the day it drifted:
@@ -1077,20 +1083,37 @@ per drifted signal, and the journal has one line from the day it drifted:
 ```bash
 journalctl -u hostping -o cat | grep 'hostping: drift:'
 jq -c 'select(.drift.findings) | .drift.findings[]' /var/log/hostping/reports.jsonl | tail
+# The software changes since the reference of those findings
+jq -c 'select(.drift.findings) | .drift.software_changes' /var/log/hostping/reports.jsonl | tail -1
 ```
 
 ```promql
 hostping_path_drift_status_code == 3
+# Each signal's change next to the threshold it is held against
 hostping_path_drift_change_ratio > 0.05
+hostping_path_drift_threshold_ratio
 ```
+
+A finding carries its `threshold` and how many of the recent days read worse
+than the reference by half of it (`worse_days` of `recent_days`):
+
+- `worse_days` equal to `recent_days`: the path reads low every day.
+- `worse_days` well below `recent_days`: the path is degraded on some days
+  and fine on others, for example a device that throttles under some
+  conditions. The verdict stays while 2 or more of the recent days read
+  worse, so the finding does not come and go with the share of bad days.
+- `change` below `threshold`: the signal drifted earlier and has not left
+  yet. It leaves when at most one recent day still reads worse by half the
+  threshold.
 
 **Check first**, by the finding's `shape`:
 
 - `step`, with a `step_on` date. Something changed on that day.
-  - `software_changes` lists the kernel and RNIC firmware changes hostping
-    saw since the reference. A change dated `step_on` is the first suspect.
-    GPU and RNIC driver versions are not recorded: check the package history
-    for that day.
+  - `software_changes` of the drift section lists the kernel, hostping and
+    RNIC firmware changes hostping saw since the reference. A change dated
+    `step_on` is the first suspect, a hostping upgrade included: another
+    build can read the same hardware differently. GPU and RNIC driver
+    versions are not recorded: check the package history for that day.
   - Was a device replaced or reseated on that day? A device swapped for the
     same model in the same slot continues the old history. If the new level
     is the device's normal one, start over
@@ -1128,19 +1151,36 @@ Then, for every shape:
 - Is the reference sound? A reference week that was unusually good (a host
   that was freshly rebooted and cold, say) makes every later week read as a
   drift. `reference_from` and `reference_to` say when it was taken.
+- Does the path have two healthy levels? Some platforms' memory paths read
+  at two levels from day to day
+  ([operations](operations.md#hosts-with-dynamic-uncore-or-memory-power-management)).
+  When the reference week was mostly at the higher one, the weeks at the
+  lower one are reported, with `worse_days` below `recent_days`. hostping
+  cannot tell that from a device that is degraded on some days. If you know
+  the two levels to be healthy, raise `--drift-th` above their distance.
 
 **Remediation.** None from hostping. A finding is a lead for hardware
 maintenance (cooling, reseating, a vendor case) or for reverting an update.
 If you accept the new level, start the path over.
 
-**When the alert does not fire although you expect it.** A path that is
-`unknown` is not counted as stable or as drifted.
+**When the alert does not fire although you expect it.**
+
+A path whose `hostping_path_drift_change_ratio` is above `--drift-th` and
+that is still `stable` has a higher threshold:
+`hostping_path_drift_threshold_ratio` shows it. Its idle days scatter to
+both sides of its level by more than a third of `--drift-th`, and the
+threshold is three times that scatter.
+
+A path that is `unknown` is not counted as stable or as drifted.
 `hostping_path_drift_reason_code` says why
 ([Tracking slow drift](operations.md#tracking-slow-drift)):
 
 - `collecting_reference`, `few_recent_days`: too little history. A path
   that turned `abnormal` stops entering the history and ends up here; the
-  diagnoses report it instead.
+  diagnoses report it instead. So does every path after a change of
+  `--small-msg`, `--large-msg` or `--iters`, and every memory path after a
+  change of `--mem-warmup`: readings taken with other probe settings are
+  not compared, and the paths start over.
 - `clock_behind`: the host's clock reads earlier than its history.
 - `history_blocked`: `drift.json` was written by a newer build or cannot be
   read. Nothing is tracked until that is fixed.
