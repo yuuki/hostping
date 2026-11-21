@@ -446,21 +446,20 @@ func sortedKeys(m map[string]int) []string {
 }
 
 // summarize counts paths per status and unknown paths per reason, puts the
-// findings worst first and attaches the software changes. A report holds at
-// most maxFindings findings and maxChanges changes (the newest): a change
-// that reaches every path at once (a kernel update) would otherwise add a
-// finding per path and signal to every report from then on.
+// findings worst first and attaches the software changes behind them (none
+// for a report without a finding). A report holds at most maxFindings
+// findings and maxChanges changes (the newest): a change that reaches every
+// path at once (a kernel update) would otherwise add a finding per path and
+// signal to every report from then on.
 func summarize(paths []model.PathDrift, findings []model.DriftFinding, changes []model.DriftSoftwareChange) model.DriftSummary {
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].Change > findings[j].Change })
 	s := model.DriftSummary{Findings: findings}
 	if len(findings) > maxFindings {
 		s.Findings, s.FindingsOmitted = findings[:maxFindings], len(findings)-maxFindings
 	}
-	if len(findings) > 0 {
-		s.SoftwareChanges = changes
-		if n := len(changes) - maxChanges; n > 0 {
-			s.SoftwareChanges, s.SoftwareChangesOmitted = changes[n:], n
-		}
+	s.SoftwareChanges = changes
+	if n := len(changes) - maxChanges; n > 0 {
+		s.SoftwareChanges, s.SoftwareChangesOmitted = changes[n:], n
 	}
 	why := map[model.DriftReason]int{}
 	for _, p := range paths {

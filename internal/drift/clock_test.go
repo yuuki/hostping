@@ -320,3 +320,78 @@ func TestClockStepsBackOntoClosedDay(t *testing.T) {
 		t.Fatalf("open = %+v, days = %+v", h.Open, h.Days)
 	}
 }
+
+// A clock that steps further back while it is behind starts the wait over
+// from the day it now reads: the two days are counted on the clock that
+// holds, not on one that has moved again.
+func TestClockStepsFurtherBackWhileBehind(t *testing.T) {
+	s := newSeries(t)
+	s.days(30, flat)
+	at := func(day int) time.Time { return start.Add(time.Duration(day) * 24 * time.Hour) }
+
+	s.now = at(10)
+	if got := s.observe(reading(1), Software{}); got.Reason != model.DriftClockBehind {
+		t.Fatalf("clock on day 10: %s (%s)", got.Status, got.Reason)
+	}
+	if since := s.tr.File().BehindSince; since == nil || *since != dayOf(start)+10 {
+		t.Fatalf("first seen behind on %v, want day 10", since)
+	}
+	// Five days further back: behind since then.
+	s.now = at(5)
+	if got := s.observe(reading(1), Software{}); got.Reason != model.DriftClockBehind {
+		t.Fatalf("clock on day 5: %s (%s)", got.Status, got.Reason)
+	}
+	if since := s.tr.File().BehindSince; since == nil || *since != dayOf(start)+5 {
+		t.Fatalf("first seen behind on %v, want day 5 after the second step", since)
+	}
+	s.now = at(6)
+	if got := s.observe(reading(1), Software{}); got.Reason != model.DriftClockBehind {
+		t.Fatalf("one day after the second step: %s (%s), want the wait still on", got.Status, got.Reason)
+	}
+	// Two days after the second step the clock has held: what is dated
+	// after it goes. Counted from the first step, it would not be due before
+	// day 12.
+	s.now = at(7)
+	if got := s.observe(reading(1), Software{}); got.Reason == model.DriftClockBehind {
+		t.Fatalf("two days after the second step: still %s (%s)", got.Status, got.Reason)
+	}
+	if !s.logged("the clock has stayed behind them for 2 days") {
+		t.Fatalf("no log line for the drop: %q", s.logs)
+	}
+	if h := s.tr.File().Paths[gpuPath.Key]; len(h.Days) != 8 || h.Days[7].Day != dayOf(start)+7 || h.Open != nil {
+		t.Fatalf("history after the drop: %d days, open %+v: want days 0 to 7 kept", len(h.Days), h.Open)
+	}
+}
+
+// What is dated on the day of the clock itself is not dated after it. The
+// open day of a path the topology lacks since that day stays when another
+// path's later readings are dropped.
+func TestClockBehindKeepsTheDayItReads(t *testing.T) {
+	tr := New(testTh, []PathIdent{gpuPath, memPath}, nil, File{})
+	both := []Sample{{RNIC: "rnic0", Endpoint: "gpu0", Reading: *reading(1)}, {RNIC: "rnic0", Endpoint: "mem0", Reading: *reading(1)}}
+	now := start
+	for i := 0; i < 10; i++ {
+		tr.Observe(now, both, Software{})
+		now = now.Add(24 * time.Hour)
+	}
+	// Day 10: both paths are read, twice. Then the daemon restarts without
+	// the memory path, and one run a day ahead reads the GPU path.
+	tr.Observe(now, both, Software{})
+	tr.Observe(now, both, Software{})
+	tr = New(testTh, []PathIdent{gpuPath}, nil, reload(t, tr.File()))
+	tr.Observe(now.Add(24*time.Hour), both[:1], Software{})
+	if g := tr.File().Paths[gpuPath.Key]; g.Open == nil || g.Open.Day != dayOf(now)+1 || len(g.Days) != 11 {
+		t.Fatalf("GPU path before the correction: %d days, open %+v", len(g.Days), g.Open)
+	}
+	res := tr.Observe(now, nil, Software{})
+	if len(res.Logs) != 1 || !containsAll(res.Logs[0], "dropped 1 daily summaries dated after "+dateOf(dayOf(now))) {
+		t.Fatalf("logs = %q", res.Logs)
+	}
+	g, m := tr.File().Paths[gpuPath.Key], tr.File().Paths[memPath.Key]
+	if len(g.Days) != 11 || g.Days[10].Day != dayOf(now) || g.Open != nil {
+		t.Fatalf("GPU path: %d days, open %+v: want day 10 kept as closed and the day after it gone", len(g.Days), g.Open)
+	}
+	if m == nil || m.Open == nil || m.Open.Day != dayOf(now) || m.Open.Seen != 2 || len(m.Days) != 10 {
+		t.Fatalf("memory path: %+v: want its open day 10 untouched", m)
+	}
+}
