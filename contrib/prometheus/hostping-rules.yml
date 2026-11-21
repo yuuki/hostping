@@ -201,12 +201,18 @@ groups:
       # week on bandwidth or latency. Unlike the status gauges of a run, this
       # one is safe to alert on: it is formed from daily medians of confirmed
       # idle runs, so a single run cannot set it and it moves once a day at
-      # most. A path whose drift state is unknown (code 2) is not counted. The
-      # hour keeps a restart, after which the series is absent until the next
-      # idle run, from resolving and re-firing the alert in quick succession.
+      # most. A path whose drift state is unknown (code 2) is not counted.
+      #
+      # After a daemon restart the series is absent until the next confirmed
+      # idle run, which a busy host can take a while to reach. last_over_time
+      # holds the last state of each path through such a gap of up to 2 hours,
+      # so a restart neither resolves the alert nor fires it a second time.
+      # A path that recovers reads 1 and stops counting at once. A path whose
+      # series is gone for good (the device was removed, the daemon is stopped
+      # or runs without --drift-tracking) stops counting after the 2 hours.
       - alert: HostpingPathDrift
         expr: |
-          count by (job, instance) (hostping_path_drift_status_code == 3)
+          count by (job, instance) (last_over_time(hostping_path_drift_status_code[2h]) == 3)
         for: 1h
         labels:
           severity: info
