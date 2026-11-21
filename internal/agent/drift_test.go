@@ -414,6 +414,7 @@ func TestOnlyIdleTriggerRunsAreTracked(t *testing.T) {
 		{Trigger: model.TriggerPeriodic, Mode: model.ModeBusy},
 		{Trigger: model.TriggerMutualTimeout, Mode: model.ModeIdle, HostIdle: true},
 		{Trigger: model.TriggerManual, Mode: model.ModeIdle, HostIdle: true},
+		{Trigger: model.TriggerIdle, Mode: model.ModeBusy},
 	} {
 		if paths := dd.drift.observe(&rep); paths != nil || rep.Drift != nil {
 			t.Errorf("trigger %s mode %s: %d paths, drift %+v, want neither", rep.Trigger, rep.Mode, len(paths), rep.Drift)
@@ -583,9 +584,8 @@ func TestDriftWithTemperatures(t *testing.T) {
 	}
 }
 
-// Within a day the history is written at most every driftSaveEvery, at once
-// when a day rolls over, and on shutdown; a run always reaches the file
-// before the daemon stops.
+// Within a day the history is written at most every 30 minutes, and on
+// shutdown; a run always reaches the file before the daemon stops.
 func TestDriftHistorySaves(t *testing.T) {
 	dd := startDriftDaemon(t, t.TempDir(), driftStart)
 	savedAt := func() time.Time { return dd.history(t).SavedAt }
@@ -596,15 +596,15 @@ func TestDriftHistorySaves(t *testing.T) {
 	}
 	dd.now = driftStart.Add(10 * time.Minute)
 	dd.run(t)
-	dd.now = driftStart.Add(20 * time.Minute)
+	dd.now = driftStart.Add(30*time.Minute - time.Second)
 	dd.run(t)
 	if !savedAt().Equal(driftStart) || seen() != 1 {
-		t.Fatalf("within %v: saved at %v with %d readings, want the first save still", driftSaveEvery, savedAt(), seen())
+		t.Fatalf("within 30 minutes: saved at %v with %d readings, want the first save still", savedAt(), seen())
 	}
-	dd.now = driftStart.Add(driftSaveEvery)
+	dd.now = driftStart.Add(30 * time.Minute)
 	dd.run(t)
 	if !savedAt().Equal(dd.now) || seen() != 4 {
-		t.Fatalf("after %v: saved at %v with %d readings", driftSaveEvery, savedAt(), seen())
+		t.Fatalf("after 30 minutes: saved at %v with %d readings", savedAt(), seen())
 	}
 	dd.now = dd.now.Add(time.Minute)
 	dd.run(t)
@@ -618,11 +618,100 @@ func TestDriftHistorySaves(t *testing.T) {
 	if savedAt().Equal(dd.now) {
 		t.Fatal("a history with nothing new was written again")
 	}
-	// The next day closes the first one: written at once.
-	dd.now = driftStart.Add(24 * time.Hour)
+}
+
+// A day that rolled over is written at once, however recent the last save:
+// the daily value it closed is what a crash must not lose.
+func TestDriftHistorySavesWhenTheDayChanges(t *testing.T) {
+	before := time.Date(2026, 3, 1, 23, 55, 0, 0, time.UTC)
+	dd := startDriftDaemon(t, t.TempDir(), before)
 	dd.run(t)
-	if h := dd.history(t); !h.SavedAt.Equal(dd.now) || len(h.Paths["0000:17:00.0->mem0of2/local_mem"].Days) != 1 {
-		t.Fatalf("after the day rolled over: saved at %v", h.SavedAt)
+	dd.now = before.Add(10 * time.Minute) // 00:05 of the next day
+	dd.run(t)
+	h := dd.history(t)
+	if !h.SavedAt.Equal(dd.now) || len(h.Paths["0000:17:00.0->mem0of2/local_mem"].Days) != 1 {
+		t.Fatalf("10 minutes later, on the next day: saved at %v with %d closed days, want it written at once",
+			h.SavedAt, len(h.Paths["0000:17:00.0->mem0of2/local_mem"].Days))
+	}
+	// The same 10 minutes inside a day are not written.
+	dd.now = dd.now.Add(10 * time.Minute)
+	dd.run(t)
+	if got := dd.history(t).SavedAt; got.Equal(dd.now) {
+		t.Fatal("a run 10 minutes after the last save, on the same day, was written")
+	}
+}
+
+// Whatever the tracker logs is written at once: a software change, a path
+// that drifted or recovered. Such a line is said once, and a crash before
+// the next save would otherwise lose what it says and say it again.
+func TestDriftHistorySavesWhatItLogs(t *testing.T) {
+	dd := startDriftDaemon(t, t.TempDir(), driftStart)
+	kernel := "6.8.0-45-generic"
+	dd.drift.software = func() (string, map[string]string) { return kernel, nil }
+	dd.run(t)
+	dd.now = driftStart.Add(5 * time.Minute)
+	dd.run(t)
+	if got := dd.history(t).SavedAt; !got.Equal(driftStart) {
+		t.Fatalf("a run with nothing to log was written after 5 minutes: saved at %v", got)
+	}
+	kernel = "6.8.0-48-generic"
+	dd.now = driftStart.Add(10 * time.Minute)
+	dd.run(t)
+	if !dd.logs.has("hostping: drift: kernel changed from 6.8.0-45-generic to 6.8.0-48-generic") {
+		t.Fatalf("no log line for the kernel change: %q", *dd.logs)
+	}
+	h := dd.history(t)
+	if !h.SavedAt.Equal(dd.now) || len(h.Events) != 1 || h.Software.Kernel != "6.8.0-48-generic" {
+		t.Fatalf("after a logged change: saved at %v with %d events, want it written at once", h.SavedAt, len(h.Events))
+	}
+}
+
+// The device temperatures are read when an idle-trigger run ends, and only
+// then: a run a mutual alarm started is not tracked, so nothing is read for
+// it. A confirmed run uses up what was read for it.
+func TestDriftTemperaturesAreReadPerIdleRun(t *testing.T) {
+	dd := startDriftDaemon(t, t.TempDir(), driftStart)
+	reads := 0
+	dd.drift.temps = func(context.Context) map[string]float64 {
+		reads++
+		return map[string]float64{"rnic0": 55}
+	}
+	ctx := context.Background()
+	dd.drift.runEnded(ctx, model.Report{Trigger: model.TriggerMutualTimeout, Mode: model.ModeIdle, HostIdle: true})
+	if reads != 0 || dd.drift.held != nil {
+		t.Fatalf("a mutual-alarm run read the temperatures: %d reads, held %v", reads, dd.drift.held)
+	}
+	dd.drift.runEnded(ctx, model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle, HostIdle: true})
+	if reads != 1 || dd.drift.held["rnic0"] != 55 {
+		t.Fatalf("an idle-trigger run: %d reads, held %v", reads, dd.drift.held)
+	}
+	dd.drift.discarded()
+
+	dd.run(t)
+	if reads != 2 || dd.drift.held != nil {
+		t.Fatalf("after a confirmed run: %d reads, held %v: want its temperatures used up", reads, dd.drift.held)
+	}
+	sample := func() drift.Reading {
+		o := dd.drift.tr.File().Paths["0000:17:00.0->mem0of2/local_mem"].Open
+		return o.Samples[len(o.Samples)-1]
+	}
+	if got := sample().TempRNIC; got == nil || *got != 55 {
+		t.Fatalf("the run's reading has temperature %v, want 55", got)
+	}
+	// A confirmed report that no run of this daemon ended (one restored
+	// after a restart) carries no temperature, not the one of the run
+	// before it.
+	clean := model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle, HostIdle: true, Paths: []model.PathMeasurement{{
+		RNIC: "rnic0", Endpoint: "mem0", EndpointKind: model.EndpointMemory,
+		SmallLatNsP50: 1400, SmallLatNsP99: 1600, BandwidthBPS: 200e9,
+		Status: model.PathNormal, LatencyStatus: model.LatencyNormal, LatencyReason: model.LatencyBySiblings,
+	}}}
+	dd.now = dd.now.Add(time.Minute)
+	if paths := dd.drift.observe(&clean); len(paths) != 40 {
+		t.Fatalf("observe returned %d paths", len(paths))
+	}
+	if got := sample().TempRNIC; got != nil {
+		t.Fatalf("a run without a temperature reading has %v", *got)
 	}
 }
 
