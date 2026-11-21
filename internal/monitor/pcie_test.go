@@ -670,8 +670,8 @@ func (noPCIe) Bus(context.Context) map[string]float64          { return nil }
 
 // The passive reading is taken once per --pcie-interval, not once per poll,
 // and it does not wait for the RNIC counters to be ready. What a sample
-// added is handed on exactly once, by the next poll that returns, so a poll
-// that fails loses nothing.
+// added is handed on exactly once, and by the poll that took it even when
+// that poll fails on another reading.
 func TestPollPCIeSamplesOncePerInterval(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.PCIeInterval = 10 * time.Second
@@ -697,24 +697,123 @@ func TestPollPCIeSamplesOncePerInterval(t *testing.T) {
 		t.Fatalf("poll at the interval: samples=%d pcie=%+v, want 7 new errors", h.samples, d.PCIe)
 	}
 
-	// Two samples fall into polls that fail; their errors arrive with the
-	// next poll that returns, summed, and once.
+	// Two samples fall into polls that fail on the GPUs: each failed poll
+	// hands its own sample on with the error, and nothing else.
 	h.failGPU = true
-	h.badTLP = 10
-	if _, err := h.step(10 * time.Second); err == nil {
-		t.Fatal("poll with an unreadable GPU succeeded")
-	}
-	h.badTLP = 15
-	if _, err := h.step(10 * time.Second); err == nil {
-		t.Fatal("poll with an unreadable GPU succeeded")
+	for _, tc := range []struct{ total, added uint64 }{{10, 3}, {15, 5}} {
+		h.badTLP = tc.total
+		d, err := h.step(10 * time.Second)
+		if err == nil {
+			t.Fatal("poll with an unreadable GPU succeeded")
+		}
+		if d.PCIe == nil || !d.PCIe.Sampled || len(d.PCIe.Errors) != 1 || d.PCIe.Errors[0].Correctable != tc.added {
+			t.Fatalf("failed poll: passive reading %+v, want the %d errors of its sample", d.PCIe, tc.added)
+		}
+		if d.Ready || d.Run || d.Rates != nil || d.BusyRNICs != nil {
+			t.Fatalf("failed poll: decision %+v, want nothing but the passive reading", d)
+		}
 	}
 	h.failGPU = false
-	d = h.mustStep(time.Second)
-	if !d.PCIe.Sampled || len(d.PCIe.Errors) != 1 || d.PCIe.Errors[0].Correctable != 8 {
-		t.Fatalf("first poll after the failures: %+v, want the 8 errors of the two lost samples", d.PCIe)
-	}
 	if d = h.mustStep(time.Second); d.PCIe.Sampled || len(d.PCIe.Errors) != 0 {
-		t.Fatalf("next poll: %+v, want nothing handed on twice", d.PCIe)
+		t.Fatalf("first poll after the failures: %+v, want nothing handed on twice", d.PCIe)
+	}
+}
+
+// orderSampler records the order of the reads of one poll, and can fail the
+// read of one RNIC.
+type orderSampler struct {
+	StaticSampler
+	calls *[]string
+	gone  string
+}
+
+func (s orderSampler) RNIC(ctx context.Context, n model.RNIC) (model.RNICCounters, error) {
+	*s.calls = append(*s.calls, "rnic")
+	if n.ID == s.gone {
+		return model.RNICCounters{}, fmt.Errorf("no RNIC counters readable for %s", n.Device)
+	}
+	return s.StaticSampler.RNIC(ctx, n)
+}
+
+func (s orderSampler) PCIeLinks(ctx context.Context) []PCIeLinkSample {
+	*s.calls = append(*s.calls, "pcie")
+	return s.StaticSampler.PCIeLinks(ctx)
+}
+
+// The RNIC counters are stamped with the poll's time, so nothing that can
+// take long may be read between that time and them: the passive reading,
+// whose sysfs files can wake a suspended bridge, comes after every RNIC. A
+// constant load would otherwise read too high on the polls that sample.
+func TestPollReadsThePassiveSignalsAfterTheRNICCounters(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.PCIeInterval = time.Second
+	var calls []string
+	s := orderSampler{StaticSampler: StaticSampler{PCIe: func(context.Context) []PCIeLinkSample { return nil }}, calls: &calls}
+	m := New(cfg, topology.Fig2(), s)
+	if _, err := m.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"rnic", "rnic", "rnic", "rnic", "pcie"}; !slices.Equal(calls, want) {
+		t.Fatalf("reads in the order %v, want %v", calls, want)
+	}
+}
+
+// An RNIC whose link went down leaves the bus, and every poll fails on its
+// counters from then on. The passive reading of the same poll, which may hold
+// the Surprise Down that explains it, is handed on with the error.
+func TestPollHandsThePassiveReadingOnWhenAnRNICCannotBeRead(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.PCIeInterval = 10 * time.Second
+	port := zeroErrors()
+	var calls []string
+	s := orderSampler{calls: &calls, StaticSampler: StaticSampler{PCIe: func(context.Context) []PCIeLinkSample {
+		return []PCIeLinkSample{{Link: "pcie.rnic1", Device: "rnic1", Ends: []PCIeEndSample{
+			{BDF: scriptPort, Port: true, Errors: pci.LinkErrors{Correctable: cloneRows(port.Correctable), Uncorrectable: cloneRows(port.Uncorrectable)}},
+			{BDF: scriptDev, Err: fmt.Errorf("%w: %s: gone", pci.ErrAERAbsent, scriptDev)},
+		}}}
+	}}}
+	m := New(cfg, topology.Fig2(), s)
+	m.Logf = func(string, ...any) {}
+	clock := time.Unix(1_700_000_000, 0)
+	m.SetClock(func() time.Time { return clock })
+	if d, err := m.Poll(context.Background()); err != nil || d.PCIe == nil {
+		t.Fatalf("first poll: %+v, %v", d, err)
+	}
+
+	// rnic1 leaves the bus; its port counts the Surprise Down.
+	s.gone = "rnic1"
+	m.Sampler = s
+	port.Uncorrectable[pci.AERSDES] = 1
+	var state model.PCIeLinkState
+	var uncorrectable uint64
+	for i := 0; i < 7; i++ {
+		clock = clock.Add(10 * time.Second)
+		d, err := m.Poll(context.Background())
+		if err == nil {
+			t.Fatalf("poll %d succeeded without rnic1's counters", i)
+		}
+		if d.PCIe == nil {
+			t.Fatalf("poll %d: failed with %v and handed no passive reading on", i, err)
+		}
+		if d.Ready || d.Run || len(d.Rates) != 0 {
+			t.Fatalf("poll %d: decision %+v, want nothing but the passive reading", i, d)
+		}
+		for _, e := range d.PCIe.Errors {
+			uncorrectable += e.Uncorrectable
+		}
+		if len(d.PCIe.Findings) == 1 {
+			state = d.PCIe.Findings[0].State
+		}
+	}
+	if state != model.PCIeLinkUncorrectable || uncorrectable != 1 {
+		t.Fatalf("state %q and %d uncorrectable errors handed on by polls that failed; want the uncorrectable finding and the 1 error, once", state, uncorrectable)
+	}
+
+	// A canceled poll is a shutdown: it hands nothing on.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if d, err := m.Poll(ctx); err == nil || d.PCIe != nil {
+		t.Fatalf("canceled poll: %+v, %v", d, err)
 	}
 }
 
@@ -1185,5 +1284,36 @@ func TestMonitorPCIeFromSysfs(t *testing.T) {
 	want := "60 link errors/min against a budget of 16/min, over it in 3 consecutive windows; 0000:41:00.0: BadTLP=60; last window 60s"
 	if f.Evidence() != want {
 		t.Fatalf("evidence %q, want %q", f.Evidence(), want)
+	}
+}
+
+// The live sampler: an RNIC whose RDMA device and netdev are gone from sysfs
+// (the card left the bus) makes every poll an error, and the passive reading
+// of the PCI tree, which is still there, is handed on with it.
+func TestSysfsPollHandsThePassiveReadingOnWithoutTheRNIC(t *testing.T) {
+	root := pcieTree(t) // a PCI tree with AER files and no class/infiniband
+	g := pcieTreeGraph()
+	g.RNICs = []model.RNIC{{ID: "rnic1", Device: "mlx5_1", Netdev: "eth1", PCIeBDF: "0000:5b:00.0", LineRate: 200e9}}
+	specs, _ := PCIeLinkSpecs(root, g)
+	cfg := config.Defaults()
+	cfg.PCIeInterval = time.Second
+	m := New(cfg, g, SysfsSampler{Graph: topology.Graph{RNICs: g.RNICs}, Sysroot: root, PCIe: specs})
+	m.Logf = func(string, ...any) {}
+	clock := time.Unix(1_700_000_000, 0)
+	m.SetClock(func() time.Time { return clock })
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(time.Second)
+		d, err := m.Poll(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "mlx5_1") {
+			t.Fatalf("poll %d: err %v, want the unreadable RNIC", i, err)
+		}
+		if d.PCIe == nil || !d.PCIe.Sampled {
+			t.Fatalf("poll %d: passive reading %+v, want the sample it took", i, d.PCIe)
+		}
+		// The second sample differences the first: every link with AER
+		// counters has its series, at no error.
+		if i == 1 && len(d.PCIe.Errors) == 0 {
+			t.Fatalf("poll %d: no link differenced: %+v", i, d.PCIe)
+		}
 	}
 }

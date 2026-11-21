@@ -403,26 +403,30 @@ func sumRows(m map[string]uint64) uint64 {
 	return n
 }
 
-// pollPCIe takes a passive sample when one is due and returns the passive
-// reading this poll hands on: the state after the last sample, with what the
-// samples since the last delivered poll added. It is nil when the passive
-// reading is off or the sampler has none.
+// pollPCIe takes a passive sample when one is due at now, the poll's time,
+// and returns the passive reading this poll hands on: the state after the
+// last sample, with what the samples since the last delivered poll added. It
+// is nil when the passive reading is off, the sampler has none, or the poll
+// was canceled.
 func (m *Monitor) pollPCIe(ctx context.Context, now time.Time) *model.PCIePassive {
 	ps, ok := m.Sampler.(PCIeSampler)
-	if !ok || m.Cfg.PCIeInterval <= 0 {
+	if !ok || m.Cfg.PCIeInterval <= 0 || ctx.Err() != nil {
 		return nil
 	}
 	if m.pcie == nil {
 		m.pcie = newPCIeWatch(m.Cfg.PCIeBER, m.logf)
 	}
 	if m.pcieLast.IsZero() || now.Sub(m.pcieLast) >= m.Cfg.PCIeInterval {
+		// The counters are differenced over the time between their own
+		// reads, which the RNIC reads of this poll came before.
+		at := m.now()
 		samples := ps.PCIeLinks(ctx)
 		if ctx.Err() != nil {
 			// A read cut short is no reading: nothing is differenced.
 			return nil
 		}
 		m.pcieLast = now
-		got := m.pcie.observe(now, samples)
+		got := m.pcie.observe(at, samples)
 		m.pciePending = mergePCIeErrors(m.pciePending, got.Errors)
 		m.pcieState = got
 		m.pcieSampled = true
@@ -433,10 +437,20 @@ func (m *Monitor) pollPCIe(ctx context.Context, now time.Time) *model.PCIePassiv
 }
 
 // deliveredPCIe marks the passive reading of the poll that just returned as
-// handed on, so its error deltas are not handed on again. A poll that fails
-// keeps them for the next one.
+// handed on, so its error deltas are not handed on again.
 func (m *Monitor) deliveredPCIe() {
 	m.pciePending, m.pcieSampled = nil, false
+}
+
+// failedPoll is the Decision of a poll that returns an error: the passive
+// reading and nothing else. A canceled poll hands on nothing and keeps what
+// the samples added for the next one.
+func (m *Monitor) failedPoll(ctx context.Context, passive *model.PCIePassive) Decision {
+	if passive == nil || ctx.Err() != nil {
+		return Decision{}
+	}
+	m.deliveredPCIe()
+	return Decision{PCIe: passive}
 }
 
 // mergePCIeErrors adds the per-link deltas of add to pending, in link order

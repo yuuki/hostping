@@ -83,7 +83,8 @@ type Decision struct {
 	CPUUnknown bool
 	// PCIe is the passive reading of the host's PCIe links (--pcie-interval);
 	// nil when it is off or the sampler has none. It does not depend on
-	// Ready: no RNIC counter is behind it.
+	// Ready, nor on the poll succeeding: no RNIC counter is behind it, so
+	// it is the one field Poll also fills when it returns an error.
 	PCIe *model.PCIePassive
 	// ProbeLinks, on a pcie_link run, is the PCIe links with a passive
 	// finding the run answers, and ProbeRNICs the RNICs it sweeps: those
@@ -254,6 +255,11 @@ func (m *Monitor) SkipRun() { m.cad.skipRun() }
 // (--state-dir), so a restart does not pull the next full mesh forward.
 func (m *Monitor) ResumeIdle(t time.Time) { m.cad.lastIdle = t }
 
+// Poll reads the host once and decides whether a run starts. A poll that
+// fails returns the error of the reading that failed and a Decision that
+// holds nothing but the passive PCIe reading (Decision.PCIe), which stands on
+// other files: an RNIC that left the bus fails every poll, and what its PCIe
+// link counted is why. A canceled poll returns no reading at all.
 func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 	// A canceled poll (shutdown) reads nothing: no counter source is
 	// classified, so nothing is logged as having become unreadable.
@@ -272,13 +278,14 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		bp.PollBus(ctx, reset)
 	}
 	now := m.now()
-	// Before the RNIC counters, so a poll that fails on them still advances
-	// the passive state; what it added is handed on by the next poll that
-	// returns a Decision.
-	passive := m.pollPCIe(ctx, now)
 	rn, err := m.pollRNICs(ctx, now)
+	// After the RNIC counters, which are stamped with now: a passive read
+	// that takes long (a bridge that resumes from runtime suspend) between
+	// that timestamp and the counters it stamps would bend every RNIC's
+	// rate. And whether or not the counters read.
+	passive := m.pollPCIe(ctx, now)
 	if err != nil {
-		return Decision{}, err
+		return m.failedPoll(ctx, passive), err
 	}
 
 	gpus, err := m.Sampler.GPUs(ctx)
@@ -286,7 +293,7 @@ func (m *Monitor) Poll(ctx context.Context) (Decision, error) {
 		err = ctx.Err()
 	}
 	if err != nil {
-		return Decision{}, err
+		return m.failedPoll(ctx, passive), err
 	}
 	gpuIdle, gpuUnknown, busyGPUs, modes := gpuVerdict(gpus)
 

@@ -287,6 +287,14 @@ func (d *daemon) tick(ctx context.Context) bool {
 		d.live.Polled()
 		d.tel.RecordPoll(ctx, time.Now(), err)
 		d.logf("monitor: %v", err)
+		// The passive PCIe reading does not stand on what failed, and may be
+		// what explains it: an RNIC whose link went down leaves the bus, and
+		// every poll fails on its counters from then on. A held idle-mode
+		// report does not put the passive one off here: only a poll that
+		// succeeds settles it, and nothing says when one will.
+		d.tel.RecordPCIe(ctx, dec.PCIe)
+		d.passive.observe(dec.PCIe)
+		d.reportPassive(ctx, dec)
 		return true
 	}
 	d.live.Polled()
