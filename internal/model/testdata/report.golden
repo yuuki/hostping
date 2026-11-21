@@ -176,6 +176,9 @@
         "signal": "bandwidth",
         "shape": "step",
         "change": 0.08,
+        "threshold": 0.05,
+        "worse_days": 6,
+        "recent_days": 7,
         "reference": 200000000000,
         "recent": 184000000000,
         "reference_from": "2025-11-01",
@@ -194,16 +197,25 @@
               "recent_c": 57.5
             }
           ]
-        },
-        "software_changes": [
-          {
-            "on": "2025-12-17",
-            "component": "kernel",
-            "from": "6.8.0-45-generic",
-            "to": "6.8.0-48-generic"
-          }
-        ]
+        }
       }
-    ]
+    ],
+    "findings_omitted": 2,
+    "software_changes": [
+      {
+        "on": "2025-12-10",
+        "component": "firmware",
+        "from": "28.39.1002",
+        "to": "28.41.1000",
+        "devices": 8
+      },
+      {
+        "on": "2025-12-17",
+        "component": "kernel",
+        "from": "6.8.0-45-generic",
+        "to": "6.8.0-48-generic"
+      }
+    ],
+    "software_changes_omitted": 1
   }
 }

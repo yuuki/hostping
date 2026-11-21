@@ -31,25 +31,26 @@ func TestMedian(t *testing.T) {
 	}
 }
 
-func TestScatter(t *testing.T) {
-	near := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
-	// Seven equally spaced values: quartiles at positions 1.5 and 4.5.
-	if got := scatter([]float64{1, 2, 3, 4, 5, 6, 7}); !near(got, 3/iqrSigmas) {
-		t.Errorf("ladder: %v, want %v", got, 3/iqrSigmas)
+// The quantile is read by linear interpolation between the two nearest
+// order statistics, whatever the order of the values.
+func TestQuantile(t *testing.T) {
+	ladder := []float64{50, 10, 40, 20, 30} // 10..50
+	for _, c := range []struct {
+		q, want float64
+	}{
+		{0, 10}, {0.10, 14}, {0.25, 20}, {0.5, 30}, {0.75, 40}, {1, 50},
+	} {
+		if got := quantile(ladder, c.q); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("quantile(10..50, %v) = %v, want %v", c.q, got, c.want)
+		}
 	}
-	// One outlier in seven moves neither quartile.
-	if got := scatter([]float64{10, 10, 10, 10, 10, 10, 1}); got != 0 {
-		t.Errorf("one outlier: %v, want 0", got)
+	if ladder[0] != 50 {
+		t.Fatalf("quantile reordered its input: %v", ladder)
 	}
-	// A minority level of three in seven is scatter, which a median
-	// absolute deviation would call 0.
-	if got := scatter([]float64{10, 9, 10, 9, 10, 9, 10}); !near(got, 1/iqrSigmas) {
-		t.Errorf("two levels: %v, want %v", got, 1/iqrSigmas)
-	}
-	if got := scatter(nil); got != 0 {
+	if got := quantile(nil, 0.5); got != 0 {
 		t.Errorf("no values: %v", got)
 	}
-	if got := scatter([]float64{5}); got != 0 {
+	if got := quantile([]float64{7}, 0.10); got != 7 {
 		t.Errorf("one value: %v", got)
 	}
 }
@@ -132,9 +133,12 @@ func TestDayScatter(t *testing.T) {
 	if got := dayScatter([]float64{1, 2, 1, 2, 1, 2, 1}); got != 0 {
 		t.Errorf("fewer than %d values: %v, want 0", minScatterDays, got)
 	}
+	// Differences of 1 throughout: their mean is 1 with or without the
+	// largest fifth, and 1 over 0.790 as a standard deviation.
+	const want = 1 / 0.790
 	zigzag := []float64{1, 2, 1, 2, 1, 2, 1, 2}
-	if got := dayScatter(zigzag); !near(got, 1/diffSigmas) {
-		t.Errorf("zigzag: %v, want %v", got, 1/diffSigmas)
+	if got := dayScatter(zigzag); !near(got, want) {
+		t.Errorf("zigzag: %v, want %v", got, want)
 	}
 	var onRamp, onStep []float64
 	for i, v := range zigzag {
@@ -144,12 +148,12 @@ func TestDayScatter(t *testing.T) {
 		}
 		onStep = append(onStep, v)
 	}
-	if got := dayScatter(onStep); !near(got, 1/diffSigmas) {
-		t.Errorf("zigzag on a step: %v, want the zigzag's %v", got, 1/diffSigmas)
+	if got := dayScatter(onStep); !near(got, want) {
+		t.Errorf("zigzag on a step: %v, want the zigzag's %v", got, want)
 	}
 	// A trend adds no more than its slope to a difference: 0.1 a day here.
-	if got := dayScatter(onRamp); got < 0.9/diffSigmas || got > 1.1/diffSigmas+1e-9 {
-		t.Errorf("zigzag on a ramp: %v, want within the slope of %v", got, 1/diffSigmas)
+	if got := dayScatter(onRamp); got < 0.9*want || got > 1.1*want+1e-9 {
+		t.Errorf("zigzag on a ramp: %v, want within the slope of %v", got, want)
 	}
 	if got := dayScatter([]float64{5, 5, 5, 5, 5, 5, 5, 5, 5}); got != 0 {
 		t.Errorf("constant: %v", got)

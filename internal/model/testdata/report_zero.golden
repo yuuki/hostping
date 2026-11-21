@@ -99,6 +99,9 @@
         "signal": "",
         "shape": "",
         "change": 0,
+        "threshold": 0,
+        "worse_days": 0,
+        "recent_days": 0,
         "reference": 0,
         "recent": 0,
         "reference_from": "",
@@ -115,15 +118,15 @@
               "recent_c": 0
             }
           ]
-        },
-        "software_changes": [
-          {
-            "on": "",
-            "component": "",
-            "from": "",
-            "to": ""
-          }
-        ]
+        }
+      }
+    ],
+    "software_changes": [
+      {
+        "on": "",
+        "component": "",
+        "from": "",
+        "to": ""
       }
     ]
   }

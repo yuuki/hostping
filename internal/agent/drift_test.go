@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/drift"
 	"github.com/yuuki/hostping/internal/engine"
@@ -41,8 +43,12 @@ type driftDaemon struct {
 	logs *logLines
 }
 
+// driftBuild names the hostping build of the test daemons.
+const driftBuild = "0.2.6 (abc1234)"
+
 func driftCfg(dir string) config.Config {
 	cfg := config.Defaults()
+	cfg.Sim = true
 	cfg.IdleInterval = time.Hour
 	cfg.StateDir = dir
 	cfg.DriftTracking = true
@@ -53,7 +59,14 @@ func driftCfg(dir string) config.Config {
 // daemon wrote the history there before. at is the drift clock it starts on.
 func startDriftDaemon(t *testing.T, dir string, at time.Time) *driftDaemon {
 	t.Helper()
-	cfg := driftCfg(dir)
+	return startDriftDaemonWith(t, driftCfg(dir), driftBuild, at)
+}
+
+// startDriftDaemonWith is startDriftDaemon with the configuration and the
+// hostping build given.
+func startDriftDaemonWith(t *testing.T, cfg config.Config, build string, at time.Time) *driftDaemon {
+	t.Helper()
+	dir := cfg.StateDir
 	g := topology.Fig2()
 	w := sim.New(g)
 	eng := engine.New(cfg, g, sim.Prober{World: w})
@@ -70,7 +83,7 @@ func startDriftDaemon(t *testing.T, dir string, at time.Time) *driftDaemon {
 		t.Fatal(err)
 	}
 	dd := &driftDaemon{testDaemon: td, world: w, dir: dir, out: &bytes.Buffer{}, now: at, logs: &logLines{}}
-	dt, err := newDriftTracker(cfg, g, func() time.Time { return dd.now }, dd.logs.logf)
+	dt, err := newDriftTracker(cfg, g, build, func() time.Time { return dd.now }, dd.logs.logf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,16 +122,22 @@ type driftReport struct {
 			Signal      string  `json:"signal"`
 			Shape       string  `json:"shape"`
 			Change      float64 `json:"change"`
+			Threshold   float64 `json:"threshold"`
+			WorseDays   int     `json:"worse_days"`
+			RecentDays  int     `json:"recent_days"`
 			Since       string  `json:"since"`
 			Temperature struct {
 				Status string `json:"status"`
 				Reason string `json:"reason"`
 			} `json:"temperature"`
-			SoftwareChanges []struct {
-				Component string `json:"component"`
-				To        string `json:"to"`
-			} `json:"software_changes"`
 		} `json:"findings"`
+		SoftwareChanges []struct {
+			On        string `json:"on"`
+			Component string `json:"component"`
+			From      string `json:"from"`
+			To        string `json:"to"`
+			Devices   int    `json:"devices"`
+		} `json:"software_changes"`
 	} `json:"drift"`
 }
 
@@ -415,12 +434,11 @@ func TestDriftTrackingIsOptIn(t *testing.T) {
 	once := driftCfg(dir)
 	once.Once = true
 	for name, cfg := range map[string]config.Config{"flag off": off, "one-shot": once} {
-		dt, err := newDriftTracker(cfg, g, time.Now, nolog)
+		dt, err := newDriftTracker(cfg, g, driftBuild, time.Now, nolog)
 		if err != nil || dt != nil {
 			t.Fatalf("%s: tracker %v, err %v, want none", name, dt, err)
 		}
 		rep := model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle, HostIdle: true}
-		dt.live(g)
 		dt.runEnded(context.Background(), rep)
 		dt.discarded()
 		if paths := dt.observe(&rep); paths != nil || rep.Drift != nil {
@@ -442,14 +460,14 @@ func TestDriftTrackingIsOptIn(t *testing.T) {
 		t.Fatalf("report without --drift-tracking: %s", out.Bytes())
 	}
 	ms := td.collect(t)
-	for _, name := range []string{"hostping.path.drift.status_code", "hostping.path.drift.reason_code", "hostping.path.drift.change_ratio"} {
+	for _, name := range []string{"hostping.path.drift.status_code", "hostping.path.drift.reason_code", "hostping.path.drift.change_ratio", "hostping.path.drift.threshold_ratio"} {
 		if _, ok := ms[name]; ok {
 			t.Errorf("%s exported without --drift-tracking", name)
 		}
 	}
 	// Tracking without somewhere to keep the history fails the start.
 	noDir := driftCfg("")
-	if _, err := newDriftTracker(noDir, g, time.Now, nolog); err == nil || !strings.Contains(err.Error(), "--drift-tracking needs --state-dir") {
+	if _, err := newDriftTracker(noDir, g, driftBuild, time.Now, nolog); err == nil || !strings.Contains(err.Error(), "--drift-tracking needs --state-dir") {
 		t.Fatalf("--drift-tracking without --state-dir: %v", err)
 	}
 	if _, err := newRig(noDir, nolog); err == nil || !strings.Contains(err.Error(), "--drift-tracking needs --state-dir") {
@@ -543,8 +561,9 @@ func TestDriftWithTemperatures(t *testing.T) {
 	if f.Temperature.Status != "rose" || f.Shape != "step" {
 		t.Fatalf("finding = %+v, want a step with a temperature that rose", f)
 	}
-	if len(f.SoftwareChanges) != 1 || f.SoftwareChanges[0].Component != "kernel" || f.SoftwareChanges[0].To != "6.8.0-48-generic" {
-		t.Fatalf("software changes = %+v", f.SoftwareChanges)
+	// The change is named once for the section, not once per finding.
+	if sw := rep.Drift.SoftwareChanges; len(sw) != 1 || sw[0].Component != "kernel" || sw[0].From != "6.8.0-45-generic" || sw[0].To != "6.8.0-48-generic" || sw[0].On != "2026-03-13" || sw[0].Devices != 0 {
+		t.Fatalf("software changes = %+v", sw)
 	}
 	if !dd.logs.has("hostping: drift: kernel changed from 6.8.0-45-generic to 6.8.0-48-generic") {
 		t.Fatalf("no log line for the kernel change: %q", *dd.logs)
@@ -632,24 +651,300 @@ func TestDriftHistorySaveFailure(t *testing.T) {
 	}
 }
 
-// The tracker reads the live host only where there is one.
+// The tracker reads the live host only where there is one: under --sim
+// there are no sensors, no kernel and no firmware to read, and the hostping
+// build is all the software it knows.
 func TestDriftLiveReaders(t *testing.T) {
 	g := topology.Fig2()
-	dt, err := newDriftTracker(driftCfg(t.TempDir()), g, time.Now, nolog)
+	simulated, err := newDriftTracker(driftCfg(t.TempDir()), g, driftBuild, time.Now, nolog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dt.temps != nil || dt.software != nil {
-		t.Fatal("a tracker has live readers before it is given them")
+	if simulated.temps != nil || simulated.software != nil {
+		t.Fatal("a tracker over the simulator has the readers of a live host")
 	}
-	if sw := dt.readSoftware(); sw.Kernel != "" || sw.Firmware != nil {
-		t.Fatalf("software without a reader = %+v", sw)
+	if sw := simulated.readSoftware(); sw.Kernel != "" || sw.Firmware != nil || sw.Hostping != driftBuild {
+		t.Fatalf("software under --sim = %+v, want the hostping build only", sw)
 	}
 	// The readers themselves are not called here: they would read the test
 	// host's own /sys and fork its nvidia-smi. internal/monitor tests them on
 	// fixture trees.
-	dt.live(g)
-	if dt.temps == nil || dt.software == nil {
-		t.Fatal("live did not set the readers")
+	cfg := driftCfg(t.TempDir())
+	cfg.Sim = false
+	live, err := newDriftTracker(cfg, g, driftBuild, time.Now, nolog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.temps == nil || live.software == nil {
+		t.Fatal("a tracker on a live host has no readers")
+	}
+	live.software = func() (string, map[string]string) {
+		return "6.8.0-45-generic", map[string]string{"rnic1": "28.39.1002", "rnic9": "1.0"}
+	}
+	sw := live.readSoftware()
+	if sw.Kernel != "6.8.0-45-generic" || sw.Hostping != driftBuild || len(sw.Firmware) != 1 || sw.Firmware["0000:37:00.0"] != "28.39.1002" {
+		t.Fatalf("software on a live host = %+v, want the firmware under the RNIC's PCI address", sw)
+	}
+}
+
+// A build is named by its version and commit, and a build that knows neither
+// is not named: running one must not read as a software change.
+func TestBuildName(t *testing.T) {
+	for _, c := range []struct {
+		b    buildinfo.Info
+		want string
+	}{
+		{buildinfo.Info{Version: "0.2.6", Commit: "abc1234"}, "0.2.6 (abc1234)"},
+		{buildinfo.Info{Version: "devel", Commit: "abc1234-dirty"}, "devel (abc1234-dirty)"},
+		{buildinfo.Info{Version: "0.2.6", Commit: "unknown"}, "0.2.6 (unknown)"},
+		{buildinfo.Info{Version: "devel", Commit: "unknown"}, ""},
+		{buildinfo.Info{}, ""},
+	} {
+		if got := buildName(c.b); got != c.want {
+			t.Errorf("buildName(%+v) = %q, want %q", c.b, got, c.want)
+		}
+	}
+}
+
+// A device that throttles on most days and is fine on the others is reported
+// through the whole daemon loop for as long as it does so. Every run stays
+// clean (no path is abnormal, no cause is named), so the drift section is all
+// that says it. The day-to-day movement between the two levels is the
+// degradation itself: it must not raise the threshold and have the path
+// logged as recovered and exported as stable while it reads 15% low.
+func TestDaemonReportsIntermittentDegradation(t *testing.T) {
+	dd := startDriftDaemon(t, t.TempDir(), driftStart)
+	g := topology.Fig2()
+	healthy := dd.world.PathBW(mustPath(t, g, "rnic1", "gpu3"))
+	first := -1
+	for d := 0; d < 120; d++ {
+		if d >= 30 && d%3 != 0 {
+			dd.slowGPU3(healthy, 0.85) // low on two days out of three
+		} else {
+			dd.slowGPU3(healthy, 2) // no cap
+		}
+		rep := dd.day(t)
+		for _, p := range rep.Paths {
+			if p.Status == "abnormal" {
+				t.Fatalf("day %d: %s->%s abnormal", d, p.RNIC, p.Endpoint)
+			}
+		}
+		code, _ := dd.collect(t).pathGauge(t, "hostping.path.drift.status_code", "rnic1", "gpu3")
+		if code == 3 && first < 0 {
+			first = d
+		}
+		if first >= 0 && (code != 3 || rep.Drift.Drifted != 1) {
+			t.Fatalf("day %d: status code %d, %d drifted paths in the report, drifted since day %d: %q", d, code, rep.Drift.Drifted, first, *dd.logs)
+		}
+	}
+	if first < 33 || first > 40 {
+		t.Fatalf("first reported on day %d, want within days of the onset on day 30", first)
+	}
+	if dd.logs.has("recovered") || dd.logs.has("no longer counted as drifted") {
+		t.Fatalf("the verdict was withdrawn while the path still throttles: %q", *dd.logs)
+	}
+	ms := dd.collect(t)
+	if c, ok := ms.driftChange(t, "rnic1", "gpu3", "bandwidth"); !ok || c < 0.14 || c > 0.16 {
+		t.Fatalf("change gauge = %v (exported %v), want the 15%% of the low days", c, ok)
+	}
+	if th, ok := ms.driftThreshold(t, "rnic1", "gpu3", "bandwidth"); !ok || th != 0.05 {
+		t.Fatalf("threshold gauge = %v (exported %v), want the 5%% the path drifted at", th, ok)
+	}
+}
+
+func (ms metrics) driftThreshold(t *testing.T, rnic, endpoint, signal string) (float64, bool) {
+	t.Helper()
+	m, ok := ms["hostping.path.drift.threshold_ratio"]
+	if !ok {
+		return 0, false
+	}
+	want := attribute.NewSet(attribute.String("rnic", rnic), attribute.String("endpoint", endpoint), attribute.String("signal", signal))
+	for _, dp := range m.Data.(metricdata.Gauge[float64]).DataPoints {
+		if dp.Attributes.Equals(&want) {
+			return dp.Value, true
+		}
+	}
+	return 0, false
+}
+
+// A daemon restarted with other probe settings takes other readings from the
+// same hardware. They are not compared with a reference taken with the old
+// settings: the paths start a new history, the log says why, and no path is
+// reported as drifted hardware.
+func TestProbeSettingsChangeStartsANewHistory(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		set  func(*config.Config)
+		// memoryOnly is set when the setting applies to memory paths only.
+		memoryOnly bool
+		log        string
+	}{
+		// The 32 GPU paths and the 8 memory paths have a line each: the
+		// settings of a memory path include the warm-up.
+		{"--small-msg", func(c *config.Config) { c.SmallMsgBytes = 4096 }, false,
+			"32 paths start a new history: their readings were taken with other probe settings (small_msg=1 large_msg=262144 iters=512 -> small_msg=4096 large_msg=262144 iters=512) and are not comparable"},
+		{"--large-msg", func(c *config.Config) { c.LargeMsgBytes = 64 << 10 }, false,
+			"(small_msg=1 large_msg=262144 iters=512 -> small_msg=1 large_msg=65536 iters=512)"},
+		{"--iters", func(c *config.Config) { c.Iters = 64 }, false,
+			"(small_msg=1 large_msg=262144 iters=512 mem_warmup=0s -> small_msg=1 large_msg=262144 iters=64 mem_warmup=0s)"},
+		{"--mem-warmup", func(c *config.Config) { c.MemWarmup = 200 * time.Millisecond }, true,
+			"8 paths start a new history: their readings were taken with other probe settings (small_msg=1 large_msg=262144 iters=512 mem_warmup=0s -> small_msg=1 large_msg=262144 iters=512 mem_warmup=200ms) and are not comparable"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dd := startDriftDaemon(t, dir, driftStart)
+			var rep driftReport
+			for i := 0; i < 12; i++ {
+				rep = dd.day(t)
+			}
+			if rep.Drift.Stable != 40 {
+				t.Fatalf("before the change: %+v, want every path stable", rep.Drift)
+			}
+			dd.drift.shutdown()
+
+			cfg := driftCfg(dir)
+			c.set(&cfg)
+			again := startDriftDaemonWith(t, cfg, driftBuild, dd.now)
+			restarted := 40
+			if c.memoryOnly {
+				restarted = 8
+			}
+			rep = again.day(t)
+			if !again.logs.has(c.log) {
+				t.Fatalf("no log line for the paths that start over: %q", *again.logs)
+			}
+			if rep.Drift.Drifted != 0 || rep.Drift.Stable != 40-restarted || rep.Drift.Unknown != restarted ||
+				rep.Drift.UnknownReasons[0].Reason != "collecting_reference" {
+				t.Fatalf("first run with the new settings: %+v, want %d paths collecting a new reference and none drifted", rep.Drift, restarted)
+			}
+			for i := 0; i < 11; i++ {
+				rep = again.day(t)
+				if rep.Drift.Drifted != 0 {
+					t.Fatalf("day %d with the new settings: %d paths reported as drifted: %q", i+2, rep.Drift.Drifted, *again.logs)
+				}
+			}
+			if rep.Drift.Stable != 40 {
+				t.Fatalf("12 days with the new settings: %+v, want every path stable against its new reference", rep.Drift)
+			}
+			// The same settings again start nothing over.
+			again.drift.shutdown()
+			same := startDriftDaemonWith(t, cfg, driftBuild, again.now)
+			if rep = same.day(t); rep.Drift.Stable != 40 || same.logs.has("start a new history") {
+				t.Fatalf("restart with the same settings: %+v, %q", rep.Drift, *same.logs)
+			}
+		})
+	}
+}
+
+// Another hostping build may read the same hardware differently. The history
+// records the build like the kernel and the firmware, and a drift that
+// follows an upgrade names it.
+func TestHostpingUpgradeIsNamed(t *testing.T) {
+	dir := t.TempDir()
+	dd := startDriftDaemon(t, dir, driftStart)
+	g := topology.Fig2()
+	healthy := dd.world.PathBW(mustPath(t, g, "rnic1", "gpu3"))
+	for i := 0; i < 12; i++ {
+		dd.day(t)
+	}
+	dd.drift.shutdown()
+	if got := dd.history(t).Software.Hostping; got != driftBuild {
+		t.Fatalf("recorded build %q, want %q", got, driftBuild)
+	}
+	upgraded := startDriftDaemonWith(t, driftCfg(dir), "0.3.0 (def5678)", dd.now)
+	upgraded.slowGPU3(healthy, 0.92)
+	var rep driftReport
+	for i := 0; i < 8; i++ {
+		rep = upgraded.day(t)
+	}
+	if !upgraded.logs.has("hostping: drift: hostping changed from 0.2.6 (abc1234) to 0.3.0 (def5678)") {
+		t.Fatalf("no log line for the upgrade: %q", *upgraded.logs)
+	}
+	if rep.Drift.Drifted != 1 || len(rep.Drift.SoftwareChanges) != 1 {
+		t.Fatalf("drift = %+v, want one drifted path and the upgrade named", rep.Drift)
+	}
+	if sw := rep.Drift.SoftwareChanges[0]; sw.Component != "hostping" || sw.From != driftBuild || sw.To != "0.3.0 (def5678)" || sw.On != "2026-03-13" {
+		t.Fatalf("software change = %+v", sw)
+	}
+	// A build that cannot name itself records no change.
+	upgraded.drift.shutdown()
+	unnamed := startDriftDaemonWith(t, driftCfg(dir), buildName(buildinfo.Info{Version: buildinfo.UnknownVersion, Commit: buildinfo.UnknownCommit}), upgraded.now)
+	unnamed.day(t)
+	unnamed.drift.shutdown()
+	if h := unnamed.history(t); len(h.Events) != 1 || h.Software.Hostping != "0.3.0 (def5678)" {
+		t.Fatalf("after a run of an unnamed build: %d events, build %q", len(h.Events), h.Software.Hostping)
+	}
+}
+
+// A history with a value that no probe reads (a hand edit, a damaged byte)
+// is not a history: a change against a reference of 1e-320 ns is not a
+// number a report can carry, and encoding it would lose the whole report of
+// every idle run. The file is set aside like any other unusable one, and the
+// reports keep coming.
+func TestHistoryWithImpossibleValueIsSetAside(t *testing.T) {
+	dir := t.TempDir()
+	dd := startDriftDaemon(t, dir, driftStart)
+	for i := 0; i < 12; i++ {
+		dd.day(t)
+	}
+	dd.drift.shutdown()
+	path := filepath.Join(dir, drift.FileName)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A positive latency far below anything a probe reads.
+	edited := editFirstNumber(t, b, `"p50":`, "1e-320")
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again := startDriftDaemon(t, dir, dd.now)
+	if !again.logs.has("was not usable") || !again.logs.has("is not a reading between 1 and 1e+18") {
+		t.Fatalf("the edited history was not set aside: %q", *again.logs)
+	}
+	rep := again.day(t)
+	if rep.Drift == nil || rep.Drift.Unknown != 40 || len(rep.Paths) != 40 {
+		t.Fatalf("report after the restart: %d paths, drift %+v: want the whole report, with a new history", len(rep.Paths), rep.Drift)
+	}
+	if kept, err := os.ReadFile(path + ".rejected"); err != nil || !bytes.Equal(kept, edited) {
+		t.Fatalf("the edited history was not kept for the operator: %v", err)
+	}
+}
+
+// editFirstNumber replaces the JSON number that follows the first key in b.
+func editFirstNumber(t *testing.T, b []byte, key, value string) []byte {
+	t.Helper()
+	i := bytes.Index(b, []byte(key))
+	if i < 0 {
+		t.Fatalf("no %s in the history", key)
+	}
+	start := i + len(key)
+	end := start
+	for end < len(b) && b[end] != ',' && b[end] != '}' {
+		end++
+	}
+	out := append([]byte(nil), b[:start]...)
+	out = append(out, value...)
+	return append(out, b[end:]...)
+}
+
+// A drift section that JSON cannot carry is left out, with a log line, and
+// the report of the run is written without it.
+func TestUnencodableDriftSectionIsLeftOut(t *testing.T) {
+	dd := startDriftDaemon(t, t.TempDir(), driftStart)
+	rep := model.Report{Trigger: model.TriggerIdle, Mode: model.ModeIdle}
+	dd.drift.attach(&rep, model.DriftSummary{Drifted: 1, Findings: []model.DriftFinding{{RNIC: "rnic0", Endpoint: "gpu0", Change: math.Inf(1)}}})
+	if rep.Drift != nil {
+		t.Fatalf("a section with an infinite change was attached: %+v", rep.Drift)
+	}
+	if !dd.logs.has("the drift section is left out of this report: it cannot be encoded") {
+		t.Fatalf("no log line: %q", *dd.logs)
+	}
+	if _, err := json.Marshal(rep); err != nil {
+		t.Fatalf("the report does not encode without the section: %v", err)
+	}
+	dd.drift.attach(&rep, model.DriftSummary{Stable: 40})
+	if rep.Drift == nil || rep.Drift.Stable != 40 {
+		t.Fatalf("a sound section was not attached: %+v", rep.Drift)
 	}
 }

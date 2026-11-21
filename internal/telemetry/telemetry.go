@@ -47,6 +47,7 @@ type Telemetry struct {
 	driftSt  metric.Int64Gauge
 	driftWhy metric.Int64Gauge
 	driftChg metric.Float64Gauge
+	driftTh  metric.Float64Gauge
 	linkAbn  metric.Int64Gauge
 	linkStat metric.Int64Gauge
 	pause    metric.Float64Gauge
@@ -381,6 +382,9 @@ func (t *Telemetry) initInstruments() error {
 		// Positive is worse for every signal, so one threshold and one
 		// colour scale serve bandwidth and latency alike.
 		{&t.driftChg, "hostping.path.drift.change_ratio", "", "How far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per signal (bandwidth, latency_p50, latency_p99); negative when better; with --drift-tracking"},
+		// Next to the change, so that a change above --drift-th that is not
+		// reported as drifted explains itself.
+		{&t.driftTh, "hostping.path.drift.threshold_ratio", "", "The change_ratio at which the signal of the path is judged drifted: --drift-th, more on a path whose idle days scatter, and for a drifted signal the threshold it drifted at; with --drift-tracking"},
 	}
 	intGauges := []instrument[metric.Int64Gauge]{
 		{&t.pathAbn, "hostping.path.abnormal", "", "1 if RNIC→endpoint path is abnormal"},
@@ -781,8 +785,8 @@ func (t *Telemetry) RecordReport(ctx context.Context, rep model.Report) {
 
 // RecordDrift writes every tracked path's state against its own idle history
 // (--drift-tracking) after a confirmed idle run. The change of a path whose
-// state is unknown is not written: there is none, and a 0 would read as a
-// path that has not moved.
+// state is unknown is not written, nor its threshold: there is none, and a 0
+// would read as a path that has not moved.
 func (t *Telemetry) RecordDrift(ctx context.Context, paths []model.PathDrift) {
 	if t == nil {
 		return
@@ -799,11 +803,13 @@ func (t *Telemetry) RecordDrift(ctx context.Context, paths []model.PathDrift) {
 			continue
 		}
 		for _, c := range p.Changes {
-			t.driftChg.Record(ctx, c.Change, metric.WithAttributes(
+			signal := metric.WithAttributes(
 				attribute.String("rnic", p.RNIC),
 				attribute.String("endpoint", p.Endpoint),
 				attribute.String("signal", string(c.Signal)),
-			))
+			)
+			t.driftChg.Record(ctx, c.Change, signal)
+			t.driftTh.Record(ctx, c.Threshold, signal)
 		}
 	}
 }

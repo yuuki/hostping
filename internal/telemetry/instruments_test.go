@@ -138,7 +138,7 @@ func recordEverything(tel *Telemetry) {
 	tel.RecordReport(ctx, fullReport())
 	tel.RecordDrift(ctx, []model.PathDrift{{
 		RNIC: "rnic0", Endpoint: "gpu0", Status: model.DriftDrifted,
-		Changes: []model.DriftChange{{Signal: model.DriftBandwidth, Change: 0.07}},
+		Changes: []model.DriftChange{{Signal: model.DriftBandwidth, Change: 0.07, Threshold: 0.05}},
 	}})
 	tel.RecordMutual(ctx, fullReport().Mutual)
 	tel.RecordRates(ctx, []model.RNICRates{{

@@ -34,8 +34,10 @@ const (
 	recentDays    = 7
 	minRecentDays = 3
 	recentSpan    = 14
-	// windowDays is how many calendar days of daily values a path keeps,
-	// and so the most it holds: the shape of a drift is read from them.
+	// windowDays is how many daily values a path keeps: the shape of a
+	// drift and the scatter of the path are read from them. The window is
+	// counted in days that have a value, not in calendar days, so that a
+	// clock that reads ahead for one run cannot age it out.
 	windowDays = 30
 	// minShapeDays is the fewest daily values a shape is read from.
 	minShapeDays = 8
@@ -48,16 +50,26 @@ const (
 	// signal must show: a path whose daily medians scatter by more than the
 	// drift threshold over noiseK needs a larger change than the threshold.
 	noiseK = 3
-	// iqrSigmas is the interquartile range of a normal distribution in
-	// standard deviations.
-	iqrSigmas = 1.349
-	// diffSigmas is the median absolute difference of two independent
-	// normal values in standard deviations of one: 0.6745 times the square
-	// root of 2.
-	diffSigmas = 0.954
-	// minScatterDays is the fewest daily values the day-to-day scatter of
-	// the window is read from.
+	// trimShare is the share of the largest day-to-day differences left out
+	// of the scatter, as its inverse (a fifth), and trimSigmas the mean of
+	// the rest for independent normal values, in standard deviations of
+	// one.
+	trimShare  = 5
+	trimSigmas = 0.790
+	// minScatterDays is the fewest daily values the scatter of the window
+	// is read from.
 	minScatterDays = 8
+	// upsideQuantile marks a path's best days (its best tenth) and
+	// goodQuantile its good days (its best quarter). upsideSigmas is how
+	// far the first lies below the mean of a normal distribution, in
+	// standard deviations, and goodSigmas how far it lies below the second.
+	// upsideFactor is how far beyond what the better side shows the
+	// day-to-day scatter still counts as scatter.
+	upsideQuantile = 0.10
+	goodQuantile   = 0.25
+	upsideSigmas   = 1.2816
+	goodSigmas     = 0.607
+	upsideFactor   = 3
 	// stepShare is the share of a signal's change against its reference
 	// that the best single step through the window must account for, for
 	// the change to be a step. stepSpan is the fewest daily values on
@@ -70,27 +82,40 @@ const (
 	// thermalRiseC is how much hotter, in degrees Celsius, a device must
 	// read in the recent days than in the reference days to count as risen.
 	thermalRiseC = 5
-	// staleDays is how long the history of a path the topology no longer
-	// has is kept, in case the device comes back.
+	// staleDays is on how many days with an observed run the topology may
+	// lack a path before its history is dropped. Until then it is kept, in
+	// case the device comes back.
 	staleDays = 90
-	// healDays is how many days the clock must stay behind the newest day
-	// of the history before the days after it are dropped as recorded under
-	// a wrong clock.
+	// healDays is how many days a clock must hold before it is trusted over
+	// the dates of the history: readings dated after the clock are dropped
+	// at once when they span fewer days than this, and otherwise once the
+	// clock has stayed behind them for this many days.
 	healDays = 2
 	// MaxPaths bounds the paths of one history, stale ones included.
 	MaxPaths = 2048
-	// maxFindings bounds the findings one report carries.
+	// maxFindings bounds the findings one report carries, and maxChanges
+	// the software changes.
 	maxFindings = 32
-	// maxEvents bounds the software changes kept; maxText the bytes of a
-	// version string and maxKey those of a path or firmware key.
-	maxEvents = 16
-	maxText   = 64
-	maxKey    = 256
+	maxChanges  = 16
+	// maxEventsPer bounds the software changes the history keeps of one
+	// component (the kernel, hostping, one RNIC's firmware), so that many
+	// changes of one cannot push out the last change of another.
+	maxEventsPer = 4
+	// maxText bounds the bytes of a version string and maxKey those of a
+	// path key, a firmware key or a probe setting.
+	maxText = 64
+	maxKey  = 256
 	// maxDay bounds a day number (days since 1970-01-01 UTC), so that day
 	// arithmetic cannot overflow whatever the clock or the file says.
 	maxDay = 1 << 22
-	// maxValue bounds a bandwidth (bit/s) or latency (ns) in the history.
+	// minValue and maxValue bound a bandwidth (bit/s) or latency (ns) in
+	// the history: no probe reads less than 1 bit/s or 1 ns, and a ratio of
+	// two values inside the bounds is a finite number.
+	minValue = 1
 	maxValue = 1e18
+	// maxThreshold bounds a stored threshold: noiseK times a scatter of at
+	// most maxValue over a reference of at least minValue.
+	maxThreshold = 1e19
 	// minTempC and maxTempC bound a stored temperature.
 	minTempC = -100
 	maxTempC = 1000
@@ -127,62 +152,91 @@ type OpenDay struct {
 }
 
 // Reference is the level a path is compared with: the median of its first
-// refDays daily values, with their scatter (see scatter) per signal.
+// refDays daily values.
 type Reference struct {
 	// From and To are the first and last day behind the reference.
 	From int `json:"from"`
 	To   int `json:"to"`
 	Reading
-	BandwidthSpread float64 `json:"bw_spread"`
-	LatP50Spread    float64 `json:"p50_spread"`
-	LatP99Spread    float64 `json:"p99_spread"`
+}
+
+// Verdict is the memory of a signal that is judged drifted.
+type Verdict struct {
+	// Since is the day the signal was first judged drifted.
+	Since int `json:"since"`
+	// Threshold is the change it had to reach then. The signal stays
+	// drifted by this threshold, not by what the days since make of the
+	// path's scatter: a degradation that comes and goes from day to day
+	// would otherwise raise the bar it has to clear and report itself as
+	// recovered.
+	Threshold float64 `json:"threshold"`
 }
 
 // PathHistory is everything the history keeps of one path.
 type PathHistory struct {
-	// FirstSeen and LastSeen are the first and last day the path was part
-	// of the topology of an observed run.
-	FirstSeen int        `json:"first_seen"`
-	LastSeen  int        `json:"last_seen"`
-	Ref       *Reference `json:"reference,omitempty"`
+	// Probe is the probe settings the readings were taken with (see
+	// Probe). Readings taken with others are not comparable, so a path
+	// whose settings changed starts over.
+	Probe string `json:"probe"`
+	// Absent counts the days with an observed run on which the topology did
+	// not have the path; 0 while it has it.
+	Absent int        `json:"absent,omitempty"`
+	Ref    *Reference `json:"reference,omitempty"`
 	// Days are the closed days, oldest first.
 	Days []Day    `json:"days,omitempty"`
 	Open *OpenDay `json:"open,omitempty"`
-	// Drifted holds, per signal judged drifted, the day it was first judged
-	// so. It is the memory of the verdict's hysteresis.
-	Drifted map[model.DriftSignal]int `json:"drifted,omitempty"`
+	// Drifted holds the verdict of every signal judged drifted.
+	Drifted map[model.DriftSignal]Verdict `json:"drifted,omitempty"`
 }
 
 // Software is the software a drift may follow a change of: the kernel
-// release and each RNIC's firmware version, keyed like the RNIC half of a
-// path key. An empty value was not read.
+// release, the hostping build that takes the readings, and each RNIC's
+// firmware version, keyed like the RNIC half of a path key. An empty value
+// was not read.
 type Software struct {
 	Kernel   string            `json:"kernel,omitempty"`
+	Hostping string            `json:"hostping,omitempty"`
 	Firmware map[string]string `json:"firmware,omitempty"`
 }
 
 // Event is one recorded software change.
 type Event struct {
-	Day       int    `json:"day"`
+	Day int `json:"day"`
+	// Component is model.DriftComponentKernel, DriftComponentHostping or
+	// DriftComponentFirmware, and Device the RNIC key of a firmware change.
 	Component string `json:"component"`
+	Device    string `json:"device,omitempty"`
 	From      string `json:"from"`
 	To        string `json:"to"`
 }
 
-// signal is one tracked reading: where it lives in a Reading and a
-// Reference, and which direction is worse.
+// signal is one tracked reading: where it lives in a Reading, and which
+// direction is worse.
 type signal struct {
-	name   model.DriftSignal
-	value  func(Reading) float64
-	spread func(Reference) float64
+	name  model.DriftSignal
+	value func(Reading) float64
 	// higherIsWorse is false for bandwidth.
 	higherIsWorse bool
 }
 
 var signals = []signal{
-	{model.DriftBandwidth, func(r Reading) float64 { return r.BandwidthBPS }, func(r Reference) float64 { return r.BandwidthSpread }, false},
-	{model.DriftLatencyP50, func(r Reading) float64 { return r.LatP50Ns }, func(r Reference) float64 { return r.LatP50Spread }, true},
-	{model.DriftLatencyP99, func(r Reading) float64 { return r.LatP99Ns }, func(r Reference) float64 { return r.LatP99Spread }, true},
+	{model.DriftBandwidth, func(r Reading) float64 { return r.BandwidthBPS }, false},
+	{model.DriftLatencyP50, func(r Reading) float64 { return r.LatP50Ns }, true},
+	{model.DriftLatencyP99, func(r Reading) float64 { return r.LatP99Ns }, true},
+}
+
+// worse turns a value of s into one for which higher is worse, whatever the
+// signal: a bandwidth is negated.
+func (s signal) worse(v float64) float64 {
+	if s.higherIsWorse {
+		return v
+	}
+	return -v
+}
+
+// change is how far v lies on the worse side of ref, as a fraction of ref.
+func (s signal) change(ref, v float64) float64 {
+	return (s.worse(v) - s.worse(ref)) / ref
 }
 
 // PathIdent names one path of the running topology to the tracker.
@@ -193,6 +247,8 @@ type PathIdent struct {
 	// Key identifies the path in the history across restarts and
 	// renumbering (see Paths).
 	Key string
+	// Probe is the probe settings the path is read with (Probe.For).
+	Probe string
 	// EndpointSensor is set when the endpoint is a device that can carry a
 	// temperature sensor of its own (a GPU). A memory endpoint has none
 	// that could be attributed to it.
@@ -214,8 +270,8 @@ type Result struct {
 	// Summary is the report's drift section.
 	Summary model.DriftSummary
 	// Logs are the lines worth telling the operator: a signal that drifted
-	// or recovered, a software change, stale paths that expired, a clock
-	// that is behind the history.
+	// or recovered, a software change, paths that started over or expired,
+	// a clock that does not agree with the history.
 	Logs []string
 }
 
@@ -227,15 +283,11 @@ type Tracker struct {
 	rnicKeys map[string]bool
 	inGraph  map[string]bool
 	f        File
-	// behind is set while the clock reads earlier than the newest day of
-	// the history, and behindSince is the first day it was seen so.
-	behind      bool
-	behindSince int
 }
 
 // New returns a tracker over f for the paths of the running topology. th is
-// the drift threshold (--drift-th). Firmware versions of RNICs the topology no
-// longer has are dropped from f.
+// the drift threshold (--drift-th). The tracker owns f from here on.
+// Firmware versions of RNICs the topology no longer has are dropped from it.
 func New(th float64, paths []PathIdent, rnicKeys []string, f File) *Tracker {
 	t := &Tracker{th: th, paths: paths, rnicKeys: map[string]bool{}, inGraph: map[string]bool{}, f: f}
 	if t.f.Paths == nil {
@@ -283,24 +335,22 @@ func dateOf(day int) string {
 func (t *Tracker) Observe(now time.Time, samples []Sample, sw Software) Result {
 	day := dayOf(now)
 	var res Result
-	if newest := t.f.newestDay(); day < newest {
-		if !t.behind || day < t.behindSince {
-			t.behind, t.behindSince = true, day
-			res.Logs = append(res.Logs, fmt.Sprintf("the clock (%s) is behind the newest day of the history (%s): nothing is recorded until it is past it, and after %d days behind the days after it are dropped",
-				dateOf(day), dateOf(newest), healDays))
+	if t.clockBehind(day, &res) {
+		for _, p := range t.paths {
+			res.Paths = append(res.Paths, model.PathDrift{RNIC: p.RNIC, Endpoint: p.Endpoint, Reason: model.DriftClockBehind})
 		}
-		if day-t.behindSince < healDays {
-			for _, p := range t.paths {
-				res.Paths = append(res.Paths, model.PathDrift{RNIC: p.RNIC, Endpoint: p.Endpoint, Reason: model.DriftClockBehind})
-			}
-			res.Summary = summarize(res.Paths, nil)
-			return res
-		}
-		days, reset := t.f.dropAfter(day)
-		res.Logs = append(res.Logs, fmt.Sprintf("the clock has stayed behind the history for %d days: dropped %d daily summaries dated after %s as recorded under a wrong clock, and the reference of %d paths",
-			healDays, days, dateOf(day), reset))
+		res.Summary = summarize(res.Paths, nil, nil)
+		return res
 	}
-	t.behind = false
+	// A new day is counted against the paths the topology lacks. The clock
+	// alone does not count: one run under a clock that reads months ahead
+	// is one day.
+	newDay := day != t.f.LastDay
+	if gap := day - t.f.LastDay; t.f.LastDay != 0 && gap > recentSpan {
+		res.Logs = append(res.Logs, fmt.Sprintf("the clock (%s) is %d days past the last run the history saw (%s): the host was off or busy, or the clock reads ahead; if it does, what is recorded under it is dropped once it is corrected",
+			dateOf(day), gap, dateOf(t.f.LastDay)))
+	}
+	t.f.LastDay = day
 
 	t.noteSoftware(day, sw, &res)
 	bySample := make(map[[2]string]Reading, len(samples))
@@ -308,14 +358,19 @@ func (t *Tracker) Observe(now time.Time, samples []Sample, sw Software) Result {
 		bySample[[2]string{s.RNIC, s.Endpoint}] = s.Reading
 	}
 	var findings []model.DriftFinding
+	restarted := map[string]int{}
+	oldest := -1 // the first day of the oldest reference behind a finding
 	for _, p := range t.paths {
-		h := t.entry(p.Key, day)
+		h := t.entry(p)
 		if h == nil {
 			res.Paths = append(res.Paths, model.PathDrift{RNIC: p.RNIC, Endpoint: p.Endpoint, Reason: model.DriftNotTracked})
 			continue
 		}
-		h.LastSeen = day
-		h.FirstSeen = min(h.FirstSeen, day)
+		if h.Probe != p.Probe {
+			restarted[h.Probe+" -> "+p.Probe]++
+			*h = PathHistory{Probe: p.Probe}
+		}
+		h.Absent = 0
 		h.roll(day)
 		if r, ok := bySample[[2]string{p.RNIC, p.Endpoint}]; ok {
 			h.add(day, r)
@@ -324,23 +379,88 @@ func (t *Tracker) Observe(now time.Time, samples []Sample, sw Software) Result {
 		res.Paths = append(res.Paths, pd)
 		findings = append(findings, fs...)
 		res.Logs = append(res.Logs, logs...)
+		if len(fs) > 0 && (oldest < 0 || h.Ref.From < oldest) {
+			oldest = h.Ref.From
+		}
 	}
-	if n := t.expire(day); n > 0 {
-		res.Logs = append(res.Logs, fmt.Sprintf("dropped the history of %d paths the topology has not had for more than %d days", n, staleDays))
+	for _, change := range sortedKeys(restarted) {
+		res.Logs = append(res.Logs, fmt.Sprintf("%d paths start a new history: their readings were taken with other probe settings (%s) and are not comparable", restarted[change], change))
 	}
-	res.Summary = summarize(res.Paths, findings)
+	if n := t.expire(newDay); n > 0 {
+		res.Logs = append(res.Logs, fmt.Sprintf("dropped the history of %d paths the topology has not had on %d days with a run", n, staleDays))
+	}
+	var changes []model.DriftSoftwareChange
+	if oldest >= 0 {
+		changes = t.softwareSince(oldest)
+	}
+	res.Summary = summarize(res.Paths, findings, changes)
 	return res
 }
 
-// summarize counts paths per status and unknown paths per reason, and puts
-// the findings worst first. A report holds at most maxFindings of them: a
-// change that reaches every path at once (a kernel update) would otherwise
-// add a finding per path and signal to every report from then on.
-func summarize(paths []model.PathDrift, findings []model.DriftFinding) model.DriftSummary {
+// clockBehind reports whether the clock, at day, reads earlier than what
+// the history holds and nothing may be recorded under it. It decides which
+// of the two is wrong by which has held for longer.
+//
+// Readings dated after day that span fewer than healDays days were taken
+// under a clock that read ahead for a short while (a boot before time
+// synchronization): they are dropped at once. More than that is a history,
+// and the clock is the suspect (an RTC that lost its battery): nothing is
+// recorded until the clock is past it, or has stayed behind it for
+// healDays days, when what is dated after it is dropped after all. The day
+// it was first seen behind is kept in the history, so that the wait does
+// not start over with every restart of the daemon.
+func (t *Tracker) clockBehind(day int, res *Result) bool {
+	newest := t.f.newestDay()
+	if day >= newest {
+		t.f.BehindSince = nil
+		return false
+	}
+	reason := fmt.Sprintf("they span fewer than %d days, so the clock read ahead when they were taken", healDays)
+	if t.f.daysAfter(day) >= healDays {
+		if t.f.BehindSince == nil || day < *t.f.BehindSince {
+			since := day
+			t.f.BehindSince = &since
+			res.Logs = append(res.Logs, fmt.Sprintf("the clock (%s) is behind the newest day of the history (%s): nothing is recorded until it is past it, and after %d days behind the days after it are dropped",
+				dateOf(day), dateOf(newest), healDays))
+		}
+		if day-*t.f.BehindSince < healDays {
+			return true
+		}
+		reason = fmt.Sprintf("the clock has stayed behind them for %d days", healDays)
+	}
+	days, reset := t.f.dropAfter(day)
+	res.Logs = append(res.Logs, fmt.Sprintf("dropped %d daily summaries dated after %s, and the reference of %d paths that reaches past it: %s",
+		days, dateOf(day), reset, reason))
+	t.f.BehindSince = nil
+	return false
+}
+
+// sortedKeys is the keys of m in order.
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// summarize counts paths per status and unknown paths per reason, puts the
+// findings worst first and attaches the software changes. A report holds at
+// most maxFindings findings and maxChanges changes (the newest): a change
+// that reaches every path at once (a kernel update) would otherwise add a
+// finding per path and signal to every report from then on.
+func summarize(paths []model.PathDrift, findings []model.DriftFinding, changes []model.DriftSoftwareChange) model.DriftSummary {
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].Change > findings[j].Change })
 	s := model.DriftSummary{Findings: findings}
 	if len(findings) > maxFindings {
 		s.Findings, s.FindingsOmitted = findings[:maxFindings], len(findings)-maxFindings
+	}
+	if len(findings) > 0 {
+		s.SoftwareChanges = changes
+		if n := len(changes) - maxChanges; n > 0 {
+			s.SoftwareChanges, s.SoftwareChangesOmitted = changes[n:], n
+		}
 	}
 	why := map[model.DriftReason]int{}
 	for _, p := range paths {
@@ -365,29 +485,29 @@ func summarize(paths []model.PathDrift, findings []model.DriftFinding) model.Dri
 	return s
 }
 
-// entry is the history of the path key, created on first sight. It is nil
+// entry is the history of the path p, created on first sight. It is nil
 // when the history is full of paths the topology still has.
-func (t *Tracker) entry(key string, day int) *PathHistory {
-	if h := t.f.Paths[key]; h != nil {
+func (t *Tracker) entry(p PathIdent) *PathHistory {
+	if h := t.f.Paths[p.Key]; h != nil {
 		return h
 	}
 	if len(t.f.Paths) >= MaxPaths && !t.evictStale() {
 		return nil
 	}
-	h := &PathHistory{FirstSeen: day, LastSeen: day}
-	t.f.Paths[key] = h
+	h := &PathHistory{Probe: p.Probe}
+	t.f.Paths[p.Key] = h
 	return h
 }
 
-// evictStale drops the path the topology no longer has that was seen longest
-// ago (the smallest key among equals), and reports whether there was one.
+// evictStale drops the path the topology has lacked for the most days (the
+// smallest key among equals), and reports whether there was one.
 func (t *Tracker) evictStale() bool {
 	victim := ""
 	for k, h := range t.f.Paths {
 		if t.inGraph[k] {
 			continue
 		}
-		if v := t.f.Paths[victim]; victim == "" || h.LastSeen < v.LastSeen || (h.LastSeen == v.LastSeen && k < victim) {
+		if v := t.f.Paths[victim]; victim == "" || h.Absent > v.Absent || (h.Absent == v.Absent && k < victim) {
 			victim = k
 		}
 	}
@@ -398,12 +518,19 @@ func (t *Tracker) evictStale() bool {
 	return true
 }
 
-// expire drops the paths the topology no longer has once they have not been
-// seen for staleDays, and returns how many.
-func (t *Tracker) expire(day int) int {
+// expire counts a new day against every path the topology lacks, drops
+// those it has lacked for more than staleDays such days, and returns how
+// many went.
+func (t *Tracker) expire(newDay bool) int {
 	n := 0
 	for k, h := range t.f.Paths {
-		if !t.inGraph[k] && day-h.LastSeen > staleDays {
+		if t.inGraph[k] {
+			continue
+		}
+		if newDay && h.Absent < maxDay {
+			h.Absent++
+		}
+		if h.Absent > staleDays {
 			delete(t.f.Paths, k)
 			n++
 		}
@@ -414,21 +541,23 @@ func (t *Tracker) expire(day int) int {
 // noteSoftware records what changed between the stored software and sw. A
 // value that was not read (empty) changes nothing: unknown is not a change.
 func (t *Tracker) noteSoftware(day int, sw Software, res *Result) {
-	change := func(component, from, to string) string {
+	change := func(component, device, from, to string) string {
 		to = clip(to)
 		if to == "" || to == from {
 			return from
 		}
 		if from != "" {
-			t.f.Events = append(t.f.Events, Event{Day: day, Component: component, From: from, To: to})
-			if len(t.f.Events) > maxEvents {
-				t.f.Events = t.f.Events[len(t.f.Events)-maxEvents:]
+			t.f.addEvent(Event{Day: day, Component: component, Device: device, From: from, To: to})
+			what := component
+			if device != "" {
+				what += " of " + device
 			}
-			res.Logs = append(res.Logs, fmt.Sprintf("%s changed from %s to %s", component, from, to))
+			res.Logs = append(res.Logs, fmt.Sprintf("%s changed from %s to %s", what, from, to))
 		}
 		return to
 	}
-	t.f.Software.Kernel = change("kernel", t.f.Software.Kernel, sw.Kernel)
+	t.f.Software.Kernel = change(model.DriftComponentKernel, "", t.f.Software.Kernel, sw.Kernel)
+	t.f.Software.Hostping = change(model.DriftComponentHostping, "", t.f.Software.Hostping, sw.Hostping)
 	keys := make([]string, 0, len(sw.Firmware))
 	for k := range sw.Firmware {
 		if t.rnicKeys[k] {
@@ -437,7 +566,7 @@ func (t *Tracker) noteSoftware(day int, sw Software, res *Result) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		v := change("firmware "+k, t.f.Software.Firmware[k], sw.Firmware[k])
+		v := change(model.DriftComponentFirmware, k, t.f.Software.Firmware[k], sw.Firmware[k])
 		if v == "" {
 			continue
 		}
@@ -450,9 +579,60 @@ func (t *Tracker) noteSoftware(day int, sw Software, res *Result) {
 	}
 }
 
+// addEvent records e and keeps the last maxEventsPer changes of its
+// component (of its RNIC, for firmware), so that a host with many RNICs and
+// a few firmware updates still holds its last kernel change.
+func (f *File) addEvent(e Event) {
+	f.Events = append(f.Events, e)
+	n := 0
+	for _, o := range f.Events {
+		if o.Component == e.Component && o.Device == e.Device {
+			n++
+		}
+	}
+	for i := 0; n > maxEventsPer && i < len(f.Events); i++ {
+		if o := f.Events[i]; o.Component == e.Component && o.Device == e.Device {
+			f.Events = append(f.Events[:i], f.Events[i+1:]...)
+			n--
+			i--
+		}
+	}
+}
+
+// softwareSince is the recorded software changes from day from on, oldest
+// first. Firmware changes of several RNICs from one version to another on
+// one day are one entry that counts the RNICs.
+func (t *Tracker) softwareSince(from int) []model.DriftSoftwareChange {
+	var out []model.DriftSoftwareChange
+	for _, e := range t.f.Events {
+		if e.Day < from {
+			continue
+		}
+		c := model.DriftSoftwareChange{On: dateOf(e.Day), Component: e.Component, From: e.From, To: e.To}
+		if e.Component != model.DriftComponentFirmware {
+			out = append(out, c)
+			continue
+		}
+		c.Devices = 1
+		merged := false
+		for i := range out {
+			if o := &out[i]; o.Component == c.Component && o.On == c.On && o.From == c.From && o.To == c.To {
+				o.Devices++
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			out = append(out, c)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].On < out[j].On })
+	return out
+}
+
 // clip makes s storable: valid UTF-8, one line, at most maxText bytes.
 func clip(s string) string {
-	s = strings.TrimSpace(strings.ToValidUTF8(s, "\uFFFD"))
+	s = strings.TrimSpace(strings.ToValidUTF8(s, "�"))
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = strings.TrimSpace(s[:i])
 	}
@@ -464,26 +644,23 @@ func clip(s string) string {
 }
 
 // roll moves the history to day: a finished open day is closed into a daily
-// value, daily values that left the window are dropped, and the reference is
-// formed once refDays daily values stand in the window.
+// value, the oldest daily values beyond windowDays are dropped, and the
+// reference is formed once refDays daily values exist.
+//
+// Nothing is dropped for its age. A clock that reads ahead for one run
+// would otherwise age the whole window out, and a host that was off for a
+// month would lose the days its next verdict is to be compared with.
 func (h *PathHistory) roll(day int) {
 	if h.Open != nil && h.Open.Day < day {
 		h.Days = append(h.Days, h.Open.close())
 		h.Open = nil
 	}
-	keep := h.Days[:0]
-	for _, d := range h.Days {
-		if d.Day > day-windowDays {
-			keep = append(keep, d)
-		}
-	}
-	h.Days = keep
-	if len(h.Days) > windowDays {
-		h.Days = h.Days[len(h.Days)-windowDays:]
-	}
 	if h.Ref == nil && len(h.Days) >= refDays {
 		ref := newReference(h.Days[:refDays])
 		h.Ref = &ref
+	}
+	if n := len(h.Days) - windowDays; n > 0 {
+		h.Days = append(h.Days[:0], h.Days[n:]...)
 	}
 }
 
@@ -558,15 +735,6 @@ func medianReading(rs []Reading, minTemps int) Reading {
 	}
 }
 
-// column is the daily values of the signal s over ds.
-func column(ds []Day, s signal) []float64 {
-	out := make([]float64, len(ds))
-	for i, d := range ds {
-		out[i] = s.value(d.Reading)
-	}
-	return out
-}
-
 // readings is the Reading of every day of ds.
 func readings(ds []Day) []Reading {
 	out := make([]Reading, len(ds))
@@ -577,21 +745,9 @@ func readings(ds []Day) []Reading {
 }
 
 // newReference is the reference formed by the daily values ds: each signal's
-// median and scatter, and each temperature's median when most days have one.
+// median, and each temperature's median when most of the days have one.
 func newReference(ds []Day) Reference {
-	rs := readings(ds)
-	ref := Reference{From: ds[0].Day, To: ds[len(ds)-1].Day, Reading: medianReading(rs, len(ds)/2+1)}
-	spread := func(f func(Reading) float64) float64 {
-		vs := make([]float64, len(rs))
-		for i, r := range rs {
-			vs[i] = f(r)
-		}
-		return scatter(vs)
-	}
-	ref.BandwidthSpread = spread(func(r Reading) float64 { return r.BandwidthBPS })
-	ref.LatP50Spread = spread(func(r Reading) float64 { return r.LatP50Ns })
-	ref.LatP99Spread = spread(func(r Reading) float64 { return r.LatP99Ns })
-	return ref
+	return Reference{From: ds[0].Day, To: ds[len(ds)-1].Day, Reading: medianReading(readings(ds), len(ds)/2+1)}
 }
 
 // recent is the daily values a path is judged on at day: the last recentDays
@@ -609,9 +765,34 @@ func (h *PathHistory) recent(day int) []Day {
 	return h.Days[start:end]
 }
 
+// threshold is the change the signal s of the path has to reach to be judged
+// drifted: th, or noiseK times the scatter of its window when that is more.
+// For a signal that is drifted (proven set), only scatter that shows on the
+// better side of the reference counts (see provenScatter).
+func (h *PathHistory) threshold(s signal, th float64, proven bool) float64 {
+	ref := s.value(h.Ref.Reading)
+	xs := make([]float64, len(h.Days))
+	for i, d := range h.Days {
+		xs[i] = s.worse(s.value(d.Reading))
+	}
+	noise := scatter(xs, s.worse(ref))
+	if proven {
+		noise = provenScatter(xs, s.worse(ref))
+	}
+	return math.Max(th, noiseK*noise/ref)
+}
+
 // judge is the path's state at day and the findings of its drifted signals.
-// It updates the verdict memory in h and returns a log line per signal that
-// drifted or recovered.
+// It updates the verdicts in h and returns a log line per signal that
+// drifted or stopped being drifted.
+//
+// A signal becomes drifted when the median of its recent days has moved by
+// its threshold. It stops when at most one of the recent days still reads
+// worse than the reference by half the threshold it drifted at. The two
+// sides differ on purpose. A level that sits near the threshold must not
+// change its verdict with every day's noise, and a device that is degraded
+// on some days and fine on others must not be reported as recovered on the
+// days the fine ones are in the majority.
 func (t *Tracker) judge(p PathIdent, h *PathHistory, day int) (model.PathDrift, []model.DriftFinding, []string) {
 	pd := model.PathDrift{RNIC: p.RNIC, Endpoint: p.Endpoint}
 	if h.Ref == nil {
@@ -629,41 +810,51 @@ func (t *Tracker) judge(p PathIdent, h *PathHistory, day int) (model.PathDrift, 
 	var logs []string
 	for _, s := range signals {
 		ref, now := s.value(h.Ref.Reading), s.value(cur)
-		change := (now - ref) / ref
-		if !s.higherIsWorse {
-			change = -change
+		change := s.change(ref, now)
+		v, was := h.Drifted[s.name]
+		bar := h.threshold(s, t.th, was)
+		if was {
+			// The threshold it drifted at. It rises when the operator raises
+			// --drift-th past it, or when the path has since shown, on the
+			// better side of its reference, that it scatters by more.
+			bar = math.Max(bar, v.Threshold)
 		}
-		pd.Changes = append(pd.Changes, model.DriftChange{Signal: s.name, Change: change})
-		// The bar is the threshold, or more for a path whose days scatter:
-		// by what the reference days showed, or by what the days of the
-		// window show now, whichever is larger.
-		noise := math.Max(s.spread(*h.Ref), dayScatter(column(h.Days, s)))
-		enter := math.Max(t.th, noiseK*noise/ref)
-		since, was := h.Drifted[s.name]
-		if !(change >= enter || (was && change >= enter/2)) {
-			if was {
-				delete(h.Drifted, s.name)
-				logs = append(logs, fmt.Sprintf("%s->%s %s recovered: %s against its reference %s (%+.1f%%), drifted since %s",
-					p.RNIC, p.Endpoint, s.name, formatValue(s, now), formatValue(s, ref), signed(s, change)*100, dateOf(since)))
+		pd.Changes = append(pd.Changes, model.DriftChange{Signal: s.name, Change: change, Threshold: bar})
+		worseDays := 0
+		for _, d := range recent {
+			if s.change(ref, s.value(d.Reading)) >= bar/2 {
+				worseDays++
 			}
+		}
+		switch {
+		case !was && change < bar:
 			continue
-		}
-		if !was {
-			since = day
-			if h.Drifted == nil {
-				h.Drifted = map[model.DriftSignal]int{}
+		case was && worseDays <= 1:
+			delete(h.Drifted, s.name)
+			how := "recovered"
+			if change >= v.Threshold/2 {
+				// The path has not moved back: the threshold has moved up.
+				how = fmt.Sprintf("is no longer counted as drifted, with the threshold now at %.1f%% (--drift-th was raised, or the path has shown that it scatters)", bar*100)
 			}
-			h.Drifted[s.name] = day
+			logs = append(logs, fmt.Sprintf("%s->%s %s %s: %s against its reference %s (%+.1f%%), drifted since %s",
+				p.RNIC, p.Endpoint, s.name, how, formatValue(s, now), formatValue(s, ref), signed(s, change)*100, dateOf(v.Since)))
+			continue
+		case !was:
+			v = Verdict{Since: day, Threshold: bar}
+			if h.Drifted == nil {
+				h.Drifted = map[model.DriftSignal]Verdict{}
+			}
+			h.Drifted[s.name] = v
 		}
 		pd.Status = model.DriftDrifted
 		f := model.DriftFinding{
 			RNIC: p.RNIC, Endpoint: p.Endpoint, Signal: s.name,
-			Change: change, Reference: ref, Recent: now,
+			Change: change, Threshold: bar, WorseDays: worseDays, RecentDays: len(recent),
+			Reference: ref, Recent: now,
 			ReferenceFrom: dateOf(h.Ref.From), ReferenceTo: dateOf(h.Ref.To),
 			RecentFrom: dateOf(recent[0].Day), RecentTo: dateOf(recent[len(recent)-1].Day),
-			Since:           dateOf(since),
-			Temperature:     temperature(p, h.Ref.Reading, cur),
-			SoftwareChanges: t.softwareSince(h.Ref.From),
+			Since:       dateOf(v.Since),
+			Temperature: temperature(p, h.Ref.Reading, cur),
 		}
 		var stepDay int
 		f.Shape, stepDay = shapeOf(s, h.Days, math.Abs(now-ref))
@@ -672,7 +863,7 @@ func (t *Tracker) judge(p PathIdent, h *PathHistory, day int) (model.PathDrift, 
 		}
 		findings = append(findings, f)
 		if !was {
-			logs = append(logs, "drifted: "+FormatFinding(f))
+			logs = append(logs, "drifted: "+FormatFinding(f)+formatChanges(t.softwareSince(h.Ref.From)))
 		}
 	}
 	return pd, findings, logs
@@ -704,9 +895,9 @@ func FormatFinding(f model.DriftFinding) string {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s->%s %s %s against its reference %s (%+.1f%%; reference %s..%s, recent %s..%s), shape %s",
-		f.RNIC, f.Endpoint, f.Signal, formatValue(s, f.Recent), formatValue(s, f.Reference), signed(s, f.Change)*100,
-		f.ReferenceFrom, f.ReferenceTo, f.RecentFrom, f.RecentTo, f.Shape)
+	fmt.Fprintf(&b, "%s->%s %s %s against its reference %s (%+.1f%%, threshold %.1f%%; reference %s..%s, recent %s..%s, %d of %d recent days worse by half the threshold), shape %s",
+		f.RNIC, f.Endpoint, f.Signal, formatValue(s, f.Recent), formatValue(s, f.Reference), signed(s, f.Change)*100, f.Threshold*100,
+		f.ReferenceFrom, f.ReferenceTo, f.RecentFrom, f.RecentTo, f.WorseDays, f.RecentDays, f.Shape)
 	if f.StepOn != "" {
 		fmt.Fprintf(&b, " on %s", f.StepOn)
 	}
@@ -717,21 +908,19 @@ func FormatFinding(f model.DriftFinding) string {
 	for _, d := range f.Temperature.Devices {
 		fmt.Fprintf(&b, " %s %.0f->%.0f C", d.Device, d.ReferenceC, d.RecentC)
 	}
-	for _, c := range f.SoftwareChanges {
-		fmt.Fprintf(&b, "; %s %s %s -> %s", c.On, c.Component, c.From, c.To)
-	}
 	return b.String()
 }
 
-// softwareSince is the recorded software changes from day from on.
-func (t *Tracker) softwareSince(from int) []model.DriftSoftwareChange {
-	var out []model.DriftSoftwareChange
-	for _, e := range t.f.Events {
-		if e.Day >= from {
-			out = append(out, model.DriftSoftwareChange{On: dateOf(e.Day), Component: e.Component, From: e.From, To: e.To})
+// formatChanges spells software changes for the log, after a finding.
+func formatChanges(cs []model.DriftSoftwareChange) string {
+	var b strings.Builder
+	for _, c := range cs {
+		fmt.Fprintf(&b, "; %s %s %s -> %s", c.On, c.Component, c.From, c.To)
+		if c.Devices > 0 {
+			fmt.Fprintf(&b, " (%d RNICs)", c.Devices)
 		}
 	}
-	return out
+	return b.String()
 }
 
 // temperature compares the temperature of the path's devices in the
@@ -782,10 +971,7 @@ func shapeOf(s signal, ds []Day, change float64) (model.DriftShape, int) {
 	// and times the days they are of.
 	worse, times := make([]float64, len(ds)), make([]float64, len(ds))
 	for i, d := range ds {
-		worse[i], times[i] = s.value(d.Reading), float64(d.Day)
-		if !s.higherIsWorse {
-			worse[i] = -worse[i]
-		}
+		worse[i], times[i] = s.worse(s.value(d.Reading)), float64(d.Day)
 	}
 	// A step must carry most of the change and describe the window better
 	// than a straight line does. The second test is what keeps a decline
@@ -814,22 +1000,40 @@ func (f *File) newestDay() int {
 	return newest
 }
 
-// dropAfter removes what the history recorded under a clock that ran ahead
-// of day: the daily values of day and later (day itself starts over), open
-// days and software events after it, and the whole history of a path whose
-// reference reaches past day. It returns how many daily values and
-// references went.
+// daysAfter is how many distinct days after day the history holds a reading
+// of.
+func (f *File) daysAfter(day int) int {
+	after := map[int]bool{}
+	for _, h := range f.Paths {
+		for i := len(h.Days) - 1; i >= 0 && h.Days[i].Day > day; i-- {
+			after[h.Days[i].Day] = true
+		}
+		if h.Open != nil && h.Open.Day > day {
+			after[h.Open.Day] = true
+		}
+	}
+	return len(after)
+}
+
+// dropAfter removes what the history dates after day: daily values, open
+// days and software events, and the whole history of a path whose reference
+// reaches past day, since its days cannot be told apart any more. What is
+// dated day itself stays. It returns how many daily values and references
+// went.
 func (f *File) dropAfter(day int) (days, refs int) {
 	for _, h := range f.Paths {
 		if h.Ref != nil && h.Ref.To > day {
 			days += len(h.Days)
+			if h.Open != nil {
+				days++
+			}
 			refs++
-			*h = PathHistory{FirstSeen: min(h.FirstSeen, day), LastSeen: min(h.LastSeen, day)}
+			*h = PathHistory{Probe: h.Probe, Absent: h.Absent}
 			continue
 		}
 		keep := h.Days[:0]
 		for _, d := range h.Days {
-			if d.Day < day {
+			if d.Day <= day {
 				keep = append(keep, d)
 			}
 		}
@@ -839,9 +1043,9 @@ func (f *File) dropAfter(day int) (days, refs int) {
 			h.Open = nil
 			days++
 		}
-		h.FirstSeen, h.LastSeen = min(h.FirstSeen, day), min(h.LastSeen, day)
-		for s, since := range h.Drifted {
-			h.Drifted[s] = min(since, day)
+		for s, v := range h.Drifted {
+			v.Since = min(v.Since, day)
+			h.Drifted[s] = v
 		}
 	}
 	keep := f.Events[:0]
@@ -851,5 +1055,6 @@ func (f *File) dropAfter(day int) (days, refs int) {
 		}
 	}
 	f.Events = keep
+	f.LastDay = min(f.LastDay, day)
 	return days, refs
 }

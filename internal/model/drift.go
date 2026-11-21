@@ -146,6 +146,13 @@ type DriftSummary struct {
 	// rest, whose paths are still drifted in the metrics.
 	Findings        []DriftFinding `json:"findings,omitempty"`
 	FindingsOmitted int            `json:"findings_omitted,omitempty"`
+	// SoftwareChanges lists, once for the whole section, the changes of the
+	// kernel, of hostping itself and of RNIC firmware that the history
+	// recorded since the oldest reference among the findings began, oldest
+	// first. It is absent without a finding. A report holds a bounded number
+	// of them, the newest; SoftwareChangesOmitted counts the rest.
+	SoftwareChanges        []DriftSoftwareChange `json:"software_changes,omitempty"`
+	SoftwareChangesOmitted int                   `json:"software_changes_omitted,omitempty"`
 }
 
 // DriftUnknownCount is how many paths are unknown for one reason.
@@ -165,6 +172,17 @@ type DriftFinding struct {
 	// fraction of Reference: 0.07 is a bandwidth 7% lower, or a latency 7%
 	// higher.
 	Change float64 `json:"change"`
+	// Threshold is the change the signal had to reach to be judged drifted:
+	// --drift-th, or more for a path whose days scatter. It was fixed when
+	// the signal drifted, and the signal stays drifted until at most one of
+	// its recent days still reads worse than the reference by half of it.
+	Threshold float64 `json:"threshold"`
+	// WorseDays is how many of the RecentDays daily values behind Recent
+	// read worse than Reference by half of Threshold or more. It says why a
+	// signal whose Change is small is still drifted: the path reads low on
+	// some of its days.
+	WorseDays  int `json:"worse_days"`
+	RecentDays int `json:"recent_days"`
 	// Reference and Recent are in the signal's unit: bit/s for bandwidth, ns
 	// for the latencies.
 	Reference float64 `json:"reference"`
@@ -180,9 +198,6 @@ type DriftFinding struct {
 	// StepOn is the first UTC day at the new level of a DriftShapeStep.
 	StepOn      string           `json:"step_on,omitempty"`
 	Temperature DriftTemperature `json:"temperature"`
-	// SoftwareChanges lists the kernel and RNIC firmware changes seen since
-	// the reference days began, oldest first.
-	SoftwareChanges []DriftSoftwareChange `json:"software_changes,omitempty"`
 }
 
 // DriftTemperature is the temperature evidence of a DriftFinding.
@@ -203,16 +218,27 @@ type DriftDeviceTemp struct {
 	RecentC    float64 `json:"recent_c"`
 }
 
-// DriftSoftwareChange is one change of the kernel release or of an RNIC's
-// firmware version that the drift history recorded.
+// DriftSoftwareChange is one change of the kernel release, of the hostping
+// build or of RNIC firmware that the drift history recorded.
 type DriftSoftwareChange struct {
 	// On is the UTC day (YYYY-MM-DD) of the first idle run that saw it.
 	On string `json:"on"`
-	// Component is "kernel" or "firmware <RNIC PCI address or device>".
+	// Component is DriftComponentKernel, DriftComponentHostping or
+	// DriftComponentFirmware.
 	Component string `json:"component"`
 	From      string `json:"from"`
 	To        string `json:"to"`
+	// Devices is how many RNICs changed firmware from From to To that day;
+	// 0 for the other components.
+	Devices int `json:"devices,omitempty"`
 }
+
+// Components of a DriftSoftwareChange.
+const (
+	DriftComponentKernel   = "kernel"
+	DriftComponentHostping = "hostping"
+	DriftComponentFirmware = "firmware"
+)
 
 // PathDrift is the drift state of one tracked path after an idle run, for the
 // metrics. The report carries only the DriftSummary built from these.
@@ -228,8 +254,13 @@ type PathDrift struct {
 	Changes []DriftChange
 }
 
-// DriftChange is one signal's change against the path's reference.
+// DriftChange is one signal's change against the path's reference, and the
+// change at which the signal is judged drifted.
 type DriftChange struct {
 	Signal DriftSignal
 	Change float64
+	// Threshold is the change the signal has to reach to be judged drifted
+	// (or, for a drifted signal, had to reach): --drift-th, or more for a
+	// path whose days scatter.
+	Threshold float64
 }

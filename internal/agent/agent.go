@@ -194,13 +194,9 @@ func Run(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	dt, err := newDriftTracker(cfg, g, time.Now, logging.Infof)
+	dt, err := newDriftTracker(cfg, g, buildName(build), time.Now, logging.Infof)
 	if err != nil {
 		return err
-	}
-	if rt.world == nil {
-		// The simulated host has no sensors and no software to change.
-		dt.live(g)
 	}
 	// The daemon's poll loop reports its liveness on /healthz; a one-shot run
 	// has no loop, and its /healthz (when --metrics is given) stays 200.

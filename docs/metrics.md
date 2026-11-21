@@ -62,7 +62,8 @@ are what they would be without it. See
   "unknown_reasons": [{"reason": "few_recent_days", "paths": 1}],
   "findings": [{
     "rnic": "rnic1", "endpoint": "gpu3", "signal": "bandwidth",
-    "shape": "gradual", "change": 0.071,
+    "shape": "gradual", "change": 0.071, "threshold": 0.05,
+    "worse_days": 7, "recent_days": 7,
     "reference": 197000000000, "recent": 183000000000,
     "reference_from": "2026-08-01", "reference_to": "2026-08-07",
     "recent_from": "2026-10-22", "recent_to": "2026-10-28",
@@ -70,7 +71,11 @@ are what they would be without it. See
     "temperature": {"status": "rose", "devices": [
       {"device": "rnic1", "reference_c": 55, "recent_c": 56},
       {"device": "gpu3", "reference_c": 61, "recent_c": 70}]}
-  }]
+  }],
+  "software_changes": [
+    {"on": "2026-09-30", "component": "firmware", "from": "28.39.1002", "to": "28.41.1000", "devices": 8},
+    {"on": "2026-10-14", "component": "kernel", "from": "6.8.0-45-generic", "to": "6.8.0-48-generic"}
+  ]
 }
 ```
 
@@ -82,6 +87,8 @@ are what they would be without it. See
 | `findings_omitted` | How many more findings there are than the report carries. Absent when 0. |
 | `signal` | `bandwidth`, `latency_p50` or `latency_p99` (the small-message latency). |
 | `change` | How far `recent` lies on the worse side of `reference`, as a fraction of `reference`: 0.07 is a bandwidth 7% lower or a latency 7% higher. |
+| `threshold` | The `change` at which this signal is judged drifted: `--drift-th`, more on a path whose idle days scatter, and never less than the threshold the signal drifted at. See [Drift verdict](design.md#drift-verdict). |
+| `worse_days`, `recent_days` | How many of the recent days read worse than `reference` by half of `threshold`, and how many recent days there are. The signal stays drifted while `worse_days` is 2 or more, which is why a finding can carry a `change` below its `threshold`. |
 | `reference`, `recent` | The path's reference level and the median of its recent days, in bit/s for `bandwidth` and ns for the latencies. |
 | `reference_from`, `reference_to`, `recent_from`, `recent_to` | First and last UTC day (`YYYY-MM-DD`) of the daily values behind each side. |
 | `since` | UTC day the signal was first judged drifted. |
@@ -90,7 +97,8 @@ are what they would be without it. See
 | `temperature.status` | `rose`, `steady` or `unknown`; see [Temperature](design.md#temperature). |
 | `temperature.reason` | Why the status is `unknown`: `<device>: no_sensor`, `no_reference_reading` or `no_recent_reading`. |
 | `temperature.devices` | The devices of the path read on both sides, with `reference_c` and `recent_c` in °C. |
-| `software_changes` | Kernel and RNIC firmware changes recorded since the reference began: `on` (UTC day), `component` (`kernel`, or `firmware <RNIC PCI address>`), `from`, `to`. Absent when none. |
+| `software_changes` | Once for the section, not per finding: the kernel, hostping and RNIC firmware changes recorded since the oldest reference behind a finding began, oldest first, at most 16 (the newest). Each has `on` (UTC day), `component` (`kernel`, `hostping` or `firmware`), `from` and `to`; a `firmware` entry also has `devices`, the number of RNICs that changed between these two versions that day. Absent when there is no finding or no change. |
+| `software_changes_omitted` | How many older software changes there are than the report carries. Absent when 0. |
 
 ## Metrics
 
@@ -116,6 +124,7 @@ agent from one with nothing to report. See
 | `hostping.path.drift.status_code` | gauge (code) | `rnic`, `endpoint` | With `--drift-tracking`: the path's state against its own idle history: 1 `stable`, 2 `unknown`, 3 `drifted`. Written after every confirmed idle-trigger run; no series without the flag |
 | `hostping.path.drift.reason_code` | gauge (code) | `rnic`, `endpoint` | With `--drift-tracking`: why the drift state is unknown: 1 `collecting_reference`, 2 `few_recent_days`, 3 `clock_behind`, 4 `not_tracked`, 5 `history_blocked`; 0 `none` on a stable or drifted path |
 | `hostping.path.drift.change_ratio` | gauge (ratio) | `rnic`, `endpoint`, `signal` | With `--drift-tracking`: how far the path's recent idle days read on the worse side of its own reference, as a fraction of the reference, per `signal` (`bandwidth`, `latency_p50`, `latency_p99`). Positive is worse for every signal; negative is better. Not written while the state is unknown, so read it together with the status code: the exporter keeps the last value |
+| `hostping.path.drift.threshold_ratio` | gauge (ratio) | `rnic`, `endpoint`, `signal` | With `--drift-tracking`: the `change_ratio` at which the signal is judged drifted: `--drift-th`, more on a path whose idle days scatter (three times their day-to-day scatter), and for a drifted signal never less than the threshold it drifted at. A `change_ratio` above `--drift-th` and below this is a path that scatters by more than it moved. Written and kept like `change_ratio` |
 | `hostping.link.abnormal_count` | gauge | `link` | Algorithm 1 `abnormal_cnt` |
 | `hostping.link.status_code` | gauge (code) | `link` | The link's current Algorithm 1 status: 1 `normal`, 2 `uncertain`, 3 `abnormal`, 4 `gray` |
 | `hostping.bus.utilization` | gauge (0–1) | `link` | Intra-host bus utilization of the hop, sampled before the run; no sample when unknown (see [Bus utilization](design.md#bus-utilization)) |
@@ -174,7 +183,7 @@ The `hostping.mutual.*` gauges are absent altogether on a host where no RNIC
 pair qualifies for the mutual probe. See [Diagnoses](design.md#diagnoses).
 
 Per host the series count is roughly 10 per RNIC→endpoint path plus 3 per
-link, and 5 more per path with `--drift-tracking`. See
+link, and 8 more per path with `--drift-tracking`. See
 [Series cardinality](operations.md#series-cardinality). For what
 each `hostping.diagnosis.count` code means and which ones to page on, see the
 [runbook](runbook.md).

@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/yuuki/hostping/internal/buildinfo"
 	"github.com/yuuki/hostping/internal/config"
 	"github.com/yuuki/hostping/internal/drift"
 	"github.com/yuuki/hostping/internal/model"
@@ -38,11 +40,15 @@ type driftTracker struct {
 	rnicKey map[string]string
 	now     func() time.Time
 	logf    func(format string, args ...any)
-	// temps reads the device temperatures and software the versions of the
-	// live host. Both are nil under --sim, which has neither: the
-	// temperature is then unknown and no software change is recorded.
+	// temps reads the device temperatures and software the kernel release
+	// and firmware versions of the live host. Both are nil under --sim, which
+	// has neither: the temperature is then unknown and neither a kernel nor a
+	// firmware change is recorded.
 	temps    func(context.Context) map[string]float64
 	software func() (kernel string, firmware map[string]string)
+	// build names the hostping build that takes the readings (see
+	// buildName); empty when it cannot be told.
+	build string
 	// held is the temperatures read at the end of the idle run whose report
 	// is being held, the closest reading to the probes themselves.
 	held map[string]float64
@@ -53,11 +59,29 @@ type driftTracker struct {
 	dirty    bool
 }
 
-// newDriftTracker opens the drift history for the daemon. A history that
-// cannot be used is not an error: an unusable file is set aside and tracking
-// starts over, and one that must not be replaced leaves tracking off, with
-// one log line either way.
-func newDriftTracker(cfg config.Config, g topology.Graph, now func() time.Time, logf func(string, ...any)) (*driftTracker, error) {
+// buildName names a hostping build in the drift history: its version and
+// commit. A build that knows neither is not named (unknown is not a
+// version), so that running one records no change.
+func buildName(b buildinfo.Info) string {
+	if (b.Version == "" || b.Version == buildinfo.UnknownVersion) && (b.Commit == "" || b.Commit == buildinfo.UnknownCommit) {
+		return ""
+	}
+	return fmt.Sprintf("%s (%s)", b.Version, b.Commit)
+}
+
+// probeSettings is the probe settings of cfg that decide what a path's
+// reading measures. A history taken with others starts over (drift.Probe).
+func probeSettings(cfg config.Config) drift.Probe {
+	return drift.Probe{SmallMsgBytes: cfg.SmallMsgBytes, LargeMsgBytes: cfg.LargeMsgBytes, Iters: cfg.Iters, MemWarmup: cfg.MemWarmup}
+}
+
+// newDriftTracker opens the drift history for the daemon, for the hostping
+// build named build (buildName). A history that cannot be used is not an
+// error: an unusable file is set aside and tracking starts over, and one
+// that must not be replaced leaves tracking off, with one log line either
+// way. On a live host (not --sim) the tracker reads the device temperatures
+// and the software versions of the host.
+func newDriftTracker(cfg config.Config, g topology.Graph, build string, now func() time.Time, logf func(string, ...any)) (*driftTracker, error) {
 	if !cfg.DriftTracking || cfg.Once {
 		return nil, nil
 	}
@@ -69,11 +93,15 @@ func newDriftTracker(cfg config.Config, g topology.Graph, now func() time.Time, 
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("--state-dir: %w", err)
 	}
-	d := &driftTracker{store: drift.NewStore(cfg.StateDir), now: now, logf: logf, rnicKey: map[string]string{}}
+	d := &driftTracker{store: drift.NewStore(cfg.StateDir), now: now, logf: logf, rnicKey: map[string]string{}, build: build}
 	var rnicKeys []string
-	d.paths, rnicKeys = drift.Paths(g)
+	d.paths, rnicKeys = drift.Paths(g, probeSettings(cfg))
 	for i, n := range g.RNICs {
 		d.rnicKey[n.ID] = rnicKeys[i]
+	}
+	if !cfg.Sim {
+		// The simulated host has no sensors, kernel or firmware to read.
+		d.live(g)
 	}
 	f, status, why := d.store.Load()
 	switch status {
@@ -106,9 +134,6 @@ func newDriftTracker(cfg config.Config, g topology.Graph, now func() time.Time, 
 
 // live gives the tracker the readers of a live host.
 func (d *driftTracker) live(g topology.Graph) {
-	if d == nil {
-		return
-	}
 	d.temps = monitor.TempReader{Graph: g}.Read
 	d.software = func() (string, map[string]string) {
 		return monitor.KernelRelease("/proc"), monitor.RNICFirmware("/sys", g)
@@ -146,10 +171,11 @@ func (d *driftTracker) observe(rep *model.Report) []model.PathDrift {
 		for i, p := range d.paths {
 			paths[i] = model.PathDrift{RNIC: p.RNIC, Endpoint: p.Endpoint, Reason: model.DriftHistoryBlocked}
 		}
-		rep.Drift = &model.DriftSummary{Unknown: len(paths)}
+		sum := model.DriftSummary{Unknown: len(paths)}
 		if len(paths) > 0 {
-			rep.Drift.UnknownReasons = []model.DriftUnknownCount{{Reason: model.DriftHistoryBlocked, Paths: len(paths)}}
+			sum.UnknownReasons = []model.DriftUnknownCount{{Reason: model.DriftHistoryBlocked, Paths: len(paths)}}
 		}
+		d.attach(rep, sum)
 		return paths
 	}
 	now := d.now()
@@ -157,7 +183,7 @@ func (d *driftTracker) observe(rep *model.Report) []model.PathDrift {
 	for _, line := range res.Logs {
 		d.logf("hostping: drift: %s", line)
 	}
-	rep.Drift = &res.Summary
+	d.attach(rep, res.Summary)
 	d.dirty = true
 	if day := int(now.Unix() / 86400); len(res.Logs) > 0 || day != d.savedDay || now.Sub(d.lastSave) >= driftSaveEvery {
 		d.save(now)
@@ -165,14 +191,29 @@ func (d *driftTracker) observe(rep *model.Report) []model.PathDrift {
 	return res.Paths
 }
 
-// readSoftware is the software of the live host, keyed as the history keys
-// it; the zero value where it cannot be read (--sim).
+// attach gives rep its drift section. A section that JSON cannot carry (a
+// change that is not a finite number) is left out, with a log line: the
+// report of the run, with everything the run itself found, must not be lost
+// to it. The history's bounds rule such a number out (drift.Parse), so this
+// only guards the report against a fault in the tracker.
+func (d *driftTracker) attach(rep *model.Report, sum model.DriftSummary) {
+	if _, err := json.Marshal(sum); err != nil {
+		d.logf("hostping: drift: the drift section is left out of this report: it cannot be encoded: %v", err)
+		return
+	}
+	rep.Drift = &sum
+}
+
+// readSoftware is the hostping build and the software of the live host,
+// keyed as the history keys it; nothing of the host where it cannot be read
+// (--sim).
 func (d *driftTracker) readSoftware() drift.Software {
+	sw := drift.Software{Hostping: d.build}
 	if d.software == nil {
-		return drift.Software{}
+		return sw
 	}
 	kernel, firmware := d.software()
-	sw := drift.Software{Kernel: kernel}
+	sw.Kernel = kernel
 	for id, v := range firmware {
 		if key, ok := d.rnicKey[id]; ok {
 			if sw.Firmware == nil {

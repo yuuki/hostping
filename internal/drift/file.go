@@ -30,6 +30,14 @@ type File struct {
 	Version int `json:"version"`
 	// SavedAt is when the file was written.
 	SavedAt time.Time `json:"saved_at,omitzero"`
+	// LastDay is the day of the last run the history saw; 0 before the
+	// first.
+	LastDay int `json:"last_day"`
+	// BehindSince is the day the clock was first seen behind the newest
+	// day of the history, while it is (see Tracker.clockBehind); nil
+	// otherwise. It is kept here so that a restart does not start the wait
+	// over.
+	BehindSince *int `json:"clock_behind_since,omitempty"`
 	// Software is the software the last observed run saw.
 	Software Software `json:"software,omitzero"`
 	// Events are the software changes seen, oldest first.
@@ -81,7 +89,16 @@ func (f *File) validate() error {
 	if len(f.Paths) > MaxPaths {
 		return fmt.Errorf("%d paths, more than the %d a history holds", len(f.Paths), MaxPaths)
 	}
+	if !dayOK(f.LastDay) {
+		return fmt.Errorf("last_day %d out of range", f.LastDay)
+	}
+	if f.BehindSince != nil && !dayOK(*f.BehindSince) {
+		return fmt.Errorf("clock_behind_since %d out of range", *f.BehindSince)
+	}
 	if err := textOK("software.kernel", f.Software.Kernel, maxText); err != nil {
+		return err
+	}
+	if err := textOK("software.hostping", f.Software.Hostping, maxText); err != nil {
 		return err
 	}
 	if len(f.Software.Firmware) > MaxPaths {
@@ -95,22 +112,23 @@ func (f *File) validate() error {
 			return err
 		}
 	}
-	if len(f.Events) > maxEvents {
-		return fmt.Errorf("%d events, more than %d", len(f.Events), maxEvents)
+	// At most maxEventsPer of the kernel, of hostping and of every RNIC.
+	if len(f.Events) > maxEventsPer*(MaxPaths+2) {
+		return fmt.Errorf("%d events", len(f.Events))
 	}
 	for i, e := range f.Events {
 		if !dayOK(e.Day) {
 			return fmt.Errorf("events[%d]: day %d out of range", i, e.Day)
 		}
-		// "firmware " and a key.
-		if err := textOK("events component", e.Component, maxKey+len("firmware ")); err != nil {
-			return err
+		for what, v := range map[string]string{"component": e.Component, "from": e.From, "to": e.To} {
+			if err := textOK("events "+what, v, maxText); err != nil {
+				return err
+			}
 		}
-		if err := textOK("events from", e.From, maxText); err != nil {
-			return err
-		}
-		if err := textOK("events to", e.To, maxText); err != nil {
-			return err
+		if e.Device != "" {
+			if err := keyOK("events device", e.Device); err != nil {
+				return err
+			}
 		}
 	}
 	for k, h := range f.Paths {
@@ -128,8 +146,11 @@ func (f *File) validate() error {
 }
 
 func (h *PathHistory) validate() error {
-	if !dayOK(h.FirstSeen) || !dayOK(h.LastSeen) || h.FirstSeen > h.LastSeen {
-		return fmt.Errorf("first_seen %d, last_seen %d", h.FirstSeen, h.LastSeen)
+	if err := textOK("probe", h.Probe, maxKey); err != nil {
+		return err
+	}
+	if h.Absent < 0 || h.Absent > maxDay {
+		return fmt.Errorf("absent %d out of range", h.Absent)
 	}
 	if len(h.Days) > windowDays {
 		return fmt.Errorf("%d days, more than %d", len(h.Days), windowDays)
@@ -154,12 +175,6 @@ func (h *PathHistory) validate() error {
 		if err := checkReading(r.Reading); err != nil {
 			return fmt.Errorf("reference: %v", err)
 		}
-		for _, v := range []float64{r.BandwidthSpread, r.LatP50Spread, r.LatP99Spread} {
-			// A scatter is less than the range of the values behind it.
-			if !(v >= 0 && v <= maxValue) {
-				return fmt.Errorf("reference: spread %v", v)
-			}
-		}
 	}
 	if o := h.Open; o != nil {
 		if !dayOK(o.Day) || o.Day <= last {
@@ -180,12 +195,16 @@ func (h *PathHistory) validate() error {
 			}
 		}
 	}
-	for s, since := range h.Drifted {
+	for s, v := range h.Drifted {
 		if !knownSignal(string(s)) {
 			return fmt.Errorf("drifted: unknown signal %q", s)
 		}
-		if !dayOK(since) {
-			return fmt.Errorf("drifted[%s]: day %d out of range", s, since)
+		if !dayOK(v.Since) {
+			return fmt.Errorf("drifted[%s]: day %d out of range", s, v.Since)
+		}
+		// A NaN fails both comparisons.
+		if !(v.Threshold > 0 && v.Threshold <= maxThreshold) {
+			return fmt.Errorf("drifted[%s]: threshold %v", s, v.Threshold)
 		}
 		if h.Ref == nil {
 			return fmt.Errorf("drifted[%s] without a reference", s)
@@ -200,7 +219,7 @@ func (h *PathHistory) validate() error {
 func checkReading(r Reading) error {
 	for _, v := range []float64{r.BandwidthBPS, r.LatP50Ns, r.LatP99Ns} {
 		if !valueOK(v) {
-			return fmt.Errorf("value %v is not a positive reading", v)
+			return fmt.Errorf("value %v is not a reading between %v and %v", v, float64(minValue), float64(maxValue))
 		}
 	}
 	for _, p := range []*float64{r.TempRNIC, r.TempEndpoint} {
@@ -211,9 +230,11 @@ func checkReading(r Reading) error {
 	return nil
 }
 
-// valueOK reports a bandwidth or latency the history may hold: positive and
-// no more than maxValue. A NaN fails both comparisons.
-func valueOK(v float64) bool { return v > 0 && v <= maxValue }
+// valueOK reports a bandwidth or latency the history may hold: from
+// minValue to maxValue. A NaN fails both comparisons. The lower bound is
+// what keeps a change against a reference, a ratio of two such values, a
+// finite number that a report can carry.
+func valueOK(v float64) bool { return v >= minValue && v <= maxValue }
 
 // tempOK reports a temperature the history may hold.
 func tempOK(c float64) bool { return c >= minTempC && c <= maxTempC && !math.IsNaN(c) }

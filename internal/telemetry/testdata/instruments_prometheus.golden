@@ -52,6 +52,8 @@
 # TYPE hostping_path_drift_reason_code gauge
 # HELP hostping_path_drift_status_code Code of the path's state against its own idle history (1 stable, 2 unknown, 3 drifted); hostping.status_code.info names every code; with --drift-tracking
 # TYPE hostping_path_drift_status_code gauge
+# HELP hostping_path_drift_threshold_ratio The change_ratio at which the signal of the path is judged drifted: --drift-th, more on a path whose idle days scatter, and for a drifted signal the threshold it drifted at; with --drift-tracking
+# TYPE hostping_path_drift_threshold_ratio gauge
 # HELP hostping_path_latency_reason_code Code of what the latency verdict was judged against, or why it was not judged; hostping.status_code.info names every code
 # TYPE hostping_path_latency_reason_code gauge
 # HELP hostping_path_latency_status_code Code of the path's current small-message latency verdict (1 normal, 2 unknown, 3 abnormal); hostping.status_code.info names every code

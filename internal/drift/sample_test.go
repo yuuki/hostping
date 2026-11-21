@@ -3,6 +3,7 @@ package drift
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/topology"
@@ -100,11 +101,12 @@ func TestSamplesOnlyFromCleanIdleRuns(t *testing.T) {
 		t.Fatalf("idle run: %+v, want the two clean paths", got)
 	}
 	for name, edit := range map[string]func(*model.Report){
-		"busy run":           func(r *model.Report) { r.Trigger, r.Mode, r.HostIdle = model.TriggerPFC, model.ModeBusy, false },
-		"periodic run":       func(r *model.Report) { r.Trigger, r.Mode, r.HostIdle = model.TriggerPeriodic, model.ModeBusy, false },
-		"mutual alarm, idle": func(r *model.Report) { r.Trigger = model.TriggerMutualTimeout },
-		"manual run":         func(r *model.Report) { r.Trigger = model.TriggerManual },
-		"host not idle":      func(r *model.Report) { r.HostIdle = false },
+		"busy run":                            func(r *model.Report) { r.Trigger, r.Mode, r.HostIdle = model.TriggerPFC, model.ModeBusy, false },
+		"periodic run":                        func(r *model.Report) { r.Trigger, r.Mode, r.HostIdle = model.TriggerPeriodic, model.ModeBusy, false },
+		"mutual alarm, idle":                  func(r *model.Report) { r.Trigger = model.TriggerMutualTimeout },
+		"idle trigger, measured in busy mode": func(r *model.Report) { r.Mode = model.ModeBusy },
+		"manual run":                          func(r *model.Report) { r.Trigger = model.TriggerManual },
+		"host not idle":                       func(r *model.Report) { r.HostIdle = false },
 		"a CPU package loaded": func(r *model.Report) {
 			r.CPULoad = append(r.CPULoad, model.CPULoad{NUMA: 1, Socket: 1, Busy: 0.9, High: true})
 		},
@@ -140,7 +142,7 @@ func TestSamplesTemperatures(t *testing.T) {
 // the renumbering that adding or removing another device causes.
 func TestPathKeys(t *testing.T) {
 	g := topology.Fig2()
-	paths, rnics := Paths(g)
+	paths, rnics := Paths(g, Probe{})
 	if len(paths) != len(g.Paths) || len(rnics) != len(g.RNICs) {
 		t.Fatalf("%d paths and %d RNIC keys for %d and %d", len(paths), len(rnics), len(g.Paths), len(g.RNICs))
 	}
@@ -194,7 +196,7 @@ func TestPathKeys(t *testing.T) {
 			rename[r+"->"+e] = old
 		}
 	}
-	renumbered, _ := Paths(h)
+	renumbered, _ := Paths(h, Probe{})
 	if len(renumbered) == 0 || len(renumbered) != len(h.Paths) {
 		t.Fatalf("%d paths after the exclusion", len(renumbered))
 	}
@@ -202,6 +204,37 @@ func TestPathKeys(t *testing.T) {
 		if want := rename[p.RNIC+"->"+p.Endpoint]; p.Key != want {
 			t.Errorf("%s->%s is now keyed %q, was %q", p.RNIC, p.Endpoint, p.Key, want)
 		}
+	}
+}
+
+// Every path carries the probe settings its readings are taken with: the
+// message sizes and the iterations, and for a memory endpoint the warm-up.
+func TestPathsCarryTheProbeSettings(t *testing.T) {
+	probe := Probe{SmallMsgBytes: 1, LargeMsgBytes: 262144, Iters: 512, MemWarmup: 200 * time.Millisecond}
+	paths, _ := Paths(topology.Fig2(), probe)
+	gpus, mems := 0, 0
+	for _, p := range paths {
+		want := "small_msg=1 large_msg=262144 iters=512"
+		if p.EndpointSensor {
+			gpus++
+		} else {
+			mems++
+			want += " mem_warmup=200ms"
+		}
+		if p.Probe != want {
+			t.Fatalf("%s->%s: probe %q, want %q", p.RNIC, p.Endpoint, p.Probe, want)
+		}
+		if err := textOK("probe", p.Probe, maxKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gpus == 0 || mems == 0 {
+		t.Fatalf("%d GPU paths, %d memory paths: the test proves nothing", gpus, mems)
+	}
+	// The largest values a flag can take still fit the file.
+	big := Probe{SmallMsgBytes: 1<<32 - 1, LargeMsgBytes: 1<<32 - 1, Iters: 1<<32 - 1, MemWarmup: 1<<63 - 1}
+	if err := textOK("probe", big.For(model.EndpointMemory), maxKey); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -214,7 +247,7 @@ func TestPathKeysUnderSubNUMAClustering(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		paths, _ := Paths(g)
+		paths, _ := Paths(g, Probe{})
 		out := map[string]bool{}
 		for _, p := range paths {
 			out[p.Key] = true
@@ -257,7 +290,7 @@ func TestPathKeyFallbacks(t *testing.T) {
 	}
 	g.Paths = append(g.Paths, model.Path{RNIC: "rnic0", Endpoint: "gpu0", Distance: model.DistanceCrossRoot},
 		model.Path{RNIC: "rnic9", Endpoint: "mem0"}) // names no RNIC of the graph
-	paths, rnics := Paths(g)
+	paths, rnics := Paths(g, Probe{})
 	want := []string{
 		"mlx5_0->mem0of1/local_mem",
 		"0000:17:00.0->mem0of1/local_mem",

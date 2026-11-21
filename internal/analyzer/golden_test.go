@@ -459,6 +459,9 @@ func fullReport() model.Report {
 				Signal:        model.DriftBandwidth,
 				Shape:         model.DriftShapeStep,
 				Change:        0.08,
+				Threshold:     0.05,
+				WorseDays:     6,
+				RecentDays:    7,
 				Reference:     197_000_000_000,
 				Recent:        181_240_000_000,
 				ReferenceFrom: "2026-08-01",
@@ -472,10 +475,12 @@ func fullReport() model.Report {
 					Reason:  "gpu0: " + model.DriftTempNoRecent,
 					Devices: []model.DriftDeviceTemp{{Device: "rnic0", ReferenceC: 55, RecentC: 57.5}},
 				},
-				SoftwareChanges: []model.DriftSoftwareChange{{
-					On: "2026-10-16", Component: "kernel", From: "6.8.0-45-generic", To: "6.8.0-48-generic",
-				}},
 			}},
+			SoftwareChanges: []model.DriftSoftwareChange{
+				{On: "2026-10-09", Component: model.DriftComponentFirmware, From: "28.39.1002", To: "28.41.1000", Devices: 8},
+				{On: "2026-10-16", Component: model.DriftComponentKernel, From: "6.8.0-45-generic", To: "6.8.0-48-generic"},
+			},
+			SoftwareChangesOmitted: 1,
 		},
 	}
 }

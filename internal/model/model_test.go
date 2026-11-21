@@ -608,6 +608,9 @@ func TestStringConstants(t *testing.T) {
 		{"DriftTempRose", string(model.DriftTempRose), "rose"},
 		{"DriftTempSteady", string(model.DriftTempSteady), "steady"},
 		{"DriftTempUnknown", string(model.DriftTempUnknown), "unknown"},
+		{"DriftComponentKernel", model.DriftComponentKernel, "kernel"},
+		{"DriftComponentHostping", model.DriftComponentHostping, "hostping"},
+		{"DriftComponentFirmware", model.DriftComponentFirmware, "firmware"},
 		{"DriftTempNoSensor", model.DriftTempNoSensor, "no_sensor"},
 		{"DriftTempNoReference", model.DriftTempNoReference, "no_reference_reading"},
 		{"DriftTempNoRecent", model.DriftTempNoRecent, "no_recent_reading"},
@@ -766,6 +769,9 @@ func fullReport() model.Report {
 				Signal:        model.DriftBandwidth,
 				Shape:         model.DriftShapeStep,
 				Change:        0.08,
+				Threshold:     0.05,
+				WorseDays:     6,
+				RecentDays:    7,
 				Reference:     200000000000,
 				Recent:        184000000000,
 				ReferenceFrom: "2025-11-01",
@@ -779,10 +785,13 @@ func fullReport() model.Report {
 					Reason:  "gpu0: " + model.DriftTempNoRecent,
 					Devices: []model.DriftDeviceTemp{{Device: "rnic0", ReferenceC: 55, RecentC: 57.5}},
 				},
-				SoftwareChanges: []model.DriftSoftwareChange{{
-					On: "2025-12-17", Component: "kernel", From: "6.8.0-45-generic", To: "6.8.0-48-generic",
-				}},
 			}},
+			FindingsOmitted: 2,
+			SoftwareChanges: []model.DriftSoftwareChange{
+				{On: "2025-12-10", Component: model.DriftComponentFirmware, From: "28.39.1002", To: "28.41.1000", Devices: 8},
+				{On: "2025-12-17", Component: model.DriftComponentKernel, From: "6.8.0-45-generic", To: "6.8.0-48-generic"},
+			},
+			SoftwareChangesOmitted: 1,
 		},
 	}
 }
@@ -803,9 +812,9 @@ func zeroReport() model.Report {
 		Drift: &model.DriftSummary{
 			UnknownReasons: []model.DriftUnknownCount{{}},
 			Findings: []model.DriftFinding{{
-				Temperature:     model.DriftTemperature{Devices: []model.DriftDeviceTemp{{}}},
-				SoftwareChanges: []model.DriftSoftwareChange{{}},
+				Temperature: model.DriftTemperature{Devices: []model.DriftDeviceTemp{{}}},
 			}},
+			SoftwareChanges: []model.DriftSoftwareChange{{}},
 		},
 	}
 }

@@ -11,22 +11,23 @@ import (
 func driftPaths() []model.PathDrift {
 	return []model.PathDrift{
 		{RNIC: "rnic0", Endpoint: "gpu0", Status: model.DriftDrifted, Changes: []model.DriftChange{
-			{Signal: model.DriftBandwidth, Change: 0.071},
-			{Signal: model.DriftLatencyP50, Change: 0.002},
-			{Signal: model.DriftLatencyP99, Change: -0.01},
+			{Signal: model.DriftBandwidth, Change: 0.071, Threshold: 0.05},
+			{Signal: model.DriftLatencyP50, Change: 0.002, Threshold: 0.05},
+			{Signal: model.DriftLatencyP99, Change: -0.01, Threshold: 0.132},
 		}},
 		{RNIC: "rnic0", Endpoint: "gpu1", Status: model.DriftStable, Changes: []model.DriftChange{
-			{Signal: model.DriftBandwidth, Change: 0},
-			{Signal: model.DriftLatencyP50, Change: 0},
-			{Signal: model.DriftLatencyP99, Change: 0},
+			{Signal: model.DriftBandwidth, Change: 0, Threshold: 0.05},
+			{Signal: model.DriftLatencyP50, Change: 0, Threshold: 0.05},
+			{Signal: model.DriftLatencyP99, Change: 0, Threshold: 0.05},
 		}},
 		{RNIC: "rnic0", Endpoint: "mem0", Reason: model.DriftCollectingReference},
 	}
 }
 
-// Each tracked path is one status and one reason series, and one change
-// series per signal once it is judged. An unknown path has a reason and no
-// change: there is none, and 0 would read as a path that has not moved.
+// Each tracked path is one status and one reason series, and one change and
+// one threshold series per signal once it is judged. An unknown path has a
+// reason and neither a change nor a threshold: there is none, and 0 would
+// read as a path that has not moved.
 func TestRecordDrift(t *testing.T) {
 	tel, reader := newTestTelemetry(t)
 	tel.RecordDrift(context.Background(), driftPaths())
@@ -45,6 +46,19 @@ func TestRecordDrift(t *testing.T) {
 	if got := gaugeFloat(t, ms, "hostping.path.drift.change_ratio"); !maps.Equal(got, want) {
 		t.Fatalf("path.drift.change_ratio = %v, want %v", got, want)
 	}
+	// The threshold each change is held against, per signal: --drift-th, or
+	// more where the path scatters.
+	want = map[string]float64{
+		"endpoint=gpu0,rnic=rnic0,signal=bandwidth":   0.05,
+		"endpoint=gpu0,rnic=rnic0,signal=latency_p50": 0.05,
+		"endpoint=gpu0,rnic=rnic0,signal=latency_p99": 0.132,
+		"endpoint=gpu1,rnic=rnic0,signal=bandwidth":   0.05,
+		"endpoint=gpu1,rnic=rnic0,signal=latency_p50": 0.05,
+		"endpoint=gpu1,rnic=rnic0,signal=latency_p99": 0.05,
+	}
+	if got := gaugeFloat(t, ms, "hostping.path.drift.threshold_ratio"); !maps.Equal(got, want) {
+		t.Fatalf("path.drift.threshold_ratio = %v, want %v", got, want)
+	}
 }
 
 // A path that becomes unknown again says so in its status and reason; its
@@ -58,7 +72,7 @@ func TestRecordDriftUnknownKeepsNoFalseChange(t *testing.T) {
 	// A stale reason on a judged path and stale changes on an unknown one
 	// are not exported.
 	later[0] = model.PathDrift{RNIC: "rnic0", Endpoint: "gpu0", Reason: model.DriftFewRecentDays, Changes: later[0].Changes}
-	later[0].Changes[0].Change = 0.5
+	later[0].Changes[0].Change, later[0].Changes[0].Threshold = 0.5, 0.9
 	later[1].Reason = model.DriftClockBehind
 	tel.RecordDrift(ctx, later)
 	ms := collect(t, reader)
@@ -72,6 +86,9 @@ func TestRecordDriftUnknownKeepsNoFalseChange(t *testing.T) {
 	if got := gaugeFloat(t, ms, "hostping.path.drift.change_ratio")["endpoint=gpu0,rnic=rnic0,signal=bandwidth"]; got != 0.071 {
 		t.Fatalf("change of the unknown path = %v, want its last judged 0.071", got)
 	}
+	if got := gaugeFloat(t, ms, "hostping.path.drift.threshold_ratio")["endpoint=gpu0,rnic=rnic0,signal=bandwidth"]; got != 0.05 {
+		t.Fatalf("threshold of the unknown path = %v, want its last judged 0.05", got)
+	}
 }
 
 // Without --drift-tracking nothing is recorded, and no drift series exists.
@@ -82,7 +99,7 @@ func TestNoDriftSeriesWithoutTracking(t *testing.T) {
 	var nilTel *Telemetry
 	nilTel.RecordDrift(context.Background(), driftPaths())
 	ms := collect(t, reader)
-	for _, name := range []string{"hostping.path.drift.status_code", "hostping.path.drift.reason_code", "hostping.path.drift.change_ratio"} {
+	for _, name := range []string{"hostping.path.drift.status_code", "hostping.path.drift.reason_code", "hostping.path.drift.change_ratio", "hostping.path.drift.threshold_ratio"} {
 		if _, ok := ms[name]; ok {
 			t.Errorf("%s exported without a tracked path", name)
 		}

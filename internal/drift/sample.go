@@ -3,15 +3,43 @@ package drift
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yuuki/hostping/internal/model"
 	"github.com/yuuki/hostping/internal/topology"
 )
 
-// Paths names every path of g to the tracker, in graph order, together with
-// the key of each RNIC (the firmware map's keys, see RNICKey).
+// Probe is the probe settings that decide what a reading measures: the two
+// message sizes, of which Eq.1 makes the bandwidth and the small one of
+// which is what the latency is the latency of, the iterations the p50 and
+// p99 are drawn from, and the memory warm-up, which changes what a memory
+// path reads. A reference taken with other settings is not a reference for
+// today's readings, so a path whose settings changed starts over (see
+// PathHistory.Probe).
+type Probe struct {
+	SmallMsgBytes uint32
+	LargeMsgBytes uint32
+	Iters         uint32
+	MemWarmup     time.Duration
+}
+
+// For spells the settings that apply to an endpoint of the given kind. The
+// memory warm-up applies to memory endpoints only, so that changing it
+// leaves the GPU paths their history.
+func (p Probe) For(kind model.EndpointKind) string {
+	s := fmt.Sprintf("small_msg=%d large_msg=%d iters=%d", p.SmallMsgBytes, p.LargeMsgBytes, p.Iters)
+	if kind == model.EndpointMemory {
+		s += " mem_warmup=" + p.MemWarmup.String()
+	}
+	return s
+}
+
+// Paths names every path of g to the tracker, in graph order, as read with
+// the probe settings probe, together with the key of each RNIC (the firmware
+// map's keys, see RNICKey).
 //
 // A path is keyed by what it physically is, not by its RNIC and endpoint IDs:
 // those are positions in the sorted device lists, so adding, removing or
@@ -22,7 +50,7 @@ import (
 // route class changes starts a new history. Two paths that would share a key
 // (a hand-written topology that repeats a PCI address) are told apart by
 // their IDs.
-func Paths(g topology.Graph) (paths []PathIdent, rnicKeys []string) {
+func Paths(g topology.Graph, probe Probe) (paths []PathIdent, rnicKeys []string) {
 	seen := map[string]bool{}
 	for _, n := range g.RNICs {
 		rnicKeys = append(rnicKeys, RNICKey(n))
@@ -44,7 +72,7 @@ func Paths(g topology.Graph) (paths []PathIdent, rnicKeys []string) {
 			key = bound(key + "#" + p.RNIC + "->" + p.Endpoint)
 		}
 		seen[key] = true
-		paths = append(paths, PathIdent{RNIC: p.RNIC, Endpoint: p.Endpoint, Key: key, EndpointSensor: e.Kind == model.EndpointGPU})
+		paths = append(paths, PathIdent{RNIC: p.RNIC, Endpoint: p.Endpoint, Key: key, Probe: probe.For(e.Kind), EndpointSensor: e.Kind == model.EndpointGPU})
 	}
 	return paths, rnicKeys
 }

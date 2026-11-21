@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func history(t *testing.T) File {
 		if i >= 12 {
 			level = 0.9
 		}
-		sw := Software{Kernel: "6.8.0-45-generic", Firmware: map[string]string{"0000:17:00.0": "28.39.1002"}}
+		sw := Software{Kernel: "6.8.0-45-generic", Hostping: "0.2.6", Firmware: map[string]string{"0000:17:00.0": "28.39.1002"}}
 		if i >= 12 {
 			sw.Kernel = "6.8.0-48-generic"
 		}
@@ -84,23 +85,52 @@ func TestStoreRoundTrip(t *testing.T) {
 // place and never read as an empty history that silently replaces it.
 func TestStoreSetsUnusableFileAside(t *testing.T) {
 	good, _ := Marshal(history(t))
+	day := func(d int, bw string) string {
+		return `{"day": ` + strconv.Itoa(d) + `, "n": 1, "bw": ` + bw + `, "p50": 1, "p99": 1}`
+	}
+	path := func(body string) string {
+		return `{"version": 1, "last_day": 9, "paths": {"k": {"probe": "", ` + body + `}}}`
+	}
+	const ref = `"reference": {"from": 1, "to": 7, "bw": 1, "p50": 1, "p99": 1}`
 	cases := map[string]string{
-		"truncated":       string(good[:len(good)/2]),
-		"empty":           "",
-		"not json":        "hello\n",
-		"another tool's":  `{"version": 1, "paths": {}, "owner": "something else"}`,
-		"version 0":       `{"version": 0, "paths": {}}`,
-		"no version":      `{"paths": {}}`,
-		"trailing data":   string(good) + "{}",
-		"negative day":    `{"version": 1, "paths": {"k": {"first_seen": -1, "last_seen": 0}}}`,
-		"days unordered":  `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "days": [{"day": 5, "n": 1, "bw": 1, "p50": 1, "p99": 1}, {"day": 4, "n": 1, "bw": 1, "p50": 1, "p99": 1}]}}}`,
-		"zero bandwidth":  `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "days": [{"day": 5, "n": 1, "bw": 0, "p50": 1, "p99": 1}]}}}`,
-		"huge number":     `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "days": [{"day": 5, "n": 1, "bw": 1e999, "p50": 1, "p99": 1}]}}}`,
-		"null path":       `{"version": 1, "paths": {"k": null}}`,
-		"verdict, no ref": `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "drifted": {"bandwidth": 5}}}}`,
-		"unknown signal":  `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "reference": {"from": 1, "to": 7, "bw": 1, "p50": 1, "p99": 1, "bw_spread": 0, "p50_spread": 0, "p99_spread": 0}, "drifted": {"jitter": 5}}}}`,
-		"stride not 2^n":  `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "open": {"day": 9, "seen": 3, "stride": 3, "samples": [{"bw": 1, "p50": 1, "p99": 1}]}}}}`,
-		"open, no sample": `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9, "open": {"day": 9, "seen": 1, "stride": 1, "samples": []}}}}`,
+		"truncated":      string(good[:len(good)/2]),
+		"empty":          "",
+		"not json":       "hello\n",
+		"another tool's": `{"version": 1, "paths": {}, "owner": "something else"}`,
+		"version 0":      `{"version": 0, "paths": {}}`,
+		"no version":     `{"paths": {}}`,
+		"trailing data":  string(good) + "{}",
+		"null path":      `{"version": 1, "paths": {"k": null}}`,
+		// A field of an earlier shape of this file is another file.
+		"field of another shape": `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9}}}`,
+		"negative last day":      `{"version": 1, "last_day": -1, "paths": {}}`,
+		"negative absent":        path(`"absent": -1`),
+		"negative day":           path(`"days": [` + day(-1, "1") + `]`),
+		"days unordered":         path(`"days": [` + day(5, "1") + `, ` + day(4, "1") + `]`),
+		"a day twice":            path(`"days": [` + day(5, "1") + `, ` + day(5, "1") + `]`),
+		"zero bandwidth":         path(`"days": [` + day(5, "0") + `]`),
+		"huge number":            path(`"days": [` + day(5, "1e999") + `]`),
+		// A value no probe reads: a change against it would not be a number
+		// a report can carry.
+		"denormal bandwidth":       path(`"days": [` + day(5, "1e-320") + `]`),
+		"bandwidth under 1 bit/s":  path(`"days": [` + day(5, "0.999") + `]`),
+		"bandwidth over 1e18":      path(`"days": [` + day(5, "1.01e18") + `]`),
+		"reference under 1":        path(`"reference": {"from": 1, "to": 7, "bw": 1e-320, "p50": 1, "p99": 1}`),
+		"reference ends first":     path(`"reference": {"from": 7, "to": 1, "bw": 1, "p50": 1, "p99": 1}`),
+		"verdict, no ref":          path(`"drifted": {"bandwidth": {"since": 5, "threshold": 0.05}}`),
+		"verdict of another shape": path(ref + `, "drifted": {"bandwidth": 5}`),
+		"unknown signal":           path(ref + `, "drifted": {"jitter": {"since": 5, "threshold": 0.05}}`),
+		"verdict, no threshold":    path(ref + `, "drifted": {"bandwidth": {"since": 5}}`),
+		"negative threshold":       path(ref + `, "drifted": {"bandwidth": {"since": 5, "threshold": -0.05}}`),
+		"threshold over 1e19":      path(ref + `, "drifted": {"bandwidth": {"since": 5, "threshold": 1e20}}`),
+		"stride not 2^n":           path(`"open": {"day": 9, "seen": 3, "stride": 3, "samples": [{"bw": 1, "p50": 1, "p99": 1}]}`),
+		"open, no sample":          path(`"open": {"day": 9, "seen": 1, "stride": 1, "samples": []}`),
+		"open day is a closed day": path(`"days": [` + day(9, "1") + `], "open": {"day": 9, "seen": 1, "stride": 1, "samples": [{"bw": 1, "p50": 1, "p99": 1}]}`),
+		"open day before the last": path(`"days": [` + day(9, "1") + `], "open": {"day": 8, "seen": 1, "stride": 1, "samples": [{"bw": 1, "p50": 1, "p99": 1}]}`),
+		"31 days":                  path(`"days": [` + manyDays(31) + `]`),
+		"too many events":          `{"version": 1, "paths": {}, "events": [` + manyEvents(4*(2048+2)+1) + `]}`,
+		"long version":             `{"version": 1, "paths": {}, "software": {"kernel": "` + strings.Repeat("k", 65) + `"}}`,
+		"long probe":               `{"version": 1, "paths": {"k": {"probe": "` + strings.Repeat("p", 257) + `"}}}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -128,6 +158,45 @@ func TestStoreSetsUnusableFileAside(t *testing.T) {
 				t.Fatalf("after the first save: status %v", status)
 			}
 		})
+	}
+}
+
+func manyDays(n int) string {
+	var days []string
+	for i := 0; i < n; i++ {
+		days = append(days, `{"day": `+strconv.Itoa(100+i)+`, "n": 1, "bw": 1, "p50": 1, "p99": 1}`)
+	}
+	return strings.Join(days, ", ")
+}
+
+func manyEvents(n int) string {
+	var events []string
+	for i := 0; i < n; i++ {
+		events = append(events, `{"day": 5, "component": "kernel", "from": "a", "to": "b"}`)
+	}
+	return strings.Join(events, ", ")
+}
+
+// The edges of what a history may hold are themselves accepted: the bounds
+// are the documented ones, not one short of them.
+func TestParseAcceptsTheBounds(t *testing.T) {
+	path := func(body string) string {
+		return `{"version": 1, "last_day": 9, "paths": {"k": {"probe": "", ` + body + `}}}`
+	}
+	for name, content := range map[string]string{
+		"1 bit/s and 1 ns":             path(`"days": [{"day": 5, "n": 1, "bw": 1, "p50": 1, "p99": 1}]`),
+		"1e18":                         path(`"days": [{"day": 5, "n": 1, "bw": 1e18, "p50": 1e18, "p99": 1e18}]`),
+		"30 days":                      path(`"days": [` + manyDays(30) + `]`),
+		"open day after the last":      path(`"days": [{"day": 8, "n": 1, "bw": 1, "p50": 1, "p99": 1}], "open": {"day": 9, "seen": 1, "stride": 1, "samples": [{"bw": 1, "p50": 1, "p99": 1}]}`),
+		"reference of one day":         path(`"reference": {"from": 7, "to": 7, "bw": 1, "p50": 1, "p99": 1}`),
+		"threshold 1e19":               path(`"reference": {"from": 1, "to": 7, "bw": 1, "p50": 1, "p99": 1}, "drifted": {"latency_p99": {"since": 0, "threshold": 1e19}}`),
+		"clock behind since":           `{"version": 1, "last_day": 9, "clock_behind_since": 4, "paths": {}}`,
+		"every event the bound allows": `{"version": 1, "paths": {}, "events": [` + manyEvents(4*(2048+2)) + `]}`,
+		"version of 64 bytes":          `{"version": 1, "paths": {}, "software": {"kernel": "` + strings.Repeat("k", 64) + `", "hostping": "0.2.6"}}`,
+	} {
+		if _, err := Parse([]byte(content)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
