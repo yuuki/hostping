@@ -3,6 +3,7 @@ package drift
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +299,17 @@ func TestStepChange(t *testing.T) {
 	// seven, so it comes with the run of the fifth day after the step.
 	if f.Since != "2026-03-25" {
 		t.Fatalf("since %s, want the fifth day at the new level", f.Since)
+	}
+	// The log says it once, on the day the verdict began, not with every
+	// run that still finds the signal drifted.
+	said := 0
+	for _, l := range s.logs {
+		if strings.Contains(l, "drifted: ") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Fatalf("the drift was logged %d times in 6 drifted runs, want once: %q", said, s.logs)
 	}
 }
 
@@ -646,6 +658,79 @@ func TestWindowCountsDaysNotTheCalendar(t *testing.T) {
 	}
 	if h.Ref == nil || h.Ref.From != dayOf(start) || h.Ref.To != dayOf(start)+7*6 {
 		t.Fatalf("reference = %+v, want the first 7 values, a week apart", h.Ref)
+	}
+}
+
+// A reading the history could not hold is not taken: the tracker never
+// writes a file it would reject on the next start.
+func TestUnusableReadingIsNotTaken(t *testing.T) {
+	nan := math.NaN()
+	hot := 5000.0
+	for name, r := range map[string]Reading{
+		"no bandwidth":              {BandwidthBPS: 0, LatP50Ns: baseP50, LatP99Ns: baseP99},
+		"bandwidth below 1 bit/s":   {BandwidthBPS: 0.5, LatP50Ns: baseP50, LatP99Ns: baseP99},
+		"latency that is no number": {BandwidthBPS: baseBW, LatP50Ns: nan, LatP99Ns: baseP99},
+		"latency beyond 1e18":       {BandwidthBPS: baseBW, LatP50Ns: baseP50, LatP99Ns: 2e18},
+		"temperature of 5000":       {BandwidthBPS: baseBW, LatP50Ns: baseP50, LatP99Ns: baseP99, TempRNIC: &hot},
+	} {
+		s := newSeries(t)
+		s.observe(&r, Software{}) // checks that the history still loads
+		if h := s.tr.File().Paths[gpuPath.Key]; h.Open != nil {
+			t.Errorf("%s: the reading was taken: %+v", name, h.Open)
+		}
+	}
+}
+
+// The counters of the open day stop at their bounds instead of running
+// past what the file accepts.
+func TestOpenDayCountersAreBounded(t *testing.T) {
+	r := Reading{BandwidthBPS: baseBW, LatP50Ns: baseP50, LatP99Ns: baseP99}
+	h := &PathHistory{Open: &OpenDay{Day: 100, Seen: 1 << 30, Stride: 1 << 20, Samples: []Reading{r}}}
+	h.add(100, r)
+	if h.Open.Seen != 1<<30 {
+		t.Fatalf("seen = %d, want it held at 2^30", h.Open.Seen)
+	}
+	// A day at the largest stride that fills up keeps its 16 readings: the
+	// stride cannot double again.
+	full := &PathHistory{Open: &OpenDay{Day: 100, Seen: 15 << 20, Stride: 1 << 20, Samples: make([]Reading, 15)}}
+	for i := range full.Open.Samples {
+		full.Open.Samples[i] = r
+	}
+	full.add(100, r)
+	if o := full.Open; o.Stride != 1<<20 || len(o.Samples) != 16 {
+		t.Fatalf("stride %d with %d samples, want 2^20 with 16", o.Stride, len(o.Samples))
+	}
+	for _, h := range []*PathHistory{h, full} {
+		if err := h.validate(); err != nil {
+			t.Fatalf("the open day is not one the file accepts: %v", err)
+		}
+	}
+}
+
+// A day number stays inside what the history holds whatever the clock
+// reads.
+func TestDayOf(t *testing.T) {
+	for _, c := range []struct {
+		at   time.Time
+		want int
+	}{
+		{time.Unix(0, 0), 0},
+		{time.Unix(86399, 0), 0},
+		{time.Unix(86400, 0), 1},
+		{time.Unix(-1, 0), 0},
+		{time.Unix(-10*86400, 0), 0},
+		{time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC), 0},
+		{start, 20513},
+		{time.Unix(4194304*86400, 0), 4194304},
+		{time.Unix(4194305*86400, 0), 4194304},
+		{time.Unix(1<<62, 0), 4194304},
+	} {
+		if got := dayOf(c.at); got != c.want {
+			t.Errorf("dayOf(%v) = %d, want %d", c.at.Unix(), got, c.want)
+		}
+	}
+	if got := dateOf(20513); got != "2026-03-01" {
+		t.Errorf("dateOf(20513) = %s", got)
 	}
 }
 

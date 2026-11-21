@@ -102,14 +102,23 @@ func TestStoreSetsUnusableFileAside(t *testing.T) {
 		"trailing data":  string(good) + "{}",
 		"null path":      `{"version": 1, "paths": {"k": null}}`,
 		// A field of an earlier shape of this file is another file.
-		"field of another shape": `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9}}}`,
-		"negative last day":      `{"version": 1, "last_day": -1, "paths": {}}`,
-		"negative absent":        path(`"absent": -1`),
-		"negative day":           path(`"days": [` + day(-1, "1") + `]`),
-		"days unordered":         path(`"days": [` + day(5, "1") + `, ` + day(4, "1") + `]`),
-		"a day twice":            path(`"days": [` + day(5, "1") + `, ` + day(5, "1") + `]`),
-		"zero bandwidth":         path(`"days": [` + day(5, "0") + `]`),
-		"huge number":            path(`"days": [` + day(5, "1e999") + `]`),
+		"field of another shape":  `{"version": 1, "paths": {"k": {"first_seen": 1, "last_seen": 9}}}`,
+		"negative last day":       `{"version": 1, "last_day": -1, "paths": {}}`,
+		"clock behind since -1":   `{"version": 1, "clock_behind_since": -1, "paths": {}}`,
+		"clock behind since far":  `{"version": 1, "clock_behind_since": 4194305, "paths": {}}`,
+		"last day too far":        `{"version": 1, "last_day": 4194305, "paths": {}}`,
+		"event on a negative day": `{"version": 1, "paths": {}, "events": [{"day": -1, "component": "kernel", "from": "a", "to": "b"}]}`,
+		"negative absent":         path(`"absent": -1`),
+		"a day without a run":     path(`"days": [{"day": 5, "n": 0, "bw": 1, "p50": 1, "p99": 1}]`),
+		"temperature of 5000":     path(`"days": [{"day": 5, "n": 1, "bw": 1, "p50": 1, "p99": 1, "t_rnic": 5000}]`),
+		"endpoint at -101":        path(`"days": [{"day": 5, "n": 1, "bw": 1, "p50": 1, "p99": 1, "t_ep": -101}]`),
+		"drifted since day -1":    path(ref + `, "drifted": {"bandwidth": {"since": -1, "threshold": 0.05}}`),
+		"2049 paths":              `{"version": 1, "paths": {` + manyPaths(2049) + `}}`,
+		"negative day":            path(`"days": [` + day(-1, "1") + `]`),
+		"days unordered":          path(`"days": [` + day(5, "1") + `, ` + day(4, "1") + `]`),
+		"a day twice":             path(`"days": [` + day(5, "1") + `, ` + day(5, "1") + `]`),
+		"zero bandwidth":          path(`"days": [` + day(5, "0") + `]`),
+		"huge number":             path(`"days": [` + day(5, "1e999") + `]`),
 		// A value no probe reads: a change against it would not be a number
 		// a report can carry.
 		"denormal bandwidth":       path(`"days": [` + day(5, "1e-320") + `]`),
@@ -169,6 +178,14 @@ func manyDays(n int) string {
 	return strings.Join(days, ", ")
 }
 
+func manyPaths(n int) string {
+	var paths []string
+	for i := 0; i < n; i++ {
+		paths = append(paths, `"k`+strconv.Itoa(i)+`": {"probe": ""}`)
+	}
+	return strings.Join(paths, ", ")
+}
+
 func manyEvents(n int) string {
 	var events []string
 	for i := 0; i < n; i++ {
@@ -191,6 +208,9 @@ func TestParseAcceptsTheBounds(t *testing.T) {
 		"reference of one day":         path(`"reference": {"from": 7, "to": 7, "bw": 1, "p50": 1, "p99": 1}`),
 		"threshold 1e19":               path(`"reference": {"from": 1, "to": 7, "bw": 1, "p50": 1, "p99": 1}, "drifted": {"latency_p99": {"since": 0, "threshold": 1e19}}`),
 		"clock behind since":           `{"version": 1, "last_day": 9, "clock_behind_since": 4, "paths": {}}`,
+		"the last day there is":        `{"version": 1, "last_day": 4194304, "clock_behind_since": 4194304, "paths": {}}`,
+		"2048 paths":                   `{"version": 1, "paths": {` + manyPaths(2048) + `}}`,
+		"temperatures at the bounds":   path(`"days": [{"day": 5, "n": 1, "bw": 1, "p50": 1, "p99": 1, "t_rnic": -100, "t_ep": 1000}]`),
 		"every event the bound allows": `{"version": 1, "paths": {}, "events": [` + manyEvents(4*(2048+2)) + `]}`,
 		"version of 64 bytes":          `{"version": 1, "paths": {}, "software": {"kernel": "` + strings.Repeat("k", 64) + `", "hostping": "0.2.6"}}`,
 	} {

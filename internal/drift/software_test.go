@@ -132,7 +132,8 @@ func TestSoftwareChanges(t *testing.T) {
 	if len(s.res.Summary.SoftwareChanges) != 0 {
 		t.Fatalf("a report without a finding names software changes: %+v", s.res.Summary.SoftwareChanges)
 	}
-	next := Software{Kernel: "6.8.0-48-generic\n", Hostping: "0.2.6", Firmware: map[string]string{"0000:17:00.0": "28.41.1000"}}
+	// Only the first line of what was read is a version.
+	next := Software{Kernel: "6.8.0-48-generic\nSMP PREEMPT_DYNAMIC\n", Hostping: "0.2.6", Firmware: map[string]string{"0000:17:00.0": "28.41.1000"}}
 	for i := 0; i < 10; i++ {
 		run(0.92, next)
 	}
@@ -170,6 +171,39 @@ func TestSoftwareChanges(t *testing.T) {
 	}
 	if got := s.tr.softwareSince(dayOf(start) + 1); len(got) != 4 {
 		t.Fatalf("changes since the day of the first: %+v", got)
+	}
+}
+
+// A report names the software changes since the oldest reference behind one
+// of its findings, whichever path that is.
+func TestSoftwareChangesSinceTheOldestReference(t *testing.T) {
+	tr := New(testTh, []PathIdent{gpuPath, memPath}, nil, File{})
+	now := start
+	var res Result
+	for d := 0; d < 30; d++ {
+		level, kernel := 1.0, "6.8.0-45-generic"
+		if d >= 2 {
+			kernel = "6.8.0-48-generic" // after the memory path's reference began
+		}
+		if d >= 18 {
+			level = 0.9
+		}
+		// The memory path is read from the first day, the GPU path from the
+		// sixth: its reference begins after the kernel change.
+		samples := []Sample{{RNIC: "rnic0", Endpoint: "mem0", Reading: *reading(level)}}
+		if d >= 5 {
+			samples = append(samples, Sample{RNIC: "rnic0", Endpoint: "gpu0", Reading: *reading(level)})
+		}
+		res = tr.Observe(now, samples, Software{Kernel: kernel})
+		now = now.Add(24 * time.Hour)
+	}
+	// The GPU path comes first in the report and has the later reference.
+	f := res.Summary.Findings
+	if res.Summary.Drifted != 2 || len(f) != 2 || f[0].Endpoint != "gpu0" || f[0].ReferenceFrom != "2026-03-06" || f[1].ReferenceFrom != "2026-03-01" {
+		t.Fatalf("summary = %+v, want both paths drifted, the GPU path first, against references of different days", res.Summary)
+	}
+	if sw := res.Summary.SoftwareChanges; len(sw) != 1 || sw[0].On != "2026-03-03" || sw[0].Component != "kernel" {
+		t.Fatalf("software changes = %+v, want the kernel change that followed the older reference", sw)
 	}
 }
 
