@@ -774,6 +774,27 @@ func TestThresholdIsTheTrackers(t *testing.T) {
 		!strings.Contains(res.Logs[0], "is no longer counted as drifted, with the threshold now at 20.0%") {
 		t.Fatalf("logs = %q, want a line that does not call it a recovery", res.Logs)
 	}
+	// "Recovered" is said of a change that is back inside half the threshold
+	// the signal drifted at, 2.5% here, and not of one that is exactly there.
+	for _, c := range []struct {
+		level     float64
+		recovered bool
+	}{{0.975, false}, {0.976, true}} {
+		// Two of the recent seven days still read 7% low, which holds the
+		// verdict at the 5% threshold, and the other five are at the level.
+		q := newSeries(t)
+		q.days(12, flat)
+		q.days(10, func(int) float64 { return 0.93 })
+		q.days(6, func(int) float64 { return c.level })
+		if q.last.Status != model.DriftDrifted {
+			t.Fatalf("at %.1f%% of the reference: %s, want the verdict held at a 5%% threshold", c.level*100, q.last.Status)
+		}
+		// Later on the day of the last run, with the threshold raised.
+		res := New(0.20, []PathIdent{gpuPath}, nil, reload(t, q.tr.File())).Observe(q.now.Add(-13*time.Hour), nil, Software{})
+		if len(res.Logs) != 1 || strings.Contains(res.Logs[0], "recovered") != c.recovered {
+			t.Errorf("at %.1f%% of the reference: logs = %q, want recovered: %v", c.level*100, res.Logs, c.recovered)
+		}
+	}
 	// A lower threshold does not let a drifted signal go more easily than
 	// the one it drifted at.
 	tight := New(0.02, []PathIdent{gpuPath}, nil, reload(t, s.tr.File()))

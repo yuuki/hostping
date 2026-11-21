@@ -161,8 +161,11 @@ func Samples(rep model.Report, temps map[string]float64) []Sample {
 // the sweep reading the history would store is the one the recheck
 // overruled or confirmed as faulty), a latency the recheck or the locality
 // check cleared (the sweep reading was high for the time or the NUMA node it
-// was taken in), and a path that is uncertain for a reason other than the
-// steady states of a healthy idle host.
+// was taken in), and a path that is uncertain because of the state it was
+// measured in (host_shift, cpu_busy, rnic_busy, no_path). A path that is
+// uncertain only because a baseline alone does not prove it healthy
+// (non_affinitive, below_ceiling, no_ceiling) met its baseline, and its
+// reading is as good as a normal path's.
 func Clean(p model.PathMeasurement) bool {
 	if !valueOK(float64(p.BandwidthBPS)) || !valueOK(float64(p.SmallLatNsP50)) || !valueOK(float64(p.SmallLatNsP99)) {
 		return false

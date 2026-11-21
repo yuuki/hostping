@@ -37,7 +37,7 @@ func TestTemperature(t *testing.T) {
 		{"gpu hotter", gpuPath, [2]float64{55, 60}, [2]float64{56, 71}, model.DriftTempRose, "", 2},
 		{"both steady", gpuPath, [2]float64{55, 60}, [2]float64{57, 63}, model.DriftTempSteady, "", 2},
 		{"exactly 5 degrees hotter", gpuPath, [2]float64{55, 60}, [2]float64{55, 65}, model.DriftTempRose, "", 2},
-		{"just under 5 degrees hotter", gpuPath, [2]float64{55, 60}, [2]float64{55, 64.9}, model.DriftTempSteady, "", 2},
+		{"just under 5 degrees hotter", gpuPath, [2]float64{55, 60}, [2]float64{55, 64.99}, model.DriftTempSteady, "", 2},
 		{"rnic hotter, gpu unread", gpuPath, [2]float64{55, 0}, [2]float64{62, 0}, model.DriftTempRose, "", 1},
 		{"rnic steady, gpu unread", gpuPath, [2]float64{55, 0}, [2]float64{56, 0}, model.DriftTempUnknown, "gpu0: no_sensor", 1},
 		{"sensor appeared later", gpuPath, [2]float64{0, 60}, [2]float64{70, 61}, model.DriftTempUnknown, "rnic0: no_reference_reading", 1},

@@ -62,6 +62,15 @@ func TestShapeBoundaries(t *testing.T) {
 	if got, _ := shapeOf(p50, over, 1000); got != model.DriftShapeGradual {
 		t.Errorf("a statistic of 2.504: %s, want gradual", got)
 	}
+	// Eleven distinct values have a variance of 165. With 12 of the 55 pairs
+	// falling the statistic is (31-1)/sqrt(165) = 2.3355, just over 2.326.
+	justOver := []float64{4, 3, 2, 1, 8, 7, 6, 5, 9, 10, 11}
+	if z := mannKendallZ(justOver); z < 2.3354 || z > 2.3356 {
+		t.Fatalf("statistic %v, want 2.3355", z)
+	}
+	if got, _ := shapeOf(p50, p50Days(justOver...), 1000); got != model.DriftShapeGradual {
+		t.Errorf("a statistic of 2.3355: %s, want gradual", got)
+	}
 
 	// A falling latency is no trend to the worse.
 	if got, _ := shapeOf(p50, p50Days(10, 9, 8, 7, 6, 5, 4, 3, 2, 1), 1000); got != model.DriftShapeSustained {
