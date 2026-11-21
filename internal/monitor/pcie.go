@@ -161,6 +161,10 @@ type pcieLinkTrack struct {
 	// unjudged is why the link's rate had no budget when that was last
 	// logged, "" while it has one, so each reason is logged once.
 	unjudged string
+	// sinceLog counts the judged windows since the link's finding was last
+	// logged, so a suspect that keeps going over the budget is logged again
+	// once per model.PCIeRecentWindows.
+	sinceLog int
 }
 
 // pcieWindowCount is one judged window of a link: what its worse end
@@ -438,6 +442,17 @@ func (w *pcieWatch) closeWindow(now time.Time, s PCIeLinkSample, t *pcieLinkTrac
 			ended = fmt.Sprintf("no uncorrectable link error in the last %d windows", model.PCIeSustainWindows)
 		}
 		w.logState(s.Link, before, t.finding, ended)
+		t.sinceLog = 0
+		return
+	}
+	// A suspect names no cause, so the log is all an operator sees of a
+	// link that stays one: bursts too far apart for a verdict, or a rate
+	// that hovers at the budget. It is logged again when it goes over the
+	// budget once more, at most once per the windows it looks back over.
+	t.sinceLog++
+	if state == model.PCIeLinkSuspect && t.sinceLog >= model.PCIeRecentWindows && len(t.recent) > 0 && t.recent[len(t.recent)-1].over {
+		w.logf("hostping: pcie: %s: %s (%s): still a hint, no verdict", s.Link, state, t.finding.Evidence())
+		t.sinceLog = 0
 	}
 }
 

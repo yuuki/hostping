@@ -462,9 +462,9 @@ A suspect or sustained finding ends when none of the last 30 windows was over th
 
 What this rule does not catch:
 
-- **Bursts further apart than about a quarter of an hour.** Fewer than three of them fall into 30 windows. The link stays a suspect, in the log once, in `pcie_links`, and on `hostping.pcie.link.errors`, where a rate over a longer range shows it. Looking back further would catch it and would also let three unrelated events of a day make a verdict.
+- **Bursts further apart than about a quarter of an hour.** Fewer than three of them fall into 30 windows. The link stays a suspect: in `pcie_links`, on `hostping.pcie.link.errors`, where a rate over a longer range shows it, and in the log. A suspect is logged when it begins and again when it goes over the budget 30 windows or more after it was last logged, so such a link leaves a line about every half hour instead of one for good. Looking back further would catch it and would also let three unrelated events of a day make a verdict.
 - **Two bursts.** Whatever their size, they are a hint.
-- **A link that is over the budget three separate times while its errors stay within the budget overall.** That is the chance case above, and a real but mild fault looks the same.
+- **A link that is over the budget three separate times while its errors stay within the budget overall.** That is the chance case above, and a real but mild fault looks the same. It is a suspect that is logged again in the same way.
 
 With `--pcie-interval` above a minute the windows are longer, and so is everything counted in windows: at `10m` a finding looks back over five hours.
 

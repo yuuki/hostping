@@ -372,6 +372,17 @@ func TestPCIeWatchBurstsThatAreNoVerdict(t *testing.T) {
 	if f := s.last.Findings[0]; f.OverBudgetRuns != 3 || math.Abs(f.RecentErrorsPerMinute-1.7) > 1e-9 {
 		t.Fatalf("finding %+v, want 3 times over the budget at 1.7 errors a minute", f)
 	}
+	// A suspect names no cause, so the log is where it shows: once when it
+	// begins, and again when it is over the budget 30 windows or more after
+	// it was last logged.
+	if len(s.logs) != 8 || !strings.Contains(s.logs[0], "pcie.rnic0: suspect (") || !strings.HasSuffix(s.logs[0], "a hint, no verdict yet") {
+		t.Fatalf("log of four hours %q, want the hint and its seven repeats, one per 30 windows", s.logs)
+	}
+	for _, l := range s.logs[1:] {
+		if !strings.Contains(l, "over the budget in 3 of the last 30 windows (3 separate times, at most 1 in a row), 2/min across them") || !strings.HasSuffix(l, ": still a hint, no verdict") {
+			t.Fatalf("repeat %q", l)
+		}
+	}
 
 	// A large burst every 15 minutes: two in any 30 windows.
 	s = newLinkScript(t, 1e-12)
@@ -385,8 +396,8 @@ func TestPCIeWatchBurstsThatAreNoVerdict(t *testing.T) {
 			t.Fatalf("window %d: state %q, want suspect: %+v", i+1, s.state(), s.last.Findings)
 		}
 	}
-	if len(s.logs) != 1 {
-		t.Fatalf("log %q, want the one hint", s.logs)
+	if len(s.logs) != 8 {
+		t.Fatalf("log %q, want the hint and one repeat per 30 windows: 8 lines in four hours", s.logs)
 	}
 }
 
